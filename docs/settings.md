@@ -27,6 +27,7 @@ drops the space's own, and it inherits again. A few settings are one for every s
 | Agents | Instructions (assistant.md, worker.md, reviewer.md) | Everywhere only | Repo rules belong in the repo's AGENTS.md or CLAUDE.md, which every agent there reads |
 | Tasks | Merge, Review, Must fix, Proof | Everywhere, space | How much care a repo needs differs |
 | Tasks | Accept when ready (new tasks are accepted, merged first, once Ready; off) | Everywhere, space | The person trusts one space's work to land by itself |
+| Tasks | Delivery (Merge or Open PR; Open PR's Approval before handoff, Assign PR to, Next step) | Everywhere, space | One repo merges, another hands its pull requests to a person |
 | Tasks | Tasks at once | Everywhere, space | It counts per folder already |
 | Tasks | Archive Done after | Everywhere, space | Some repos keep done work in view longer |
 | Tasks | Worktrees | Everywhere, space | A folder that isn't a repo, or one that can't take worktrees |
@@ -64,6 +65,29 @@ task values a machine set before (the old machine scope) still apply there until
   scheduled) and kept on the task (`accept_default`), so changing the setting only touches tasks added after. On, the
   task gets the same per-task Accept when ready as its menu's (SHEP-3), which its menu or `herdr-task auto-accept <id>
   --off` turns off for that one task; `herdr-task add --no-auto-accept` adds one without it.
+- `tasks.delivery` (Delivery, SHEP-7): what Ready leads to, a space's default for its tasks, read by the space's own id
+  (never its folder), else Everywhere's, else `merge`. `merge`: as before, Merge says who merges. `open_pr`: its
+  pull request is handed to the person and never merged by Herdr (Merge, Accept when ready and `herdr-task merge` don't
+  apply), with `tasks.pr_assign` (GitHub logins it is assigned to: added, nobody taken off), `tasks.pr_review` (`none`
+  or `jarbas-local`: the approval of the pull request's exact head it waits for) and `tasks.pr_next` (the next step its
+  card names). Decided at a task's first brief and kept on it (`brief_delivery`), so a change only touches tasks briefed
+  after, and a task briefed before profiles keeps merging; its own `--set delivery=…`, `delivery.assign=…`,
+  `delivery.review=…`, `delivery.next=…` win. Its brief's Settings block has a Delivery line, and its Merge line says
+  never. How it runs:
+  - `herdr-task ready` pushes the branch, opens (or keeps) its pull request and assigns it, then reads the approval on
+    GitHub itself (`herdr_task/delivery.py`). For `jarbas-local`: the `[Jarbas Local João] — **APPROVED**` comment the
+    installed jarbas-review-local skill publishes once per head, by the account gh is signed in with here, whose
+    marker names that exact head. Passing checks, an older head's approval, the LGTJarb label or another verdict are
+    never one. Without it, ready keeps the task Working and tells its agent to run `/jarbas-review local iterate` on
+    the pull request; a verdict other than APPROVED, or three tries without any, tell it to stop and hand off with
+    `ready --blocked "<why>"`. Herdr publishes no review, requests no reviewer and messages nobody.
+  - Ready, the row says *Handed off · PR #n*; the card's Hand-off section shows the pull request, the approval for its
+    exact head (or that it moved since, or why it's blocked), who it's assigned to and what's next, beside Try it's
+    ephemeral environment for a Roboflow PR. Its button is *Take it, no merge*: the pull request is read again (closed,
+    or moved past what was handed off, is refused) and the task is done, not merged; its worktree goes only when
+    everything in it is on that pull request.
+  - Accept when ready never takes a hand-off: a space's default doesn't arm it, the menu doesn't offer it, and
+    `herdr-task auto-accept` refuses it.
 - `tasks.worktree_root` (in `everywhere`, a machine's or a space's `tasks`; no row in the window yet): the folder new
   task worktrees go in, e.g. a bigger disk (`~` allowed). Unset: `~/.local/share/shepherdr/worktrees`. A task keeps
   the worktree it has.

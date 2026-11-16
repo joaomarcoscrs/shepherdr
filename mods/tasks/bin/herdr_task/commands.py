@@ -13,7 +13,7 @@ import time
 from . import sandbox
 from .base import Fail, git, guard, now, run, STORE, stop_note, VERSION
 from .settings import (
-    agent_argv, agent_key, auto_accept_default, bare, merge_policy, review_limits, set_opts, settings_block, settings_for, space_base,
+    agent_argv, agent_key, auto_accept_default, bare, delivery_for, delivery_of, merge_policy, open_pr, review_limits, set_opts, settings_block, settings_for, space_base,
     task_settings, worker_argv, worktrees_on,
 )
 from .agents import (
@@ -35,6 +35,7 @@ from .output import line, minutes, say, view
 from .scheduler import ensure_scheduler
 from .proof import evidence, find_proof
 from .when import when_from
+from .delivery import accept_check, handoff_gate, handoff_line, NO_MERGE
 
 
 # ---- commands -------------------------------------------------------------------------------
@@ -156,6 +157,9 @@ def space_accept(t, space, new=False):
         return True
     on, _ = auto_accept_default(space)
     t["accept_default"] = bare(space)
+    # SHEP-7: an Open PR task is handed to the person, never accepted by itself
+    if on and delivery_for(space, t)["mode"] == "open_pr":
+        on = False
     if on and not isinstance(t.get("auto_accept"), dict):
         t["auto_accept"] = {"at": now(), "by": "space"}
     return True
@@ -404,8 +408,11 @@ def ready_words(args):
 
 def cmd_ready(args):
     said, details = ready_words(args)
+    blocked = " ".join(str(getattr(args, "blocked", None) or "").split())
     with open_store(args) as s:
         t = s.find(args.id)
+        if blocked and not open_pr(t):
+            raise Fail(f"--blocked is for a task whose delivery is Open PR; {s.ref(t)} merges as Merge says.")
         me = os.environ.get("HC_TERMINAL_ID")
         if me and any(a["address"] == me for a in t["agents"]):
             refresh_sessions(s, t, [k for k in live_agents(s.key(t)) if k["address"] == me])
@@ -418,6 +425,10 @@ def cmd_ready(args):
             t["head"] = git(wt, "rev-parse", "HEAD")[1]
             own_work(s, t)
         refused = review_refusal(s, t, wt)
+        dv = delivery_of(t)
+        if not refused and dv["mode"] == "open_pr" and wt and os.path.isdir(wt) and not (t.get("start") and in_base(s, t)):
+            # SHEP-7: Open PR: its pull request opened and assigned, and its approval read for this exact head, first
+            refused = handoff_gate(s, t, dv, wt, said or t.get("summary"), blocked or None)
         if refused:
             # Kept (the task's line says why it waits); refused after the store is saved.
             s.dirty = True
@@ -783,6 +794,11 @@ def finalize(s, t):
         pr["wait"] = PR_CHECKS_RUNNING
         msg = (f"{s.ref(t)} is ready: pull request #{pr['number']}, {pr['url']}. It shows Working until its checks "
                "pass and GitHub says it can merge; a failing check or a conflict comes back to you to fix.")
+    if open_pr(t):
+        # SHEP-7: handed to the person, never merged (whatever Merge says): what's handed off, in one line
+        t.pop("auto_merge", None)
+        return (msg + f" Delivery is Open PR: handed off to the person ({handoff_line(t)}). Never merge it; the person "
+                "takes it from here.")
     policy = merge_policy(s, t)
     if policy in ("auto", "checks"):
         t["auto_merge"] = policy
@@ -853,7 +869,8 @@ def cmd_state(args, state):
             # SHEP-3: a Done task's auto-accept was used up: reopened, it waits for the person's Accept again.
             if t["state"] == "done":
                 t.pop("auto_accept", None)
-            for k in ("reviews", "review", "auto_merge", "merged", "nothing_to_merge", "accepted_at", "accepted_by", "merge_queued"):
+            for k in ("reviews", "review", "auto_merge", "merged", "nothing_to_merge", "accepted_at", "accepted_by", "merge_queued",
+                      "handoff", "handed_off"):
                 t.pop(k, None)
         if state == "done" and t.get("worktree") and merged_here(s, t):
             t["merged"] = True
@@ -1114,6 +1131,8 @@ def merge_now(s, t):
     couldn't, or None when it's merged (and the task done). A base branch with GitHub's merge
     queue (#742, #801, #802): the pull request joins the queue and the task stays Merging until
     GitHub merged it (the tick finishes it then, and deletes its branch there)."""
+    if open_pr(t):
+        return NO_MERGE  # SHEP-7: the one place Herdr merges a pull request: never for an Open PR task
     n, repo = str(t["pr"]["number"]), t["pr"]["repo"]
     v = pr_view(t)
     s.dirty = True
@@ -1193,6 +1212,8 @@ def cmd_merge(args):
         t = s.find(args.id)
         if t.get("mode") != "worktree" or not t.get("worktree"):
             raise Fail(f"{s.ref(t)} works in the folder itself; there is nothing to merge.")
+        if open_pr(t):
+            raise Fail(f"{s.ref(t)}: {NO_MERGE}")
         sent, started, how = None, False, "agent"
         if t.get("pr") or own_open_pr(s, t):
             # On GitHub: Herdr merges the pull request itself (squash), then tidies up here.
@@ -1288,6 +1309,30 @@ def accept_merge(s, t, args):
     if not wt:
         # Worked in the folder itself: nothing to merge.
         finish(s, t)
+    elif open_pr(t) and (t.get("handoff") or {}).get("pr"):
+        # SHEP-7: the person takes the hand-off: done, never merged. Its pull request read again first (closed, or moved
+        # past what was handed off: refused); its worktree goes only when everything in it is on that pull request.
+        error, merged = accept_check(s, t)
+        if error:
+            t.pop("accepted_at", None)
+            return how, error, sent, started
+        how = "handoff"
+        t["handed_off"] = now()
+        if merged:
+            t["merged"] = True
+        tip = branch_tip(s, t)
+        if merged or (tip and tip == (t.get("handoff") or {}).get("head")):
+            finish(s, t, even_if_busy=True)
+        else:
+            t["state"], t["done_at"] = "done", now()
+    elif open_pr(t) and not in_base(s, t):
+        if (t.get("handoff") or {}).get("blocked"):
+            # handed off blocked with no pull request (GitHub out of reach): the person's from here, never merged
+            how, t["handed_off"], t["state"], t["done_at"] = "handoff", now(), "done", now()
+            return how, None, sent, started
+        # Open PR with work of its own but no pull request handed off (an older ready): never merged here
+        t.pop("accepted_at", None)
+        return how, f"{s.ref(t)}: {NO_MERGE} Its agent runs ready again to open and hand off its pull request.", sent, started
     elif t.get("pr") or own_open_pr(s, t):
         how = "github"
         error = merge_now(s, t)
@@ -1374,6 +1419,11 @@ def cmd_auto_accept(args):
         else:
             if t["state"] == "done":
                 raise Fail(f"{s.ref(t)} is already done.")
+            if delivery_of(t)["mode"] == "open_pr" if (t.get("brief_delivery") or t.get("started")) else \
+                    delivery_for(t.get("space") or (t.get("queue") or {}).get("space")
+                                 or (t.get("accept_default") if t.get("accept_default") not in (PENDING_SPACE, OWN_CHOICE) else None), t)["mode"] == "open_pr":
+                raise Fail(f"{s.ref(t)}'s delivery is Open PR: it is handed to you with its pull request open, never "
+                           "accepted by itself.")
             if t["state"] == "ready" and (t.get("accepted_at") or 0) >= (t.get("ready_at") or 1):
                 raise Fail(f"{s.ref(t)} is already accepted: it merges by itself.")
             # On again re-arms it: a try that didn't go through is tried again at the next tick, if it is Ready.
@@ -1393,7 +1443,8 @@ def accepted_words(s, t, how, sent=None, started=False):
             "checks": f"{s.ref(t)} accepted: it merges once its checks pass.",
             "approval": f"{s.ref(t)} accepted: it merges once it's approved.",
             "queue": f"{s.ref(t)} accepted: pull request #{(t.get('pr') or {}).get('number')} is in GitHub's merge queue; done once GitHub merges it.",
-            "agent": f"{s.ref(t)} accepted: merge asked of {sent}" + (" (a new agent)" if started else "")}[how]
+            "agent": f"{s.ref(t)} accepted: merge asked of {sent}" + (" (a new agent)" if started else ""),
+            "handoff": f"{s.ref(t)}: handed off to you, not merged ({handoff_line(t)}); done."}[how]
 
 
 def cmd_fix(args):

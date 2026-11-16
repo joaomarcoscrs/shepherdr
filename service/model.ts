@@ -11,7 +11,7 @@ import { READ_LISTS, taskLists, fileIn } from "../core/tasklists.js";
 import * as T from "../core/tasks.js";
 import { isHelper, subagentsOf } from "../core/chat-view.js";
 // The core is plain JavaScript; its defaults read as narrow types to TypeScript.
-const { place, refOf, taskKey, autoPrefix, reportOf, secondLine, leftOf, queueReason, machineOf, autoAcceptOn, autoAcceptStopped } = T as any;
+const { place, refOf, taskKey, autoPrefix, reportOf, secondLine, leftOf, queueReason, machineOf, autoAcceptOn, autoAcceptStopped, openPr } = T as any;
 import * as S from "../core/spaces.js";
 const { spacesFromDoc, sidebarOf, assistantOf, isUnread, inOrder, byMachineOrder, machineOrderOf } = S as any;
 import * as N from "../core/notify.js";
@@ -274,6 +274,8 @@ export class Model {
         scheduled_for: task.state === "scheduled" ? task.scheduled_for ?? null : null,
         // Accept when ready (SHEP-3, herdr-task auto-accept): on until it is done; failed: why its try stopped
         auto_accept: autoAcceptOn(task) ? { failed: autoAcceptStopped(task) || null } : null,
+        // SHEP-7: its delivery is Open PR (handed off, never merged nor accepted by itself): its menu offers no Accept when ready
+        open_pr: openPr(task),
         started: task.started ?? null, ready_at: task.ready_at ?? null, done_at: task.done_at ?? null,
         summary: task.summary ?? null, details: task.details ?? null, pr: task.pr ?? null, prompt: String(task.prompt ?? "").slice(0, 500), why: p.why ?? null,
         worktree: task.worktree ?? list.folder, base: task.base ?? null, start: task.start ?? null, branch: task.branch ?? null,

@@ -251,7 +251,7 @@ function TaskActions({ task: t, close }: { task: Task; close: () => void }) {
     if (r?.ok === false) setError(r.error ?? "Couldn't schedule it.")
     else close()
   }
-  const items = (MN.taskMenu as (o: object) => MenuEntry[])({ pinned: !!t.pinned, status: t.archived ? null : t.status, autoAccept: !!t.autoAccept })
+  const items = (MN.taskMenu as (o: object) => MenuEntry[])({ pinned: !!t.pinned, status: t.archived ? null : t.status, autoAccept: !!t.autoAccept, openPr: !!t.openPr })
   // Accept when ready (SHEP-3): on or off at once; herdr-task's refusal shows under it, the menu kept open
   const toggleAuto = async () => {
     setBusy(true)

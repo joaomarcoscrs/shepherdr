@@ -267,3 +267,35 @@ test("Accept when ready (SHEP-5): off by default, a space's own by its id, inher
   expect(JSON.parse(readFileSync(file, "utf8")).spaces.spHQ?.tasks).toBeUndefined();
   expect(row(hq)).toMatchObject({ value: "Off", from: "Everywhere" });
 });
+
+test("Delivery (SHEP-7): Merge by default; a space's Open PR with its approval, assignees and next step", () => {
+  const s = new Settings();
+  s.start();
+  const robo = { id: "spRobo", name: "roboflow", machine: null, folder: "/srv/robo" };
+  const hq = { id: "spHQ", name: "joão HQ", machine: null, folder: "/srv/hq" };
+  const rows = (scope: any) => s.sections(null, [robo, hq]).find((x) => x.name === "Tasks" && x.level === (scope?.id ?? "all"))!.rows;
+  const row = (scope: any, key: string) => rows(scope).find((r) => r.key === key);
+  expect(row(null, "tasks.delivery")).toMatchObject({ label: "Delivery", value: "Merge", options: ["Merge", "Open PR"], hint: CORE.ABOUT["tasks.delivery"] });
+  // Open PR's own rows only while it is the delivery
+  expect(row(robo, "tasks.pr_review")).toBeUndefined();
+  expect(row(robo, "tasks.pr_assign")).toBeUndefined();
+  s.set("tasks.delivery", "Open PR", "spRobo", robo);
+  s.set("tasks.pr_review", "Jarbas Local", "spRobo", robo);
+  s.set("tasks.pr_assign", "@joao, joao", "spRobo", robo);
+  s.set("tasks.pr_next", "  Find a  human reviewer ", "spRobo", robo);
+  expect(() => s.set("tasks.pr_assign", "not a login!", "spRobo", robo)).toThrow(CORE.PR_ASSIGN.bad);
+  expect(() => s.set("tasks.delivery", "Deploy", "spRobo", robo)).toThrow();
+  const f = JSON.parse(readFileSync(file, "utf8"));
+  expect(f.spaces.spRobo.tasks).toMatchObject({ delivery: "open_pr", pr_review: "jarbas-local", pr_assign: "joao", pr_next: "Find a human reviewer" });
+  // joão HQ and Everywhere keep Merge
+  expect(f.spaces.spHQ?.tasks?.delivery).toBeUndefined();
+  expect(row(hq, "tasks.delivery")).toMatchObject({ value: "Merge", from: "Everywhere" });
+  expect(row(null, "tasks.delivery")).toMatchObject({ value: "Merge", others: [{ id: "spRobo", name: "roboflow" }] });
+  // the space's page, in its order: Delivery, Approval before handoff, Assign PR to, Next step, then Merge
+  expect(rows(robo).slice(0, 5).map((r) => r.key)).toEqual(["tasks.delivery", "tasks.pr_review", "tasks.pr_assign", "tasks.pr_next", "tasks.merge"]);
+  expect(row(robo, "tasks.pr_assign")).toMatchObject({ value: "joao", text: true, inherits: { from: "Everywhere" } });
+  // Reset: back to Everywhere's Merge, its Open PR rows gone again
+  for (const k of ["tasks.delivery", "tasks.pr_review", "tasks.pr_assign", "tasks.pr_next"]) s.set(k, null, "spRobo", robo);
+  expect(JSON.parse(readFileSync(file, "utf8")).spaces.spRobo?.tasks).toBeUndefined();
+  expect(row(robo, "tasks.pr_review")).toBeUndefined();
+});

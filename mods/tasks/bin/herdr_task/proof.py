@@ -10,6 +10,7 @@ import re
 from .base import Fail, HOME, git, WHERE
 from .ephemeral import applies, ephemeral_of
 from .github import BAD, CANT_READ_CHECKS, PENDING, pr_view
+from .settings import open_pr
 
 ARTIFACTS = WHERE.path("artifacts")
 # Files named on the card, and commits.
@@ -108,6 +109,15 @@ def evidence(s, t):
     if isinstance(aa, dict):
         out["auto_accept"] = {"on": True, **({"failed": aa["failed"]} if aa.get("failed") else {})}
     out["artifacts"] = task_artifacts(s, t, out["proof"])
+    # SHEP-7: an Open PR task's hand-off: its pull request, who it's assigned to, its approval for the exact head
+    # (read again: still the pull request's head?), or why it was handed off blocked. Accept takes it, never merging.
+    handoff = open_pr(t) and t.get("mode") == "worktree" and bool(t.get("handoff"))
+    if handoff:
+        from .delivery import status
+        out["delivery"] = "open_pr"
+        out["handoff"] = status(t)
+        if out["handoff"].get("pr"):
+            out["pr"] = {"number": out["handoff"]["pr"], "url": out["handoff"].get("url")}
     if applies(t):
         # SHEP-4: a Roboflow task's pull request and its ephemeral environment, to try it by hand (other tasks: unchanged)
         out["pr"] = {"number": t["pr"]["number"], "url": t["pr"].get("url")}
@@ -152,5 +162,5 @@ def evidence(s, t):
         "list": [{"path": p, "added": v[0], "removed": v[1]} for p, v in sorted(files.items(), key=lambda x: -(x[1][0] + x[1][1]))[:FEW]]}
     out["checks"] = checks_of(t)
     # What Accept does (cmd_accept): a worktree task's branch with work of its own is merged first; else only done.
-    out["merges"] = bool(t.get("mode") == "worktree" and t.get("branch") and (t.get("pr") or commits))
+    out["merges"] = bool(t.get("mode") == "worktree" and t.get("branch") and (t.get("pr") or commits)) and not handoff
     return out

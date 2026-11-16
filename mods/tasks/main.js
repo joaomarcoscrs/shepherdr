@@ -30,7 +30,7 @@ import { machinesInOrder, machineOrderOf, chatPane } from "./core/spaces.js";
 // The rules for a task's status, order and words: shared with the web app (core/tasks.js).
 import { RANK, STATUS, RANK_OF, ORDER, GROUP_BY, groupBy, groupNow, machineOf, machineName, refOf, taskKey, autoPrefix, place,
   queueReason, reportOf as report, secondLine, leftOf, order, matches, day, ago, capital, short, autoWhere, fromLine, inSpace, holdingItems,
-  autoAcceptOn, autoAcceptStopped } from "./core/tasks.js";
+  autoAcceptOn, autoAcceptStopped, openPr } from "./core/tasks.js";
 import { READ_LISTS, taskLists } from "./core/tasklists.js";
 import { SH } from "./core/paths.js";
 import { settle } from "./core/pending.js";
@@ -889,7 +889,7 @@ export default class Tasks extends View {
       badge: auto ? { text: AUTO_ACCEPT.badge, color: autoAcceptStopped(task) ? red() : green() } : null,
       action: section === "ready" ? this.acceptButton(p, t) : null,
       pin: this.shelved(p) ? null : { key, on: this.pins().has(key), status: section, machine: list.machine ?? null, folder: list.folder,
-        ref: refOf(list, task), sub: section === "scheduled" ? sub : null, auto },
+        ref: refOf(list, task), sub: section === "scheduled" ? sub : null, auto, openPr: openPr(task) },
     }, t);
   }
 
@@ -915,7 +915,7 @@ export default class Tasks extends View {
   // A task not started yet also starts later (SHEP-38): a few times, and a scheduled one Start now and Unschedule
   // (core/menus.js taskMenu; the web's Other time… types any time, here the Assistant does).
   rowMenu(pin) {
-    const items = taskMenu({ pinned: pin.on, status: pin.status, autoAccept: pin.auto }).filter((x) => !x.typed);
+    const items = taskMenu({ pinned: pin.on, status: pin.status, autoAccept: pin.auto, openPr: pin.openPr }).filter((x) => !x.typed);
     // As tasks-menu draws it: a section per line or heading, 4 apart; a heading 28, a row 32 (and 18 more for a
     // note under it: Accept when ready's).
     let height = 8, first = true;
@@ -925,7 +925,7 @@ export default class Tasks extends View {
       first = false;
     }
     openOverlay({ mod: "tasks-menu", kind: "popup", at: "pointer", width: items.some((x) => x.note) ? 340 : 220, height, props: { menu: "row", key: pin.key, on: pin.on,
-      status: pin.status, machine: pin.machine, folder: pin.folder, ref: pin.ref, sub: pin.sub, auto: Boolean(pin.auto) } });
+      status: pin.status, machine: pin.machine, folder: pin.folder, ref: pin.ref, sub: pin.sub, auto: Boolean(pin.auto), openPr: Boolean(pin.openPr) } });
   }
 
   // Ready = "looks done, your call": Review (opens the Accept card) is the person's one action here, at the row's end. It merges first when there is something to merge (herdr-task accept follows the merge

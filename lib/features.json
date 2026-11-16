@@ -585,6 +585,41 @@
       ]
     },
     {
+      "id": "delivery-profiles",
+      "addon": "tasks",
+      "title": "Delivery profiles: Merge or Open PR",
+      "core": [
+        "settings",
+        "accept",
+        "tasks",
+        "menus"
+      ],
+      "herdr": {
+        "mods": [
+          "shepherdr-settings",
+          "accept-card",
+          "tasks",
+          "tasks-menu"
+        ]
+      },
+      "web": {
+        "files": [
+          "src/screens/Accept.tsx",
+          "plugins/tasks/client.tsx"
+        ]
+      },
+      "forms": {
+        "herdr": "Settings › Tasks › Delivery (Merge or Open PR, with its approval, assignees and next step), Everywhere or a space's own; the card's Hand-off and Take it, no merge; herdr-task --set delivery=…",
+        "desktop": "The same Settings rows; the card's Hand-off section and button",
+        "tablet": "Same",
+        "phone": "Settings' Tasks page and the card as a sheet"
+      },
+      "service": [
+        "settings.ts",
+        "model.ts"
+      ]
+    },
+    {
       "id": "assistant",
       "addon": "assistants",
       "title": "Assistant per space",

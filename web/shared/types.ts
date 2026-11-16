@@ -310,6 +310,8 @@ export interface Task {
   /** SHEP-3: Accept when ready is on (herdr-task auto-accept): accepted by itself once it is Ready; failed: why its try
    *  stopped (it waits for the person's Accept then) */
   autoAccept?: { on: true; failed?: string }
+  /** SHEP-7: its delivery is Open PR: handed to the person with its pull request open, never merged nor accepted by itself */
+  openPr?: true
   /** still Working, its turn over: what Shepherdr itself knows it waits for */
   waitsFor?: 'review'
   age: string

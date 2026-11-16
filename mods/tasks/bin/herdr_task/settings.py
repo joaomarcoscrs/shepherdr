@@ -27,7 +27,8 @@ OLD_INSTRUCTIONS = os.path.join(HOME, ".herdr", "instructions")
 ASSISTANT_TEMPLATES = ("assistant", "coordinator")  # "coordinator": Assistants started before the rename
 DEFAULTS = {"tasks": {"merge": "ask", "review_rounds": 0, "must_fix": "major", "max_running": MAX_RUNNING, "worktrees": True,
                       "start_notes": "", "finish_notes": "", "archive_after": 7, "proof": True, "base": "", "branch": "",
-                      "worktree_root": "", "auto_accept": False},
+                      "worktree_root": "", "auto_accept": False, "delivery": "merge", "pr_assign": "", "pr_review": "none",
+                      "pr_next": ""},
             "automations": {"enabled": True}, "worker": {}, "reviewer": {}, "coordinator": {}, "backup": {},
             "agents": {"reactions": True, "suggestions": True, "feedback": True, "feedback_repo": "eliasstravik/shepherdr"}}
 LEVELS = ["blocker", "major", "minor"]
@@ -120,6 +121,111 @@ def auto_accept_default(space, d=None):
         if isinstance(v, bool):
             return v, by
     return DEFAULTS["tasks"]["auto_accept"], None
+
+
+# ---- delivery profiles (SHEP-7) --------------------------------------------------------------------------------
+# What Ready leads to, a space's default for its tasks (Settings › Tasks › Delivery) and a task's own (--set delivery=…):
+# "merge": as before, Merge decides who merges (Herdr's default; every space without its own keeps it). "open_pr": the
+# pull request is opened and handed to the person, never merged by Herdr: assigned to pr_assign (GitHub logins, added,
+# never anyone taken off), approved first by pr_review's gate on its exact final head ("jarbas-local": a
+# `[Jarbas Local João] … APPROVED` comment for that head), the card saying pr_next (what the person does next).
+DELIVERY = ("merge", "open_pr")
+PR_REVIEWS = ("none", "jarbas-local")
+DELIVERY_KEYS = ("delivery", "pr_assign", "pr_review", "pr_next")
+GH_LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$")
+
+
+def logins(value):
+    """GitHub logins from a setting's words ("joao, @ana" -> ["joao", "ana"]); None when one isn't a login."""
+    out = []
+    for w in re.split(r"[\s,]+", str(value or "").strip()):
+        w = w.lstrip("@")
+        if not w:
+            continue
+        if not GH_LOGIN.match(w):
+            return None
+        if w.lower() not in [x.lower() for x in out]:
+            out.append(w)
+    return out
+
+
+def space_value(space, section, key, d=None):
+    """One setting for a space's tasks as SHEP-5 reads it: (value, by). The space's own, found by its id (never by its
+    folder), else what this machine set before machine scope went, else Everywhere's, else Herdr's default (by None)."""
+    d = read_settings() if d is None else d
+    obj = lambda x: x if isinstance(x, dict) else {}
+    own = obj(obj(d.get("spaces")).get(bare(space))) if space else {}
+    machine = obj(obj(d.get("machines")).get(d.get("here") or LOCAL_MACHINE))
+    for by, layer in (("space", own), ("machine", machine), ("everywhere", obj(d.get("everywhere")))):
+        v = obj(layer.get(section)).get(key)
+        if v is not None:
+            return v, by
+    return DEFAULTS[section][key], None
+
+
+def clean_delivery(key, v):
+    """A delivery value as kept, or None when it isn't one (an unknown profile is never guessed at: Merge stands)."""
+    if key == "delivery":
+        return v if v in DELIVERY else None
+    if key == "pr_review":
+        return v if v in PR_REVIEWS else None
+    if key == "pr_assign":
+        found = logins(" ".join(map(str, v)) if isinstance(v, list) else v) if isinstance(v, (str, list)) else None
+        return ",".join(found) if found is not None else None
+    if key == "pr_next":
+        return " ".join(str(v).split())[:300] if isinstance(v, str) else None
+    return None
+
+
+def delivery_for(space, t=None, d=None):
+    """The delivery profile a task of this space gets: {mode, assign: [logins], review, next, by: {key: who}}. A task's
+    own --set values win (by "task"), then the space's (space_value()). A value that isn't one of its choices counts as
+    unset."""
+    sets = (t or {}).get("set") or {}
+    out, by = {}, {}
+    for key in DELIVERY_KEYS:
+        if key in sets and clean_delivery(key, sets[key]) is not None:
+            v, who = clean_delivery(key, sets[key]), "task"
+        else:
+            v, who = space_value(space, "tasks", key, d)
+            v = clean_delivery(key, v)
+            if v is None:
+                v, who = DEFAULTS["tasks"][key], None
+        out[key], by[key] = v, who
+    return {"mode": out["delivery"], "assign": logins(out["pr_assign"]) or [], "review": out["pr_review"],
+            "next": out["pr_next"], "by": by}
+
+
+def keep_delivery(t, space):
+    """A fresh brief's delivery, kept on the task (brief_delivery), as its Review is (#750): a change of the setting while
+    it runs is for tasks started later; its own --set still wins (delivery_of())."""
+    p = delivery_for(space, {"set": {}})
+    t["brief_delivery"] = {k: p[k] for k in ("mode", "assign", "review", "next", "by")}
+
+
+def delivery_of(t):
+    """How this task delivers now: its own --set values over the profile its brief gave (brief_delivery). A task started
+    before delivery profiles (no brief_delivery) merges as it always did: never moved to Open PR mid-run."""
+    kept = t.get("brief_delivery") if isinstance(t.get("brief_delivery"), dict) else None
+    base = dict(kept) if kept else {"mode": "merge", "assign": [], "review": "none", "next": "", "by": {}}
+    sets, by = t.get("set") or {}, dict(base.get("by") or {})
+    names = {"delivery": "mode", "pr_assign": "assign", "pr_review": "review", "pr_next": "next"}
+    for key, name in names.items():
+        if key in sets and clean_delivery(key, sets[key]) is not None:
+            v = clean_delivery(key, sets[key])
+            base[name] = (logins(v) or []) if key == "pr_assign" else v
+            by[key] = "task"
+    if base.get("mode") not in DELIVERY:
+        base["mode"] = "merge"
+    if base.get("review") not in PR_REVIEWS:
+        base["review"] = "none"
+    base["by"] = by
+    return base
+
+
+def open_pr(t):
+    """This task's delivery is Open PR: never merged by Herdr, whatever Merge or Accept when ready say."""
+    return delivery_of(t)["mode"] == "open_pr"
 
 
 def settings_layers(s, space=None):
@@ -274,7 +380,7 @@ def argv_model(argv):
 
 SETTINGS_HEAD = "Settings: (from herdr-task show; where the brief above says otherwise, it wins)"
 SET_BY = {"task": "set by the assistant for this task", "folder": "this folder's setting", "machine": "this machine's setting",
-          "all": "your setting everywhere"}
+          "all": "your setting everywhere", "space": "this space's setting"}
 MERGE_WORDS = {"ask": "ask the person first: they accept it in the Tasks panel, which merges it",
                "checks": "after checks: once you say ready, Herdr merges it when its checks pass",
                "auto": "on its own: once you say ready, Herdr merges it"}
@@ -287,7 +393,15 @@ SET_KEYS = {"review": "review", "brief.review": "review", "merge": "merge", "bri
             "reviewer": "reviewer", "reviewer.agent": "reviewer", "reviewer.model": "reviewer_model", "reviewer.effort": "reviewer_effort",
             "reviewer_model": "reviewer_model", "reviewer-model": "reviewer_model",
             "reviewer_effort": "reviewer_effort", "reviewer-effort": "reviewer_effort",
-            "proof": "proof", "brief.proof": "proof"}
+            "proof": "proof", "brief.proof": "proof",
+            # SHEP-7: the task's own delivery profile and its Open PR settings
+            "delivery": "delivery", "brief.delivery": "delivery", "delivery.assign": "pr_assign", "pr.assign": "pr_assign",
+            "pr_assign": "pr_assign", "assign": "pr_assign", "delivery.review": "pr_review", "pr.review": "pr_review",
+            "pr_review": "pr_review", "delivery.next": "pr_next", "pr.next": "pr_next", "pr_next": "pr_next"}
+DELIVERY_VALUES = {"merge": "merge", "merge it": "merge", "open_pr": "open_pr", "open-pr": "open_pr", "open pr": "open_pr",
+                   "pr": "open_pr", "handoff": "open_pr", "hand off": "open_pr", "hand-off": "open_pr", "no merge": "open_pr"}
+PR_REVIEW_VALUES = {"none": "none", "off": "none", "no": "none", "jarbas-local": "jarbas-local", "jarbas local": "jarbas-local",
+                    "jarbas": "jarbas-local", "jarbas_local": "jarbas-local"}
 # The Proof line (as Shepherdr's skill asks of its task agents), on and off.
 PROOF_WORDS = {"on": "show verifiable proof in one recipe artifact: each proof with a one-line caption, real and from this work now, "
                      "plus a \"Not proven\" list; then say ready with --proof <its id>",
@@ -305,7 +419,8 @@ def set_task(t, key, value):
     """One --set key=value (or flag) on task t; an empty value or "default" goes back to Settings'."""
     field = SET_KEYS.get(key.strip().lower())
     if not field:
-        raise Fail(f"--set takes review, review.rounds, review.mustFix, merge, proof, agent, model, effort or reviewer settings, not {key!r}.")
+        raise Fail(f"--set takes review, review.rounds, review.mustFix, merge, proof, delivery, delivery.assign, delivery.review, "
+                   f"delivery.next, agent, model, effort or reviewer settings, not {key!r}.")
     v = value.strip().strip("\"'").strip()
     sets = t.setdefault("set", {})
     if not v or v.lower() == "default":
@@ -332,6 +447,21 @@ def set_task(t, key, value):
         if low not in MERGE_VALUES:
             raise Fail('merge is "on its own", "after checks" or "ask me first".')
         sets[field] = MERGE_VALUES[low]
+    elif field == "delivery":
+        if low not in DELIVERY_VALUES:
+            raise Fail('delivery is "merge" or "open pr".')
+        sets[field] = DELIVERY_VALUES[low]
+    elif field == "pr_review":
+        if low not in PR_REVIEW_VALUES:
+            raise Fail('delivery.review is "none" or "jarbas-local".')
+        sets[field] = PR_REVIEW_VALUES[low]
+    elif field == "pr_assign":
+        found = [] if low in ("none", "nobody", "no one") else logins(v)
+        if found is None:
+            raise Fail("delivery.assign is GitHub logins (like joao or joao,ana), or none.")
+        sets[field] = ",".join(found)
+    elif field == "pr_next":
+        sets[field] = " ".join(v.split())[:300]
     else:
         # Agents, models and efforts are the task's own fields (worker_pick reads them).
         if field in ("effort", "reviewer_effort") and low not in EFFORTS:
@@ -558,7 +688,17 @@ def task_settings(s, t, space=None, argv=None, live=False):
             by_layer(s, space, "tasks", "review_rounds", rounds, 3))
     policy = sets.get("merge") or (k.get("merge") if k.get("merge") in MERGE_WORDS else "ask")
     m_by = "task" if "merge" in sets else by_layer(s, space, "tasks", "merge", policy, "ask")
-    if here:
+    # SHEP-7: Open PR delivery: never merged; the Delivery line says what ready does instead (Merge only says so)
+    dv = delivery_now(t, space)
+    if dv["mode"] == "open_pr" and not here:
+        add("Merge", "never: this task's delivery is Open PR (Delivery line); neither you nor Herdr merges it, whatever "
+                     "Merge says elsewhere", "never", delivery_by(dv["by"].get("delivery")))
+        add("Delivery", delivery_words(s, t, dv), dv["mode"], delivery_by(dv["by"].get("delivery")))
+    elif dv["mode"] == "open_pr":
+        add("Merge", "nothing to merge: you work in the folder itself, and the person accepts it", policy, m_by)
+        add("Delivery", "open PR, but you work in the folder itself: there is no branch or pull request to hand off, so "
+                        "the person accepts it as usual", dv["mode"], delivery_by(dv["by"].get("delivery")))
+    elif here:
         add("Merge", "nothing to merge: you work in the folder itself, and the person accepts it", policy, m_by)
     else:
         add("Merge", MERGE_WORDS[policy], policy, m_by)
@@ -578,6 +718,49 @@ def task_settings(s, t, space=None, argv=None, live=False):
     add("Suggested next message", "on (your reply ends with the message you'd likely send next, shown greyed out in the box)" if sug
         else "off (no suggested next message)", sug, by_layer(s, space, "agents", "suggestions", sug, True))
     return lines
+
+
+def delivery_now(t, space=None):
+    """The delivery profile a task's Settings block shows: the one its brief kept (with its own --set), or, for a task
+    not briefed yet, its space's now (with its own --set). A task briefed before profiles merges (delivery_of())."""
+    if t.get("brief_delivery") or t.get("started"):
+        return delivery_of(t)
+    return delivery_for(space or t.get("space"), t)
+
+
+def delivery_by(who):
+    """A delivery value's setter in SET_BY's words: the task's own, a space's ("folder" reads "this folder's
+    setting"; a space's is its own), this machine's or Everywhere's."""
+    return {"task": "task", "space": "space", "machine": "machine", "everywhere": "all"}.get(who)
+
+
+# The approval gates an Open PR delivery can ask for before it hands off: the command its worker runs, and the
+# approval Herdr reads on GitHub (delivery.py: gate_verdict()).
+GATE_WORDS = {
+    "jarbas-local": ("`/jarbas-review local iterate <its pull request's link>` (the installed jarbas-review skill; its own "
+                     "bounded loop repairs only confirmed findings, pushes them to this branch and publishes one "
+                     "`[Jarbas Local João]` comment per head)"),
+}
+
+
+def delivery_words(s, t, dv):
+    """The Settings block's Delivery line for an Open PR task: what ready does, the approval it waits for, and that
+    nobody merges it."""
+    ref, ht = (s.ref(t) if s else t.get("id")), "herdr-task"
+    who = ", ".join("@" + x for x in dv["assign"])
+    parts = ["open PR, never merge: once your work is committed, run ready; it pushes your branch, opens (or keeps) its "
+             "pull request" + (f" and assigns it to {who} (added; nobody is taken off)" if who else "")]
+    if dv["review"] in GATE_WORDS:
+        parts.append(f"then, before the task is handed off, it needs an APPROVED verdict for the pull request's exact head "
+                     f"from {GATE_WORDS[dv['review']]}. With no approval for that head ready keeps the task working and "
+                     f"gives you the link: run the review on it, then ready again; ready reads the approval on GitHub "
+                     f"itself (passing checks, an older head's approval or a label are never an approval). Already "
+                     f"approved at this head: don't run it again. It stops without approving (its rounds used, a "
+                     f"discussion, a blocker): don't start it over; run ready with --blocked \"<why, in plain words>\" "
+                     f"and the person gets it as blocked")
+    parts.append("the person then takes it from there" + (f" ({dv['next']})" if dv.get("next") else "") +
+                 ". Don't merge, request reviewers, assign anyone else or message people unless the task says so")
+    return "; ".join(parts)
 
 
 def settings_block(s, t, space=None, argv=None, live=False):

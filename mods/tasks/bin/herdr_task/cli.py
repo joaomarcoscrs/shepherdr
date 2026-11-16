@@ -193,7 +193,9 @@ def main():
         c.add_argument("--reviewer-effort", help="the reviewer's effort")
         c.add_argument("--set", action="append", metavar="KEY=VALUE",
                        help="one task's setting, a line of its brief's Settings block: review=on|off, review.rounds=1..10, "
-                            "review.mustFix=blocker|major|minor, proof=on|off, merge=\"on its own\"|\"after checks\"|\"ask me first\" (\"\": Settings' again)")
+                            "review.mustFix=blocker|major|minor, proof=on|off, merge=\"on its own\"|\"after checks\"|\"ask me first\", "
+                            "delivery=merge|\"open pr\" (Open PR: handed off, never merged), delivery.assign=<GitHub logins>|none, "
+                            "delivery.review=none|jarbas-local, delivery.next=<words> (\"\": Settings' again)")
         c.add_argument("--base", help="the branch its worktree branches from and merges into (default: its space's Base branch "
                                       "setting, else the folder's current branch)")
         c.add_argument("--branch", help="its branch's exact name, e.g. a ticket's ABC-2137 (default: the folder's Branch names "
@@ -250,6 +252,8 @@ def main():
     c.add_argument("--proof", help="its proof artifact's id (herdr-artifact publish prints it); default: its newest artifact titled \"... · Proof\"")
     c.add_argument("--agents-md", help="\"For AGENTS.md\": one line about setting up or testing this repo that the next agent "
                                        "would need and AGENTS.md lacks; the Assistant decides whether to add it")
+    c.add_argument("--blocked", help="Open PR delivery only: hand it off without the approval its profile asks for, saying "
+                                     "why (its review stopped without approving); never merged")
     c = cmd("reviewed", cmd_reviewed, "a task's agent records one review round of its current commit (Review: on): ready then "
                                       "accepts that commit; uses one of its Review rounds")
     c.add_argument("--report", help="the round's findings in a line (levels, what was fixed)")

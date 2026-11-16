@@ -65,9 +65,11 @@ export const AUTO_ACCEPT = {
 };
 // status: the window's section (working, needs) or the web's (work, need).
 export const autoAcceptOffered = (status, on = false) => ["todo", "queued", "scheduled", "working", "needs", "work", "need"].includes(status) || (status === "ready" && on);
-export const taskMenu = ({ pinned = false, status = null, autoAccept = false } = {}) => {
+// openPr (SHEP-7, core/tasks.js openPr()): its delivery is Open PR, handed to the person and never accepted by itself:
+// no Accept when ready, unless it is somehow on already (offered only to turn it off).
+export const taskMenu = ({ pinned = false, status = null, autoAccept = false, openPr = false } = {}) => {
   const later = ["todo", "queued", "scheduled"].includes(status);
-  const auto = autoAcceptOffered(status, autoAccept);
+  const auto = autoAcceptOffered(status, autoAccept) && (!openPr || autoAccept);
   return [
     ...(later ? [{ heading: status === "scheduled" ? "Reschedule" : "Start later" },
       ...SCHEDULE_PICKS.map((p) => ({ id: "schedule", icon: "clock", ...p })),

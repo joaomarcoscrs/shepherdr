@@ -13,7 +13,7 @@ import * as HC from "../core/host.js";
 import * as APc from "../core/autopilot.js";
 import type { SettingRow, SettingSection } from "../web/shared/types.ts";
 
-const { TASK_ROWS, DEFAULTS, wordFor, valueFor, ROLES: CORE_ROLES, NOTES: CORE_NOTES, ABOUT, BACKUP, REACTIONS, SUGGESTIONS, FEEDBACK, feedbackRepo, upgradeReactions, BASE, BRANCH, branchPattern, MACHINES, OLD_NAMES, SECTIONS,
+const { TASK_ROWS, DEFAULTS, wordFor, valueFor, ROLES: CORE_ROLES, NOTES: CORE_NOTES, ABOUT, BACKUP, REACTIONS, SUGGESTIONS, FEEDBACK, feedbackRepo, upgradeReactions, BASE, BRANCH, branchPattern, PR_ASSIGN, PR_NEXT, prAssign, MACHINES, OLD_NAMES, SECTIONS,
   WEB, modelLabel, roleSel, otherCli, otherCliWords, CURSOR_ROLES, backupProblem, homeAbout, webState, fromWord, LOADING_AGENTS, RESET, machineLabel } = C as any;
 const AP = APc as any;
 /** Autopilot as Everywhere has it now (herdr-task's view: what Settings keeps, else what it kept before, else the
@@ -237,7 +237,9 @@ export class Settings {
     const scope = s?.id ?? null;
     // Must fix shows only while there is a review
     const rounds = Number(this.pick(scope, "tasks", "review_rounds").value) || 0;
-    const rows: SettingRow[] = TASK_ROWS.filter(([, field]: any) => field !== "must_fix" || rounds > 0).map(([section, field, label, choices]: any) => {
+    // SHEP-7: Open PR's own rows show only while it is the delivery here
+    const openPr = this.pick(scope, "tasks", "delivery").value === "open_pr";
+    const rows: SettingRow[] = TASK_ROWS.filter(([, field]: any) => (field !== "must_fix" || rounds > 0) && (field !== "pr_review" || openPr)).map(([section, field, label, choices]: any) => {
       const p = this.pick(scope, section, field);
       const words = (v: any) => wordFor(choices, v);
       const key = `${section}.${field}`;
@@ -246,6 +248,15 @@ export class Settings {
         // a count: the window's − and + (Tasks at once)
         : { label, key, value: String(p.value), steps: range(choices.min, choices.max, 1, String), hint: ABOUT[key], ...this.follows(s, p, String, section, field) };
     });
+    // Open PR's assignees and next step (SHEP-7), after its approval row
+    if (openPr) {
+      let at = rows.findIndex((r) => r.key === "tasks.pr_review") + 1;
+      for (const [field, words] of [["pr_assign", PR_ASSIGN], ["pr_next", PR_NEXT]] as const) {
+        const p = this.pick(scope, "tasks", field);
+        rows.splice(at++, 0, { label: words.title, key: `tasks.${field}`, value: String(p.value ?? "").trim(), text: true, hint: words.about,
+          placeholder: words.placeholder, ...this.follows(s, p, (v) => String(v ?? "").trim(), "tasks", field) });
+      }
+    }
     // Base branch, a space's only (as the window's): its box, empty for the branch the folder has checked out
     if (s) {
       const p = this.pick(scope, "tasks", "base");
@@ -437,6 +448,13 @@ export class Settings {
       const why = branchPattern(v);
       if (why) throw new Error(why);
       put("tasks", "branch", v || null);
+    } else if (key === "tasks.pr_assign") {
+      // GitHub logins (core/settings.js prAssign, as herdr-task's logins()); empty: nobody
+      const v = word === null ? null : prAssign(word);
+      if (v === null && word !== null) throw new Error(PR_ASSIGN.bad);
+      put("tasks", "pr_assign", v);
+    } else if (key === "tasks.pr_next") {
+      put("tasks", "pr_next", word?.trim() ? word.replace(/\s+/g, " ").trim().slice(0, 300) : null);
     } else if (section === "tasks" && /^(start|finish)_notes$/.test(field)) {
       put("tasks", field, word === null ? null : word.slice(0, 8000));
     } else if (section === "role" && ROLES.some((r) => r.id === field)) {

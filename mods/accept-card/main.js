@@ -18,7 +18,7 @@ import { appHome, closeOverlay, exec, notify, openOverlay, props, shared, setSha
 import { note } from "./usage.js";
 import { dialogFooter, green, red, amber, H, RADIUS, TEXT } from "./ui.js";
 // The card's words, the summary cut and the details as bullets: core/accept.js, shared with the web app's card.
-import { ACCEPT, acceptLabel, autoNote, words, readable, commitsLine, filesLine, moreLine, proofTitle, whereNow, ephemeralWords } from "./core/accept.js";
+import { ACCEPT, acceptLabel, autoNote, words, readable, commitsLine, filesLine, moreLine, proofTitle, whereNow, ephemeralWords, cardTitle, handoffWords } from "./core/accept.js";
 import { settle } from "./core/pending.js";
 
 export { words, readable };
@@ -282,6 +282,25 @@ export default class AcceptCard extends View {
       .child(status);
   }
 
+  // Hand-off (SHEP-7, an Open PR task): its pull request, its approval for the exact head (moved since, another verdict
+  // or none yet say so), who it's assigned to and what's next. The button takes it: done, never merged.
+  handoff(t, e) {
+    const h = e.handoff;
+    return v_flex().w_full().gap(6)
+      .when(Boolean(h.url), (el) => el.child(this.linkRow(t, "open-handoff-pr", ACCEPT.pullRequest(h.pr), ACCEPT.github, h.url)))
+      .children(handoffWords(h).map((w, i) => {
+        const dot = { ready: green(), work: amber(), need: red() }[w.tone];
+        return h_flex().gap(8).items_center().min_w(0)
+          .when(Boolean(dot), (el) => el.child(div().size(7).flex_none().rounded(4).bg(dot)))
+          .child(div().min_w(0).text_color(w.tone === "muted" ? t.muted : t.foreground).child(w.text))
+          .when(i === 1 && Boolean(h.comment), (el) => el.child(h_flex().id("handoff-review").gap(4).items_center()
+            .text_size(TEXT.label).text_color(t.muted).cursor_pointer().hover((s) => s.text_color(t.foreground))
+            .on_click((_e, cx) => { cx.stop_propagation(); cx.open_url(h.comment); })
+            .child(div().child(ACCEPT.onGitHub))
+            .child(svg("mods/chat-image/external-link.svg").size(12).flex_none())));
+      }));
+  }
+
   // A link out (its pull request, its environment), as an artifact's row: opens in the browser.
   linkRow(t, id, label, action, url) {
     return h_flex().id(id).w_full().h(32).px(10).gap(8).items_center().rounded(RADIUS.card)
@@ -335,7 +354,8 @@ export default class AcceptCard extends View {
         .when(Boolean(autoNote(e)), (el) => el.child(div().max_w(560).text_size(TEXT.body).line_height("20px").text_color(red()).child(autoNote(e))))
         .child(div().max_w(560).text_size(TEXT.body).line_height("20px").text_color(w.summary ? t.foreground : t.muted)
           .child(w.summary || ACCEPT.noSummary))
-        .when(Boolean(e.ephemeral), (el) => el.child(this.section(t, ACCEPT.tryIt, this.tryIt(t, e))))
+        .when(Boolean(e.handoff), (el) => el.child(this.section(t, ACCEPT.handoff, this.handoff(t, e))))
+        .when(Boolean(e.ephemeral), (el) => el.child(this.section(t, ACCEPT.tryIt, this.tryIt(t, e.handoff ? { ...e, pr: null } : e))))
         .child(this.section(t, ACCEPT.changes, this.changes(t, e)))
         .child(this.section(t, ACCEPT.checks, this.checks(t, e)))
         .child(this.section(t, ACCEPT.proof, this.proof(t, e)))
@@ -352,7 +372,7 @@ export default class AcceptCard extends View {
       .child(h_flex().flex_none().gap(12).items_start()
         .child(v_flex().flex_1().min_w(0).gap(4)
           .child(div().text_size(TEXT.title).font_semibold().text_color(t.foreground)
-            .child(!p.ref ? ACCEPT.accept : settled ? p.ref : ACCEPT.title(p.ref)))
+            .child(!p.ref ? ACCEPT.accept : settled ? p.ref : cardTitle(p.ref, e)))
           .child(div().min_w(0).truncate().text_color(t.muted).child(x?.title ?? p.title ?? "")))
         .child(div().mt(-2).mr(-6).child(this.closeButton(t))))
       .child(div().id("accept-body").flex_1().min_h(0).overflow_y_scrollbar().pr(6).child(body))
@@ -363,6 +383,6 @@ export default class AcceptCard extends View {
         // to accept.
         .child(settled ? dialogFooter({ onCancel: () => this.close(), cancelLabel: ACCEPT.close })
           : dialogFooter({ onCancel: () => this.close(), cancelLabel: ACCEPT.cancel,
-            primary: { id: "accept", label: this.busy ? ACCEPT.accepting : acceptLabel(e), disabled: !(ready && !this.busy), onClick: (_e, cx) => this.accept(cx) } })));
+            primary: { id: "accept", label: this.busy ? (e?.handoff ? ACCEPT.taking : ACCEPT.accepting) : acceptLabel(e), disabled: !(ready && !this.busy), onClick: (_e, cx) => this.accept(cx) } })));
   }
 }

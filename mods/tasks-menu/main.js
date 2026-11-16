@@ -41,7 +41,7 @@ function sections() {
 function rowSections(p) {
   const out = [];
   let cur = null;
-  for (const it of taskMenu({ pinned: p.on, status: p.status ?? null, autoAccept: Boolean(p.auto) })) {
+  for (const it of taskMenu({ pinned: p.on, status: p.status ?? null, autoAccept: Boolean(p.auto), openPr: Boolean(p.openPr) })) {
     if (it.typed) continue;
     if (it.sep || it.heading || !cur) out.push(cur = { title: it.heading ? (p.status === "scheduled" && p.sub ? `${it.heading} · ${p.sub}` : it.heading) : null,
       checks: false, current: null, items: [], pick: (key) => rowPick(p, key) });
