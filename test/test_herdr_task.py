@@ -6495,6 +6495,201 @@ class AutoAccept(unittest.TestCase):
                 self.assertEqual(proof.evidence(s, s.find(1))["auto_accept"], {"on": True})
 
 
+class SpaceAutoAccept(unittest.TestCase):
+    """SHEP-5: Settings › Tasks › Accept when ready, a space's default for its new tasks: read by the space's own id
+    (never its folder: joão HQ's tasks work in other folders, and another space in the same folder keeps its own), else
+    Everywhere's, else off; decided once per task and kept on it, so it lasts across restarts and a later change of the
+    setting touches only tasks added after. On, a task gets SHEP-3's own per-task auto_accept: the same tick, refusals
+    and merge (AutoAccept's real task list on disk and real worktrees; hc, gh and agents faked)."""
+    HQ = "spdf9f8bf6c510f7c2385572c1b576da3e"  # joão HQ
+    setUp, run_cmd, task, git = AutoAccept.setUp, Scheduled.run_cmd, Scheduled.task, AutoAccept.git
+    say_ready, tick_at, status, auto, on_main = AutoAccept.say_ready, AutoAccept.tick_at, AutoAccept.status, AutoAccept.auto, AutoAccept.on_main
+
+    def settings(self, d):
+        with open(os.path.join(self.tmp, "settings.json"), "w") as f:
+            json.dump(d, f)
+
+    def hq_on(self, everywhere=None):
+        """The person's choice: on for joão HQ only (its own layer by its id; its folder is the home folder, not this repo)."""
+        self.settings({"everywhere": everywhere or {}, "spaces": {
+            self.HQ: {"folder": "/Users/someone", "name": "Home", "tasks": {"auto_accept": True}},
+            "spOther": {"folder": self.folder, "name": "app", "tasks": {"merge": "ask"}}}})
+
+    def add(self, title, **kw):
+        return self.run_cmd(self.commands.cmd_add, title=title, **kw)
+
+    def work(self, n, title):
+        """Its agent's work: a worktree with one commit of its own, Working (as AutoAccept.worktree_task, on a task added here)."""
+        wt = os.path.join(self.tmp, f"wt{n}")
+        self.git(self.folder, "worktree", "add", "-q", "-b", f"task/{n}", wt, "main")
+        start = self.git(wt, "rev-parse", "HEAD")
+        with open(os.path.join(wt, f"task{n}.txt"), "w") as f:
+            f.write(f"{title}\n")
+        self.git(wt, "add", "-A")
+        self.git(wt, "-c", "user.name=T", "-c", "user.email=t@example.com", "commit", "-q", "-m", title)
+        with self.store_mod.Store(self.store_mod.locate(self.folder)) as s:
+            s.find(n).update(state="running", started=1, mode="worktree", worktree=wt, branch=f"task/{n}", base="main", start=start)
+            s.dirty = True
+        return wt
+
+    def test_inheritance_space_own_by_id_then_everywhere_then_off(self):
+        from herdr_task.settings import auto_accept_default as dflt
+        self.assertEqual(dflt(self.HQ, {}), (False, None))  # Herdr's default: off
+        hq = {self.HQ: {"folder": "/home", "tasks": {"auto_accept": True}}}
+        self.assertEqual(dflt(self.HQ, {"spaces": hq}), (True, "space"))
+        # another space, even one in the same folder, keeps Everywhere's (never matched by folder)
+        same = {**hq, "spB": {"folder": "/home"}}
+        self.assertEqual(dflt("spB", {"spaces": same}), (False, None))
+        self.assertEqual(dflt(None, {"spaces": hq}), (False, None))
+        # Everywhere's on: every space gets it, unless it turns it off itself
+        every = {"everywhere": {"tasks": {"auto_accept": True}}, "spaces": {**same, self.HQ: {"tasks": {"auto_accept": False}}}}
+        self.assertEqual((dflt("spB", every), dflt(self.HQ, every)), ((True, "everywhere"), (False, "space")))
+        # a value a machine set before machine scope went still applies under a space's own; a pushed copy names its
+        # spaces by their bare ids ("vm/sp1" here is sp1 there)
+        self.assertEqual(dflt("spB", {"machines": {"local": {"tasks": {"auto_accept": True}}}}), (True, "machine"))
+        self.assertEqual(dflt("vm/sp1", {"here": "vm", "spaces": {"sp1": {"tasks": {"auto_accept": True}}}}), (True, "space"))
+        # anything but true/false is no choice
+        self.assertEqual(dflt(self.HQ, {"spaces": {self.HQ: {"tasks": {"auto_accept": "yes"}}}}), (False, None))
+
+    def test_new_task_in_the_space_is_accepted_by_itself_and_merged(self):
+        self.hq_on()
+        out = self.add("Bigger card", space=self.HQ)
+        self.assertEqual(out["auto_accept"]["by"], "space")
+        self.assertEqual(out["accept_default"], self.HQ)
+        wt = self.work(1, "Bigger card")
+        self.say_ready(1, self.now + 10)
+        self.assertEqual(self.status(1), ("working", "Accepting by itself"))  # SHEP-3's own words
+        report = self.tick_at(self.now + 20)
+        self.assertEqual(report["auto_accepted"], [{"ref": "APP-1", "how": "merged"}])
+        t = self.task(1)
+        self.assertEqual((t["state"], t.get("merged"), t.get("accepted_by")), ("done", True, "auto"))
+        self.assertEqual(self.on_main().count("Bigger card"), 1)
+        self.assertFalse(os.path.isdir(wt))
+
+    def test_only_that_space_never_its_folder_or_others(self):
+        """A task of another space working in this same folder, and one with no space, wait for the person's Accept."""
+        self.hq_on()
+        self.add("For HQ", space=self.HQ)
+        out = self.add("For app", space="spOther")
+        self.assertNotIn("auto_accept", out)
+        self.assertEqual(out["accept_default"], "spOther")
+        for n, title in ((1, "For HQ"), (2, "For app")):
+            self.work(n, title)
+            self.say_ready(n, self.now)
+        self.tick_at(self.now + 1)
+        self.assertEqual((self.task(1)["state"], self.task(2)["state"]), ("done", "ready"))
+        self.assertEqual(self.status(2), ("ready", None))
+        self.assertNotIn("For app", self.on_main())
+
+    def test_a_task_can_opt_out_when_added_or_later(self):
+        self.hq_on()
+        out = self.add("Not this one", space=self.HQ, no_auto_accept=True)
+        self.assertNotIn("auto_accept", out)
+        self.assertEqual(out["accept_default"], "task")
+        self.add("Changed my mind", space=self.HQ)
+        self.assertNotIn("auto_accept", self.auto(2, off=True))  # its menu's Accept when ready, off
+        # started later (the space still on): neither comes back
+        self.run_cmd(self.commands.cmd_start, id="1", space=self.HQ)
+        self.run_cmd(self.commands.cmd_start, id="2", space=self.HQ)
+        for n, title in ((1, "Not this one"), (2, "Changed my mind")):
+            self.work(n, title)
+            self.say_ready(n, self.now)
+        self.tick_at(self.now + 1)
+        self.assertEqual([self.status(n) for n in (1, 2)], [("ready", None), ("ready", None)])
+        self.assertNotIn("auto_accept", self.task(1))
+        self.assertNotIn("auto_accept", self.task(2))
+
+    def test_existing_tasks_and_ones_added_while_off_are_left_alone(self):
+        self.settings({"spaces": {self.HQ: {"tasks": {"auto_accept": False}}}})
+        self.add("Added while off", space=self.HQ)
+        self.add("Added before SHEP-5", space=self.HQ)
+        with self.store_mod.Store(self.store_mod.locate(self.folder)) as s:
+            s.find(2).pop("accept_default")  # as a task from before this: never decided
+            s.dirty = True
+        self.hq_on()
+        for n in (1, 2):
+            self.run_cmd(self.commands.cmd_start, id=str(n), space=self.HQ)
+            self.assertNotIn("auto_accept", self.task(n))
+        self.assertNotIn("accept_default", self.task(2))
+        # the next one added gets it
+        self.assertEqual(self.add("Added after", space=self.HQ)["auto_accept"]["by"], "space")
+
+    def test_space_known_only_when_it_starts_queues_or_is_scheduled(self):
+        """Added with no space (a plain shell): decided by the space it starts in, once."""
+        self.hq_on()
+        self.assertEqual(self.add("No space yet")["accept_default"], "pending")
+        self.assertNotIn("auto_accept", self.task(1))
+        self.run_cmd(self.commands.cmd_start, id="1", space=self.HQ)
+        self.assertEqual((self.task(1)["accept_default"], self.task(1)["auto_accept"]["by"]), (self.HQ, "space"))
+        # queued for the scheduler: the queue's space decides (here the space's default is off, and stays decided)
+        self.add("Queued elsewhere")
+        with self.store_mod.Store(self.store_mod.locate(self.folder)) as s:
+            s.find(2).update(state="queued", queued_at=1, queue={"argv": ["claude"], "space": "spOther"})
+            s.dirty = True
+        self.tick_at(self.now)
+        self.assertEqual((self.task(2)["state"], self.task(2)["accept_default"]), ("running", "spOther"))
+        self.assertNotIn("auto_accept", self.task(2))
+        # scheduled from a space (add --at): its kept space decides at once
+        out = self.add("Later", **{"in_": "6h"})
+        self.assertEqual((out["state"], out["accept_default"]), ("scheduled", "sp1"))
+
+    def test_kept_across_restarts_and_a_later_change_of_the_setting(self):
+        """The choice is kept on the task in its list on disk: a restart (each tick reads the list fresh), the setting
+        turned off, or the settings file gone, leave a task added while on to accept by itself."""
+        self.hq_on()
+        self.add("Survives", space=self.HQ)
+        self.work(1, "Survives")
+        self.settings({"spaces": {self.HQ: {"tasks": {"auto_accept": False}}}})
+        os.remove(os.path.join(self.tmp, "settings.json"))
+        for i in range(3):
+            self.assertNotIn("auto_accepted", self.tick_at(self.now + i))  # Working: nothing yet
+        self.say_ready(1, self.now + 10)
+        self.assertEqual(self.tick_at(self.now + 20)["auto_accepted"], [{"ref": "APP-1", "how": "merged"}])
+        # and one added now (the setting gone) waits for the person
+        self.assertNotIn("auto_accept", self.add("After", space=self.HQ))
+
+    def test_failing_checks_still_stop_it_and_it_stays_ready(self):
+        """SHEP-3's safeguards: failing checks (attention), a pull request's checks running, a question: not accepted."""
+        self.hq_on()
+        self.add("Careful", space=self.HQ)
+        self.work(1, "Careful")
+        self.say_ready(1, self.now)
+        for extra in ({"attention": "Checks failing: test", "attention_at": 1},
+                      {"pr": {"number": 4, "url": "u", "repo": "o/r", "wait": "Checks are still running.", "checked": self.now + 10 ** 9}}):
+            with self.store_mod.Store(self.store_mod.locate(self.folder)) as s:
+                t = s.find(1)
+                for k in ("pr", "attention", "attention_at"):
+                    t.pop(k, None)
+                t.update(state="ready", **extra)
+                s.dirty = True
+            self.tick_at(self.now + 1)
+            t = self.task(1)
+            self.assertEqual(t["state"], "ready", extra)
+            self.assertNotIn("tried", t["auto_accept"], extra)
+            self.assertEqual(t.get("attention"), extra.get("attention"))
+        self.assertNotIn("Careful", self.on_main())
+
+    def test_an_automation_run_in_the_space_gets_it(self):
+        from unittest import mock
+        import herdr_task.automations as automations
+        self.hq_on()
+        with mock.patch.object(automations, "begin", lambda s, t, argv, space, parent=None: t.update(state="running")), \
+                mock.patch.object(automations, "worker_argv", lambda s, t, space: ["claude"]), \
+                mock.patch.object(automations, "queue_reason", lambda s, t: None):
+            with self.store_mod.Store(self.store_mod.locate(self.folder)) as s:
+                hq = automations.fire(s, {"id": "a1", "title": "Nightly", "prompt": "p", "space": self.HQ}, "schedule")
+                other = automations.fire(s, {"id": "a2", "title": "Other", "prompt": "p", "space": "spOther"}, "schedule")
+                self.assertEqual(hq["auto_accept"]["by"], "space")
+                self.assertNotIn("auto_accept", other)
+
+    def test_the_assistant_is_told_for_its_own_space_only(self):
+        import herdr_task.assistant_settings as a
+        self.hq_on()
+        line = lambda sp: next(r for r in a.rows(sp, None, (False, "", "")) if r["key"] == "auto_accept")
+        self.assertEqual((line(self.HQ)["value"], line(self.HQ)["by"]), ("on", "space"))
+        self.assertEqual((line("spOther")["value"], line("spOther")["by"]), ("off", None))
+
+
 class CursorAgent(unittest.TestCase):
     """SHEP-2: Cursor Agent (cursor-agent) as a task's worker: started, labelled and resumed as itself, never as Codex or
     Claude Code; reviewed by another CLI (it has no read-only mode in every version); told it reports no status."""

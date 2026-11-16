@@ -222,6 +222,8 @@ def main():
     c.add_argument("--after", help="start only once these tasks are done: 3,5; another folder's by its id (WEB-2), another "
                                    "machine's with the machine first (vm-b:HAT-12)")
     c.add_argument("--space", help="the space it's for, whose settings it takes (default: yours)")
+    c.add_argument("--no-auto-accept", action="store_true",
+                   help="wait for the person's Accept even in a space whose Accept when ready is on (only when the person asks)")
     when_opts(c)
     c = cmd("show", cmd_show, "one task")
     c.add_argument("--evidence", action="store_true", help="with what its Accept card shows: commits, changed files, checks and its proof")

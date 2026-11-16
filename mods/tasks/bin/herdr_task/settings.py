@@ -27,7 +27,7 @@ OLD_INSTRUCTIONS = os.path.join(HOME, ".herdr", "instructions")
 ASSISTANT_TEMPLATES = ("assistant", "coordinator")  # "coordinator": Assistants started before the rename
 DEFAULTS = {"tasks": {"merge": "ask", "review_rounds": 0, "must_fix": "major", "max_running": MAX_RUNNING, "worktrees": True,
                       "start_notes": "", "finish_notes": "", "archive_after": 7, "proof": True, "base": "", "branch": "",
-                      "worktree_root": ""},
+                      "worktree_root": "", "auto_accept": False},
             "automations": {"enabled": True}, "worker": {}, "reviewer": {}, "coordinator": {}, "backup": {},
             "agents": {"reactions": True, "suggestions": True, "feedback": True, "feedback_repo": "eliasstravik/shepherdr"}}
 LEVELS = ["blocker", "major", "minor"]
@@ -104,6 +104,22 @@ def reactions_on(space=None, d=None):
             if isinstance(v, bool):
                 return v
     return DEFAULTS["agents"]["reactions"]
+
+
+def auto_accept_default(space, d=None):
+    """SHEP-5: Settings › Tasks › Accept when ready for a space's new tasks: (on, by). The space's own, found by its id
+    and never by its folder (a space's tasks can work in other folders, and another space in the same folder keeps its
+    own), else what this machine set before machine scope went, else Everywhere's, else off. by: "space", "machine",
+    "everywhere", or None for Herdr's default. d: the settings file (read when None)."""
+    d = read_settings() if d is None else d
+    obj = lambda x: x if isinstance(x, dict) else {}
+    own = obj(obj(d.get("spaces")).get(bare(space))) if space else {}
+    machine = obj(obj(d.get("machines")).get(d.get("here") or LOCAL_MACHINE))
+    for by, layer in (("space", own), ("machine", machine), ("everywhere", obj(d.get("everywhere")))):
+        v = obj(layer.get("tasks")).get("auto_accept")
+        if isinstance(v, bool):
+            return v, by
+    return DEFAULTS["tasks"]["auto_accept"], None
 
 
 def settings_layers(s, space=None):

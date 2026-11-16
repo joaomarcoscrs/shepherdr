@@ -244,3 +244,26 @@ test("Feedback offers and its repo", () => {
   s.set("agents.feedback_repo", "", "all");
   expect(JSON.parse(readFileSync(file, "utf8")).everywhere?.agents).toBeUndefined();
 });
+
+test("Accept when ready (SHEP-5): off by default, a space's own by its id, inherited and shown on Everywhere", () => {
+  const s = new Settings();
+  s.start();
+  const hq = { id: "spHQ", name: "joão HQ", machine: null, folder: "/home" };
+  const other = { id: "spOther", name: "shop", machine: null, folder: "/home" };
+  const row = (scope: any) => s.sections(null, [hq, other]).find((x) => x.name === "Tasks" && x.level === (scope?.id ?? "all"))!
+    .rows.find((r) => r.key === "tasks.auto_accept")!;
+  expect(row(null)).toMatchObject({ label: "Accept when ready", value: "Off", options: ["On", "Off"], hint: CORE.ABOUT["tasks.auto_accept"] });
+  expect(row(hq)).toMatchObject({ value: "Off", from: "Everywhere" });
+  s.set("tasks.auto_accept", "On", "spHQ", hq);
+  const f = JSON.parse(readFileSync(file, "utf8"));
+  expect(f.spaces.spHQ).toMatchObject({ folder: "/home", name: "joão HQ", tasks: { auto_accept: true } });
+  // the other space in the same folder keeps Everywhere's
+  expect(f.spaces.spOther).toBeUndefined();
+  expect(row(hq)).toMatchObject({ value: "On", inherits: { value: "Off", from: "Everywhere" } });
+  expect(row(other)).toMatchObject({ value: "Off", from: "Everywhere" });
+  expect(row(null)).toMatchObject({ value: "Off", others: [{ id: "spHQ", name: "joão HQ" }] });
+  // Reset: back to Everywhere's
+  s.set("tasks.auto_accept", null, "spHQ", hq);
+  expect(JSON.parse(readFileSync(file, "utf8")).spaces.spHQ?.tasks).toBeUndefined();
+  expect(row(hq)).toMatchObject({ value: "Off", from: "Everywhere" });
+});

@@ -22,7 +22,7 @@ from .queues import queue_reason
 from .archive import archive_pass
 from .output import say
 from .scheduler import ensure_scheduler, script_hash
-from .commands import begin
+from .commands import begin, space_accept
 from .news import news_pass
 from .tick import end_done_pass, lost_logs_pass, memory_guard, retry_pass, tick_store
 from .backups import backup_pass
@@ -379,6 +379,7 @@ def fire(s, a, why, brief=None):
     for k, v in (a.get("set") or {}).items():
         set_task(t, k, v)
     space = a.get("space")
+    space_accept(t, space, new=True)  # SHEP-5: its space's Accept when ready, as a task added there
     run_rec = {"at": now(), "why": why, "task": s.ref(t)}
     if a.get("from") and why.split(":")[0] in EVENTS:
         run_rec["from"] = from_text(a["from"])
