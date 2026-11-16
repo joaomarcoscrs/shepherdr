@@ -92,13 +92,22 @@ export const paths = (list) => list.filter(Boolean).map((p) => ({ path: p, name:
 // brief names is read with Claude Code's Read; herdr-task's shared.py allows it). "<ms>\t<path>" lines in
 // data/chat-shared.tsv; a path with a tab or a line break isn't written (it asks as before), nor a file a script
 // relayed through data/chat-sendreq.json.
-export const SHARED = 'f="$1"; at="$2"; shift 2; mkdir -p "${f%/*}" || exit 0; for p; do printf "%s\\t%s\\n" "$at" "$p"; done >> "$f"; true';
+// A line already there (the same time and path: one message seen again) isn't written twice.
+export const SHARED = 'f="$1"; at="$2"; shift 2; mkdir -p "${f%/*}" || exit 0; for p; do l=$(printf "%s\\t%s" "$at" "$p"); '
+  + 'grep -qxF -- "$l" "$f" 2>/dev/null || printf "%s\\n" "$l" >> "$f"; done; true';
 export const sharedFile = () => `${appHome()}/data/chat-shared.tsv`;
-export const shareable = (files) => files.filter((f) => f.image && !f.relayed && isImage(f.path) && f.path.startsWith("/") && !/[\t\n\r]/.test(f.path)).map((f) => f.path);
-async function share(files) {
-  const list = shareable(files);
-  if (list.length) await exec("sh", ["-c", SHARED, "share", sharedFile(), String(Date.now()), ...list]).catch(() => null);
+const listable = (p) => typeof p === "string" && p.startsWith("/") && isImage(p) && !/[\t\n\r]/.test(p);
+export const shareable = (files) => files.filter((f) => f.image && !f.relayed && listable(f.path)).map((f) => f.path);
+export async function shareAt(list, at) {
+  if (list.length) await exec("sh", ["-c", SHARED, "share", sharedFile(), String(Math.round(at)), ...list]).catch(() => null);
 }
+const share = (files) => shareAt(shareable(files), Date.now());
+// The pictures a message of the person's in an agent's log carries: the ones Claude Code read from files ([Image:
+// source: …] lines, core/chat-log.js) and each line of its words that is a picture's whole path, as the chat sends one
+// (deliver: a path a line; Codex keeps it as words). So a picture sent before this list was kept, or one the log
+// alone has, is listed too, with its message's time (main.js needShared).
+export const sentPictures = (text, paths = []) =>
+  [...new Set([...(paths ?? []), ...String(text ?? "").split("\n").map((l) => l.trim())])].filter(listable);
 
 // The message's file lines: each file's path where the agent is. For another machine, a copy
 // lands beside the agent's terminal (where herdr-task knows it as shared by where it is).

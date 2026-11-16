@@ -47,7 +47,9 @@ What goes where:
 The PermissionRequest hooks (the chat's and each task worker's `herdr-task _allow`) never ask before Claude Code reads
 a picture you shared in a chat, as when a task's brief names your screenshot: one the chat handed an agent on this
 machine (listed in `~/.config/herdr-app/data/chat-shared.tsv`, kept 30 days), one you pasted or uploaded
-(`data/chat-attach/`), or a copy it sent to another machine. Only image files, only Read; anything else asks as before.
+(`data/chat-attach/`), or a copy it sent to another machine. A picture in your own messages of a conversation the chat
+shows (one sent before this list was kept, say) goes on the list too, with its message's time. Only image files, only
+Read; anything else asks as before.
 
 What it records: `~/.config/herdr-app/data/shepherdr/installed.json`, a sha256 per file it put there. Running it
 again changes only what changed; a file you edited since is kept (the new copy goes beside it as `.new`), except a

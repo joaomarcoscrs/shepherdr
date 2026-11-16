@@ -449,6 +449,8 @@ export default class Chat extends View {
       cx.notify();
     });
     this.viewAsked = new Set();
+    // The person's pictures already put on the shared pictures' list (needShared), by path.
+    this.sharedAsked = new Set();
     this.callReqAt = shared("chat.callreq")?.at ?? null;
     this.restartReqAt = shared("chat.restartreq")?.at ?? null;
     this.reactReqAt = shared("chat.reactreq")?.at ?? null;
@@ -3940,6 +3942,24 @@ export default class Chat extends View {
     }));
   }
 
+  // SHEP-1: the pictures in the person's own messages (rows of kind "user": never a brief, a task's brief or another
+  // agent's message) go on the shared pictures' list with their message's time, so an agent reads them without asking.
+  // deliver() lists what it sends; this lists what was sent before the list was kept, and what the log alone has.
+  // This machine's agents only (another's pictures were copies `hc put` landed there). Asked once each per window.
+  needShared(rows, cx) {
+    if (this.machine) return;
+    const want = [];
+    for (const r of rows) {
+      if (r.kind !== "user" || String(r.id ?? "").startsWith("rp:")) continue;
+      const list = attach.sentPictures(r.text, r.paths).filter((p) => !this.sharedAsked.has(p));
+      for (const p of list) this.sharedAsked.add(p);
+      // (a message with no time in its log isn't listed: its age is unknown)
+      if (list.length && r.at) want.push({ list, at: r.at });
+    }
+    if (!want.length) return;
+    cx.timer.after(0, (cx) => cx.spawn(async () => { for (const w of want) await attach.shareAt(w.list, w.at); }));
+  }
+
   // The pane's size as the window reports it, kept at zoom 1 (the column's width, the rows' wrap).
   paneSize(size) {
     const w = unzoom(size.width);
@@ -4538,6 +4558,7 @@ export default class Chat extends View {
     const lit = new Set(found.map((m) => m.id));
     this.needViews([...this.files.filter((f) => f.image).map((f) => f.path), ...rows.flatMap((r) => (r.kind === "imgs" ? r.paths : r.kind === "artifact" && r.peek ? r.peek.paths : []))], cx);
     this.needPeeks(rows, cx);
+    this.needShared(rows, cx);
     // What sits under the list (an ask card, the working line) changes its height: stay on the newest.
     const below = `${this.asks.length}|${this.sasks.map((a) => a.name + (a.kept ? "+" : "")).join(",")}|${this.wasks.map((a) => a.id).join(",")}|${[this.addr, ...this.workerTasks().keys()].map((a) => openCard(a)?.id ?? "").join("")}|${st}|${this.focused}|${this.queue.length}|${Boolean(this.call)}|${this.files.length}|${Boolean(this.quote)}`;
     if (below !== this.below) { this.below = below; if (this.pinned) this.stick = true; }

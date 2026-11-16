@@ -41,7 +41,8 @@ def js_shareable(files):
     """attach.js's shareable() on these files (isImage as it is there)."""
     img = re.search(r"const IMAGE = (/.*?/i);", SRC).group(1)
     fn = re.search(r"export const shareable = (.*?);\n", SRC).group(1)
-    code = (f"const IMAGE = {img}; const isImage = (p) => IMAGE.test(p); const shareable = {fn};"
+    listable = re.search(r"const listable = (.*?);\n", SRC).group(1)
+    code = (f"const IMAGE = {img}; const isImage = (p) => IMAGE.test(p); const listable = {listable}; const shareable = {fn};"
             "process.stdout.write(JSON.stringify(shareable(JSON.parse(require('fs').readFileSync(0, 'utf8')))))")
     return json.loads(subprocess.run(["node", "-e", code], input=json.dumps(files), capture_output=True, text=True, check=True).stdout)
 
@@ -205,6 +206,105 @@ FAKE_TASK = """#!/bin/sh
 [ "$1" = _shared-read ] || exit 1
 exec "%s" -c 'import sys; sys.dont_write_bytecode = True; sys.path.insert(0, sys.argv[1]); from herdr_task.shared import cmd_shared_read; cmd_shared_read(None)' "%s"
 """
+
+
+# The chat's needShared (mods/chat/main.js) on rows the chat built from a real-shaped agent log: core/chat-log.js parses
+# it, core/chat-view.js briefLabel sets apart what the person didn't type (as main.js rows() does), and attach.js's
+# sentPictures/shareAt write the list. argv: repo, log file, its CLI, the ledger, the chat's machine ("" = here).
+NEED_SHARED = r"""
+const [repo, log, kind, ledger, machine] = process.argv.slice(1);
+const fs = require("fs"), { execFileSync } = require("child_process");
+(async () => {
+  const { Conversation, records } = await import(`${repo}/core/chat-log.js`);
+  const { briefLabel } = await import(`${repo}/core/chat-view.js`);
+  const src = fs.readFileSync(`${repo}/mods/chat/attach.js`, "utf8");
+  const grab = (re) => re.exec(src)[0].replace(/^export /, "");
+  const sentPictures = new Function([grab(/const IMAGE = .*;/), grab(/export const isImage = .*;/), grab(/const listable = .*;/),
+    grab(/export const sentPictures = [\s\S]*?filter\(listable\);/), "return sentPictures;"].join("\n"))();
+  const SHARED = eval(/export const SHARED = ('[^\n]*'\n\s*\+ '[^\n]*');/.exec(src)[1]);
+  const attach = { sentPictures, shareAt: async (list, at) => { execFileSync("sh", ["-c", SHARED, "share", ledger, String(Math.round(at)), ...list]); } };
+  const main = fs.readFileSync(`${repo}/mods/chat/main.js`, "utf8");
+  const body = /\n  needShared\(rows, cx\) \{\n([\s\S]*?)\n  \}\n/.exec(main)[1];
+  const needShared = new Function("attach", `return function (rows, cx) {\n${body}\n}`)(attach);
+  let off = 0;
+  const out = fs.readFileSync(log, "utf8").split("\n").filter(Boolean).map((l) => { const r = `${off}\tJ\t${l}`; off += l.length + 1; return r; }).join("\n");
+  const c = new Conversation(kind);
+  c.feed(records(`head\n${out}`).records);
+  const first = c.items.findIndex((x) => x.kind === "user");
+  const rows = c.items.map((x, i) => (x.kind === "user" && briefLabel(x, i, { first, start: 0, template: null, task: false }) ? { kind: "brief", id: x.id, text: x.text } : x));
+  const later = [];
+  const cx = { timer: { after: (_, f) => later.push(f) }, spawn: (f) => later.push(f) };
+  const self = { machine: machine || null, sharedAsked: new Set() };
+  for (let pass = 0; pass < 2; pass++) {
+    needShared.call(self, rows, cx);
+    while (later.length) await later.shift()(cx);
+  }
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+
+
+@unittest.skipUnless(shutil.which("node"), "the window's steps are evaluated by node")
+class PicturesSentBeforeTheList(Fixture, unittest.TestCase):
+    """JHQ-9: the person pasted a CleanShot picture in the Assistant's (Codex) chat before the list was kept; the task's
+    worker read it from its brief and waited on the card. The chat lists the pictures in the person's own messages of
+    the log it shows, with each message's time, so a picture sent before the update is read without asking too."""
+
+    def codex_log(self, *messages):
+        """A Codex rollout as it writes one: each (role, text, seconds ago) a message."""
+        path = os.path.join(self.tmp, "rollout.jsonl")
+        with open(path, "w") as f:
+            for role, text, ago in messages:
+                at = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(time.time() - ago))
+                kind = "input_text" if role == "user" else "output_text"
+                f.write(json.dumps({"timestamp": at, "type": "response_item", "payload": {"type": "message", "role": role,
+                                    "content": [{"type": kind, "text": text}]}}) + "\n")
+        return path
+
+    def chat_shows(self, log, kind="codex", machine=""):
+        r = subprocess.run(["node", "-e", NEED_SHARED, ROOT, log, kind, self.ledger, machine], capture_output=True, text=True, env=self.env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def lines(self):
+        return open(self.ledger).read().splitlines() if os.path.exists(self.ledger) else []
+
+    def test_jhq9_a_picture_sent_before_the_update(self):
+        relayed = self.picture(os.path.join(self.home, "Desktop", "from an agent.png"))
+        typed = self.picture(os.path.join(self.home, "Desktop", "inline.png"))
+        log = self.codex_log(
+            ("user", f"outra coisa: nested spaces, igual os assistants\n\n{self.shot}", 600),
+            ("assistant", f"Looked at it.\n{relayed}", 590),
+            ("user", f'<hc from="t22" title="JHQ-9">here is mine\n{relayed}</hc>', 580),
+            ("user", f"look at {typed} please", 570))
+        self.assertFalse(self.allowed(self.shot), "before the chat shows it: the brief's picture asks (as JHQ-9's did)")
+        self.chat_shows(log)
+        self.assertTrue(self.allowed(self.shot), "the person's own picture, sent before the list was kept")
+        self.assertEqual(len(self.lines()), 1, "drawn twice, written once")
+        at = int(self.lines()[0].split("\t")[0]) / 1000
+        self.assertAlmostEqual(at, time.time() - 600, delta=5, msg="listed with its message's time, not now")
+        self.assertFalse(self.allowed(relayed), "another agent's message, or the agent's own words, aren't the person's")
+        self.assertFalse(self.allowed(typed), "a path inside a sentence isn't a picture sent")
+
+    def test_an_old_message_keeps_its_age(self):
+        log = self.codex_log(("user", f"see\n{self.shot}", 31 * 86400))
+        self.chat_shows(log)
+        self.assertEqual(len(self.lines()), 1)
+        self.assertFalse(self.allowed(self.shot), "sent 31 days ago: past the list's 30 days, so it asks")
+
+    def test_claude_codes_image_sources_too(self):
+        path = os.path.join(self.tmp, "claude.jsonl")
+        at = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+        with open(path, "w") as f:
+            f.write(json.dumps({"type": "user", "timestamp": at, "message": {"role": "user", "content": [
+                {"type": "text", "text": "[Image #1] this one"}, {"type": "image", "source": {"type": "base64", "data": ""}}]}}) + "\n")
+            f.write(json.dumps({"type": "user", "isMeta": True, "timestamp": at, "message": {"role": "user", "content": [
+                {"type": "text", "text": f"[Image: source: {self.shot}]"}]}}) + "\n")
+        self.chat_shows(path, kind="claude")
+        self.assertTrue(self.allowed(self.shot))
+
+    def test_another_machines_chat_lists_nothing_here(self):
+        self.chat_shows(self.codex_log(("user", f"see\n{self.shot}", 60)), machine="mini")
+        self.assertEqual(self.lines(), [])
+        self.assertFalse(self.allowed(self.shot))
 
 
 @unittest.skipUnless(shutil.which("jq") and shutil.which("node"), "the hook watches the terminal with jq")

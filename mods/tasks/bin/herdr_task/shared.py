@@ -6,7 +6,8 @@ and a file outside the agent's folders asks first: JHQ-6's worker waited on the 
 person had just pasted. Only these are allowed, and only as pictures (an image file by its name and its first bytes):
 
   - a path the window's chat delivered to an agent on this machine (attach.js deliver writes it to data/chat-shared.tsv:
-    "<ms>\\t<path>" lines, kept SHARED_DAYS; a line older is ignored and pruned),
+    "<ms>\\t<path>" lines, kept SHARED_DAYS; a line older is ignored and pruned), or one in the person's own messages
+    of a conversation the chat shows, at its message's time (main.js needShared: one sent before the list was kept),
   - a file the chat itself keeps from the person's message box, data/chat-attach/pasted-* (a paste in the window) and
     web-* (an upload from the web app); never data/chat-attach/view/, which links any picture a chat shows,
   - a copy `hc put` landed for an agent on this machine from a chat on another one
