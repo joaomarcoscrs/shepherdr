@@ -17,8 +17,8 @@ from .settings import (
     task_settings, worker_argv, worktrees_on,
 )
 from .agents import (
-    agent_log, agent_running, background_jobs, busy_again, detail, fit, LINE_MAX, live_agents, ready_turns, STATUSES, SUMMARY_MAX,
-    WORKING_AGAIN,
+    agent_log, agent_running, background_jobs, busy_again, detail, fit, LINE_MAX, live_agents, ready_turns, ready_wait, STATUSES,
+    SUMMARY_MAX, WORKING_AGAIN,
 )
 from .sessions import refresh_sessions
 from .github import (already_merged, checks_missing, github_unreachable, pr_for_branch, checks_since, drop_branch, expected_checks, finish, gh, github, merged_here, needs_approval, note_checks, own_work, pr_adopt, pr_open,
@@ -1216,7 +1216,12 @@ def accept_refusal(s, t):
     adopted. A problem it needs looked at first (attention) refuses it."""
     if t["state"] != "ready":
         return f"{s.ref(t)} isn't ready ({t['state']}); only a Ready task can be accepted."
-    if busy_again(t, [detail(k) for k in live_agents(s.key(t))]):
+    live = [detail(k) for k in live_agents(s.key(t))]
+    # SHEP-3: accepted by itself a moment ago (its auto-accept) and merging now: never a second merge.
+    if t.get("accepted_by") == "auto" and (t.get("accepted_at") or 0) >= (t.get("ready_at") or 1) \
+            and ready_wait(t, [k for k in live if agent_running(k)]):
+        return f"{s.ref(t)} was just accepted by itself (auto-accept): {ready_wait(t, [k for k in live if agent_running(k)])}."
+    if busy_again(t, live):
         back_to_work(s, t, "its agent is at work again", auto=True)
         return f"{s.ref(t)} is working again: its agent took up more work after it said ready. Accept it once it says ready again."
     # One its agent opened itself, which ready couldn't open again ("already exists"): adopted.
@@ -1281,8 +1286,10 @@ def cmd_accept(args):
         raise Fail(refused)
     with open_store(args) as s:
         t = s.find(args.id)
-        if t["state"] != "ready":
-            raise Fail(f"{s.ref(t)} isn't ready ({t['state']}); only a Ready task can be accepted.")
+        # Accepted by itself (auto-accept) since the check above: refused, never merged twice.
+        refused = accept_refusal(s, t) if t["state"] != "ready" or t.get("accepted_by") == "auto" else None
+        if refused:
+            raise Fail(refused)
         how, error, sent, started = accept_merge(s, t, args)
         v = view(s, t)
     if error:

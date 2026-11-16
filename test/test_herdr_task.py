@@ -6331,6 +6331,11 @@ class AutoAccept(unittest.TestCase):
         self.live = [{"address": "t9", "status": {"state": "idle"}, "labels": {}, "turn": 1, "foreground": {"name": "claude"}}]
         self.tick_at(self.now + 4)
         self.assertEqual(len(self.told), 1)
+        # the person's Accept card, open from before, pressed now: refused, never a second merge
+        with self.assertRaises(self.Fail) as e:
+            self.run_cmd(self.commands.cmd_accept, id="1")
+        self.assertIn("was just accepted by itself (auto-accept): Merging", str(e.exception))
+        self.assertEqual(len(self.told), 1)
         self.assertTrue(os.path.isdir(wt))
 
     def test_waits_for_an_approval_and_can_be_taken_back(self):
