@@ -9,10 +9,17 @@ import { BgJobs } from "./bg-jobs.js";
 
 export const PAGE = 200;
 export const KEEP = 2000;
-export const KINDS = { "claude-code": "claude", claude: "claude", codex: "codex" };
+// "cursor": Cursor through herdr-task's chat bridge (SHEP-6), which reports app=cursor and keeps a transcript the chat
+// reads. Cursor's own terminal UI (a task worker's) reports nothing: agentKindOf says it, the chat can't read it.
+export const KINDS = { "claude-code": "claude", claude: "claude", codex: "codex", cursor: "cursor" };
 
-// The CLI a terminal runs, as the chat knows them ("claude", "codex"), else null.
-export const kindOf = (t) => KINDS[t?.status?.app] ?? KINDS[t?.foreground?.name] ?? null;
+// The CLI a terminal runs, as the chat knows them ("claude", "codex", "cursor" for the chat bridge), else null.
+export const kindOf = (t) => KINDS[t?.status?.app] ?? KINDS[t?.foreground?.name] ?? (isCursorChatT(t) ? "cursor" : null);
+// The chat bridge before its first status report: herdr-task cursor-chat in the foreground's argv.
+function isCursorChatT(t) {
+  const a = t?.foreground?.argv ?? [];
+  return a.some((w, i) => w === "cursor-chat" && i > 0 && /(?:^|\/)herdr-task$/.test(String(a[i - 1])));
+}
 // The agent a terminal runs, for its model menu, restart and fork: the chat's own kinds, or Cursor Agent, whose
 // conversation the chat can't read (its log is no file the chat knows): it reports no status and runs as node, so
 // its label (herdr.agent, as herdr-task and restart.sh start it) or its own program in the foreground's argv says it.

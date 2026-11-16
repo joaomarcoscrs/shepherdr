@@ -5,6 +5,8 @@
 //   new choice: it doesn't reread them).
 //   Codex: /model opens a picker (model, then its reasoning level); "s" there applies it to this session only. /fast
 //   toggles and saves service_tier in ~/.codex/config.toml, put back the same way.
+//   Cursor in a chat (herdr-task cursor-chat, SHEP-6): /model <id>, which its bridge sets through Cursor's ACP
+//   (session/set_config_option) for this chat only: nothing of the person's settings changes.
 // Another CLI or another permission mode still needs a restart (liveOK says which).
 // `io` is where it runs: { send(text), keys(...names), screen(), readFile(rel), writeFile(rel, text), sleep(ms) }, rel
 // under the agent's machine's home.
@@ -15,11 +17,11 @@ const CLAUDE_KEYS = ["model", "effortLevel", "fastMode", "modelSettings"];
 const CODEX_KEYS = ["model", "model_reasoning_effort", "service_tier"];
 const LEVEL = { minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max", ultra: "Ultra", none: "None" };
 
-/** Whether the change from what runs (`from`: { agent, model, effort, fast, perm }) to `to` can happen in place:
- *  the same CLI and the same permission mode, a CLI switched in place here (Claude Code or Codex; Cursor restarts on
- *  its conversation instead). */
+/** Whether the change from what runs (`from`: { agent, model, effort, fast, perm, chat }) to `to` can happen in place:
+ *  the same CLI and the same permission mode, a CLI switched in place here (Claude Code, Codex, or Cursor in a chat:
+ *  `from.chat`, its bridge; Cursor's own terminal UI restarts on its conversation instead). */
 export function liveOK(from, to) {
-  return !!from && !!to && from.agent === to.agent && (from.agent === "claude" || from.agent === "codex")
+  return !!from && !!to && from.agent === to.agent && (from.agent === "claude" || from.agent === "codex" || (from.agent === "cursor" && !!from.chat))
     && (!to.perm || !from.perm || to.perm === from.perm);
 }
 
@@ -251,6 +253,19 @@ async function codex(io, ch, labels) {
   }
 }
 
+/** Cursor in a chat: its bridge's /model, answered on its screen ("Model set to …" or "Model not changed: …"). */
+async function cursor(io, ch) {
+  if (ch.model === undefined) return;
+  if (!ch.model) throw new Error("Pick one of Cursor's models.");
+  const SET = /^\s*Model set to /, NOT = /^\s*Model not changed: (.*)$/;
+  const before = await io.screen();
+  const was = count(before, SET), no = count(before, NOT);
+  await io.send(`/model ${ch.model}`);
+  const s = await waitFor(io, (s) => count(s, SET) > was || count(s, NOT) > no);
+  if (!s) throw new Error("Cursor didn't confirm the change.");
+  if (count(s, NOT) > no) throw new Error(String(s).split("\n").filter((l) => NOT.test(l)).pop().trim());
+}
+
 /** Switches the agent in place. `labels`: Codex's { names: { id: label }, model, effort } (the picker's words for
  *  its models, and what runs now). Throws with plain words when it can't. */
 export async function switchLive(io, kind, from, to, labels = {}) {
@@ -258,6 +273,7 @@ export async function switchLive(io, kind, from, to, labels = {}) {
   if (!Object.keys(ch).length) return ch;
   if (kind === "claude") await claude(io, ch);
   else if (kind === "codex") await codex(io, ch, { ...labels, model: from.model, effort: to.effort });
+  else if (kind === "cursor" && from.chat) await cursor(io, ch);
   else throw new Error("This agent can't switch in place: restart it on the new choice.");
   return ch;
 }

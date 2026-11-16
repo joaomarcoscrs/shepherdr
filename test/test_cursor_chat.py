@@ -197,5 +197,28 @@ class CursorChat(unittest.TestCase):
         self.assertIn("isn't installed", out)
 
 
+class Revive(unittest.TestCase):
+    """An Assistant on Cursor's chat bridge, found after a crash (herdr-task revive): its argv and its chat id."""
+
+    def run_py(self, code):
+        env = {**os.environ, "SHEPHERDR_NO_MIGRATE": "1"}
+        out = subprocess.run([sys.executable, "-c", "import sys, json; sys.dont_write_bytecode = True; sys.path.insert(0, sys.argv[1]);" + code,
+                              os.path.join(ROOT, "mods", "tasks", "bin")], capture_output=True, text=True, env=env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return json.loads(out.stdout)
+
+    def test_bridge_argv_starts_again_on_herdr_task(self):
+        got = self.run_py("from herdr_task.revive import base_argv, resume_argv;"
+                          "k, a = base_argv(['/usr/bin/python3', '/h/.local/bin/herdr-task', 'cursor-chat', '--model', 'm', '--resume', 'OLD', '--force']);"
+                          "print(json.dumps([k, a, resume_argv(k, a, 'NEW')]))")
+        self.assertEqual(got, ["cursor", ["herdr-task", "cursor-chat", "--model", "m", "--force"],
+                               ["herdr-task", "cursor-chat", "--model", "m", "--force", "--resume", "NEW"]])
+
+    def test_its_transcript_names_the_chat(self):
+        got = self.run_py("from herdr_task.sessions import CURSOR_BRIDGE;"
+                          f"m = CURSOR_BRIDGE.search('/h/.local/share/shepherdr/cursor-chats/{SID}.jsonl'); print(json.dumps(m.group(1)))")
+        self.assertEqual(got, SID)
+
+
 if __name__ == "__main__":
     unittest.main()

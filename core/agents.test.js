@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { argvFor, canFork, current, forkArgv, FORK_LIVE, line, liveTaskAgent, menuFor, modelSections, parseDefaults, parsePicks, permAcross, pickKey, resumeArgv, rowFor, sessionOf, withPin, withRecent } from "./agents.js";
+import { argvFor, canFork, current, forkArgv, FORK_LIVE, isCursorChat, line, liveTaskAgent, menuFor, modelSections, parseDefaults, parsePicks, permAcross, pickKey, resumeArgv, rowFor, sessionOf, withPin, withRecent } from "./agents.js";
 
 const codex = { models: Array.from({ length: 250 }, (_, i) => ({ id: `gpt-${i}`, label: `GPT ${i}`, efforts: ["low", "high"] })) };
 const menus = { claude: menuFor("claude", {}), codex: menuFor("codex", codex) };
@@ -184,4 +184,35 @@ test("a task's live Cursor worker (no status, running as node) still counts for 
   const cursor = { address: "t9", state: "live", labels: { "herdr.task": "repo#3" }, status: null,
     foreground: { name: "node", argv: ["/h/.local/share/cursor-agent/versions/2025.09.12/node", "/h/.local/share/cursor-agent/versions/2025.09.12/index.js"] } };
   expect(liveTaskAgent({ address: "t1", labels: { "herdr.task": "repo#3" } }, [cursor])?.address).toBe("t9");
+});
+
+// SHEP-6: Cursor as an Assistant, behind herdr-task's chat bridge (herdr-task cursor-chat).
+test("an Assistant runs Cursor through its chat bridge, resumes its chat and keeps the bridge on a restart", () => {
+  // a chat's agent picked Cursor: the bridge, never Cursor's own UI the chat can't read
+  const fresh = argvFor({ agent: "cursor", model: "composer-2.5", perm: "manual" }, { agent: "claude", argv: ["claude"] }, { chat: true });
+  expect(fresh).toEqual({ argv: ["herdr-task", "cursor-chat", "--model", "composer-2.5"], resume: false, base: ["herdr-task", "cursor-chat", "--model", "composer-2.5"] });
+  expect(argvFor({ agent: "cursor", perm: "full" }, { agent: "codex", argv: ["codex"] }, { chat: true }).argv).toEqual(["herdr-task", "cursor-chat", "--force"]);
+  // already on the bridge (as its process shows it: python running herdr-task): stays on it, resuming its chat
+  const old = { agent: "cursor", argv: ["/usr/bin/python3", "/h/.local/bin/herdr-task", "cursor-chat", "--model", "a", "--force"], session: "C1" };
+  const r = argvFor({ agent: "cursor", model: "b", perm: "manual" }, old);
+  expect(r).toEqual({ argv: ["herdr-task", "cursor-chat", "--model", "b", "--resume", "C1"], resume: true, base: ["herdr-task", "cursor-chat", "--model", "b"] });
+  expect(isCursorChat(old.argv)).toBe(true);
+  expect(isCursorChat(["cursor-agent", "--force"])).toBe(false);
+  // a task's worker stays on Cursor's own UI
+  expect(argvFor({ agent: "cursor", perm: "manual" }, { agent: "claude", argv: ["claude"] }).argv).toEqual(["cursor-agent"]);
+  // an Assistant that ended resumes the same chat on the bridge (#1039)
+  expect(resumeArgv("cursor", ["python3", "/x/herdr-task", "cursor-chat", "--model", "b", "--resume", "C0"], "C2")).toEqual(["herdr-task", "cursor-chat", "--model", "b", "--resume", "C2"]);
+  // its transcript names the chat it resumes
+  expect(sessionOf("cursor", "/h/.local/share/shepherdr/cursor-chats/11111111-2222-3333-4444-555555555555.jsonl")).toBe("11111111-2222-3333-4444-555555555555");
+});
+
+test("Cursor's menu lists the account's models once its chat read them, and says what runs by name", () => {
+  const list = JSON.stringify({ models: [{ id: "default[]", name: "Auto" }, { id: "composer-2.5[fast=true]", name: "composer-2.5" }] });
+  const d = parseDefaults("cursor", `chatmodels\t${list}\nmodel\tdefault\nbin\t/x/cursor-agent\n`);
+  expect(d.models.map((m) => [m.id, m.label])).toEqual([["default[]", "Auto"], ["composer-2.5[fast=true]", "composer-2.5"]]);
+  // the bridge's transcript says what runs now, by Cursor's name for it
+  const c = current("cursor", ["herdr-task", "cursor-chat"], { model: "composer-2.5[fast=true]", label: "composer-2.5" }, d);
+  expect(c).toMatchObject({ agent: "cursor", model: "composer-2.5[fast=true]", label: "composer-2.5", perm: "manual" });
+  expect(line(c)).toBe("Cursor · composer-2.5");
+  expect(current("cursor", ["herdr-task", "cursor-chat"], { model: "default[]" }, d).label).toBe("Auto");
 });

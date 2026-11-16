@@ -47,8 +47,9 @@ CODEX_VALUE = {"-c", "--config", "-m", "--model", "-p", "--profile", "-s", "--sa
 # Cursor Agent's (core/agents.js CURSOR_VALUE; its --resume takes an optional id, read on its own).
 CURSOR_VALUE = {"--model", "--mode", "--sandbox", "--workspace", "--output-format", "-H", "--header", "--plugin-dir",
                 "--worktree-base", "--api-key"}
-# A program word and its kind: Cursor Agent's CLI is cursor-agent, or agent as newer installs call it.
-KINDS = {"claude": "claude", "codex": "codex", "cursor-agent": "cursor", "agent": "cursor"}
+# A program word and its kind: Cursor Agent's CLI is cursor-agent, or agent as newer installs call it; cursor-chat is
+# herdr-task's chat bridge that runs it as an Assistant (herdr-task cursor-chat, SHEP-6).
+KINDS = {"claude": "claude", "codex": "codex", "cursor-agent": "cursor", "agent": "cursor", "cursor-chat": "cursor"}
 
 
 def kind_of(word):
@@ -63,6 +64,8 @@ def base_argv(argv):
     if at is None:
         return None, None
     kind, rest, out = kind_of(argv[at]), argv[at + 1:], [argv[at]]
+    if argv[at] == "cursor-chat":
+        out = ["herdr-task", "cursor-chat"]   # herdr-task's command, as on any machine's PATH
     i = 0
     while i < len(rest):
         a = rest[i]
@@ -196,7 +199,7 @@ def record_of(k):
     shell = any(os.path.basename(str(a)) in SHELLS for a in launch[:launch.index(argv[0])]) if kind else True
     if not kind:
         kind, argv = base_argv(fg.get("argv"))
-        if kind:
+        if kind and argv[0] != "herdr-task":
             argv[0] = "cursor-agent" if kind == "cursor" else kind
     if not kind:
         return None

@@ -283,3 +283,56 @@ test("an empty suggest line counts as none, and a suggest line inside a code blo
   expect(agents[1].suggest).toBeUndefined();
   expect(agents[1].text).toContain('<hc suggest="x"/>');
 });
+
+// SHEP-6: Cursor through herdr-task cursor-chat, its transcript as the bridge wrote it (test/fixtures/cursor-chat.jsonl:
+// a reply-to line alone, a message, a command it asked permission for and ran, then a queued message).
+test("Cursor's chat transcript reads as a conversation", async () => {
+  const src = readFileSync(join(import.meta.dir, "..", "test", "fixtures", "cursor-chat.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const dir = mkdtempSync(join(tmpdir(), "chat-log-"));
+  const f = join(dir, "11111111-2222-3333-4444-555555555555.jsonl");
+  writeFileSync(f, src.map((l) => JSON.stringify(l)).join("\n") + "\n");
+  const p = Bun.spawn(["sh", "-c", LOG, "log", "tail", f, "0"], { stdout: "pipe", stderr: "ignore" });
+  const out = await new Response(p.stdout).text();
+  const page = Bun.spawn(["sh", "-c", LOG, "log", "page", f, "999999999", "200"], { stdout: "pipe", stderr: "ignore" });
+  const pageOut = await new Response(page.stdout).text();
+  rmSync(dir, { recursive: true });
+  const r = records(out);
+  // the tool's result comes as its id only (its output stays in the file until a row is opened)
+  expect(r.records.filter((x) => x.kind === "R").map((x) => x.data.trim())).toEqual(["call-1_fc_1"]);
+  const c = new Conversation("cursor");
+  c.feed(r.records);
+  expect(said(c)).toEqual(["hi there", "ALLOWED", "queued one"]);
+  expect(c.items.filter((x) => x.kind === "user").map((x) => x.text)).toEqual(["say hi there", "run herdr-artifact publish proof", "say queued one"]);
+  const tools = c.items.find((x) => x.kind === "tools");
+  expect(tools.steps.map((s) => [s.kind, s.line])).toEqual([["run", "Ran herdr-artifact publish proof"]]);
+  // answered: nothing open, nothing waits
+  expect(c.open.size).toBe(0);
+  expect(c.doing).toBe(null);
+  expect(c.items.some((x) => x.kind === "artifact")).toBe(true);
+  expect(c.meta.model).toBe("default[]");
+  expect(c.meta.label).toBe("Auto");
+  // a page back counts its messages (user and agent lines)
+  expect(records(pageOut).records.length).toBeGreaterThan(0);
+});
+
+test("a Cursor turn shows what it does and waits on until it ends", () => {
+  const recs = [
+    { herdr: "cursor", type: "user", at, text: "check it" },
+    { herdr: "cursor", type: "tool", at, call_id: "c1", kind: "read", title: "Read a.txt", input: { path: "/w/a.txt" }, path: "/w/a.txt" },
+    { herdr: "cursor", type: "tool", at, call_id: "c2", kind: "execute", title: "npm test", input: { command: "npm test" } },
+    { herdr: "cursor", type: "permission", at, call_id: "c2", title: "npm test" },
+    { herdr: "cursor", type: "queue", at, op: "enqueue", text: "and the docs" },
+  ].map((l, i) => ({ off: i * 100, kind: "J", data: JSON.stringify(l) }));
+  const c = new Conversation("cursor");
+  c.feed(recs);
+  expect(c.items.find((x) => x.kind === "tools").steps.map((s) => s.line)).toEqual(["Read /w/a.txt", "Ran npm test"]);
+  expect(c.doing).toBe("Waiting for you: npm test");
+  expect(c.queued().map((q) => q.text)).toEqual(["and the docs"]);
+  c.feed([{ off: 900, kind: "J", data: JSON.stringify({ herdr: "cursor", type: "queue", at, op: "dequeue", text: "and the docs" }) },
+    { off: 950, kind: "J", data: JSON.stringify({ herdr: "cursor", type: "error", at, text: "Cursor: rate limited" }) },
+    { off: 990, kind: "J", data: JSON.stringify({ herdr: "cursor", type: "turn_end", at, reason: "cancelled" }) }]);
+  expect(c.queued()).toEqual([]);
+  expect(c.items.filter((x) => x.kind === "error").map((x) => x.text)).toEqual(["Cursor: rate limited"]);
+  expect(c.open.size).toBe(0);
+  expect(c.doing).toBe(null);
+});

@@ -381,10 +381,10 @@ export async function act(hub: Hub, b: any, compat: Compat): Promise<unknown> {
     if (b.type === "restart-info") return compat.agents.info(a, reader);
     if (b.type === "model-menu") return { ok: true, menu: await (compat.agents as any).menu(a, reader) };
     if (!["claude", "codex", "cursor"].includes(b.kind)) throw new Error("Pick Claude Code, Codex or Cursor.");
-    // Cursor runs a task's worker only (core/settings.js forRole), never an Assistant or a reviewer
+    // Cursor runs task workers and Assistants (its chat bridge, SHEP-6), never a reviewer or a helper (core/settings.js forRole)
     const tt: any = hub.terminals.get(a);
-    if (b.kind === "cursor" && (!tt?.labels?.["herdr.task"] || ["reviewer", "helper"].includes(tt?.labels?.["herdr.role"])))
-      throw new Error("Cursor can only run task workers.");
+    if (b.kind === "cursor" && ["reviewer", "helper"].includes(tt?.labels?.["herdr.role"]))
+      throw new Error("Cursor can't run reviewers or helpers.");
     const opt = (v: unknown) => (typeof v === "string" && /^[\w.\[\]-]{1,60}$/.test(v) ? v : undefined);
     const pick = { kind: b.kind, model: opt(b.model), effort: opt(b.effort), speed: opt(b.speed), perm: opt(b.perm) };
     // the model menu (live): in place when only the model, level or Fast changes; the restart sheet restarts
@@ -537,6 +537,7 @@ export async function act(hub: Hub, b: any, compat: Compat): Promise<unknown> {
     // once per later prompt); Codex's Esc Esc browses back from the last (Left). Then its terminal shows it.
     const a = chat(b.chat), t: any = hub.terminals.get(a), r = compat.reader?.(a);
     if (t?.status?.state === "working") throw new Error("The agent is working: stop it first, then rewind.");
+    if (kindOf(t) === "cursor") throw new Error("Cursor's chat can't rewind.");
     const users = (r?.conv?.items ?? []).filter((x: any) => x.kind === "user" && !x.from && !/^\//.test(x.text ?? ""));
     const i = users.findIndex((u: any) => u.id === b.message), back = i < 0 ? 1 : users.length - i;
     if ((kindOf(t) ?? "claude") === "claude") { await hub.send(a, "/rewind"); await Bun.sleep(700); await hc(["keys", a, ...Array(back).fill("up")]); }

@@ -106,7 +106,7 @@ function Bubble({ msg, chat, from, out, last, pics, images, writing }: { msg: Me
     />
   ) : null
   // its band: what you just sent gets one once it's in the conversation; the agent's newest waits while it writes
-  const band = msg.text && !msg.card && !art && !out && !writing && !msg.waiting ? <Band msg={msg} chat={chat.key} cli={chat.cli !== ''} /> : null
+  const band = msg.text && !msg.card && !art && !out && !writing && !msg.waiting ? <Band msg={msg} chat={chat.key} cli={chat.cli !== ''} cursor={chat.cli === 'cursor'} /> : null
   const unit = (anchor: ReactNode, quoted?: boolean) => (
     <div
       data-msg={msg.id}
@@ -1383,7 +1383,7 @@ function askHead(q: Question, chat: Chat) {
   // a task worker's, in its Assistant's chat: headed by its task, its own chat a link (no terminal link)
   if (q.by) return { who: q.by.ref, links: [{ label: 'Open chat', fn: () => goChat(q.by!.chat) }, ...last], dismiss }
   const terminal = () => void act({ type: 'answer', chat: chat.key, question: q.id, terminal: true } as never).then(() => openTerminal(chat.key), () => undefined)
-  return { who: chat.cli === 'codex' ? 'Codex' : 'Claude', links: [{ label: 'Answer in terminal', fn: terminal }, ...last], dismiss }
+  return { who: chat.cli === 'codex' ? 'Codex' : chat.cli === 'cursor' ? 'Cursor' : 'Claude', links: [{ label: 'Answer in terminal', fn: terminal }, ...last], dismiss }
 }
 
 /** a questions card's "Chat about this": no answer; the agent hears the person wants to talk it over, and the box

@@ -23,7 +23,7 @@ const { WORDS, clock, initialOf, bandActs, bandOrder, imagesLine, fitThumbs, THU
   questionsBelow: (n: number) => string
   clock: (at?: number) => string
   initialOf: (name: string) => string
-  bandActs: (side: 'user' | 'agent', text?: string, o?: { from?: string | null; fork?: boolean }) => string[]
+  bandActs: (side: 'user' | 'agent', text?: string, o?: { from?: string | null; fork?: boolean; rewind?: boolean }) => string[]
   bandOrder: (side: 'user' | 'agent', acts: string[], o?: { time?: boolean; react?: boolean }) => string[]
   imagesLine: (n: number) => string
   fitThumbs: (sizes: ({ w: number; h: number } | null)[], width?: number) => { boxes: { w: number; h: number }[]; h: number }
@@ -46,10 +46,11 @@ export const onTerminal = (fn: (chat: string) => void) => void (showTerminal = f
  *  Reply and then the time.
  *  The reactions always show; the rest while the pointer is on the message,
  *  in room that is always kept, so nothing moves. A finger holds the message instead (its own bar). */
-export function Band({ msg, chat, cli }: { msg: Message; chat: string; cli?: boolean }) {
+/** cursor: Cursor's chat (herdr-task cursor-chat), which has no rewind and no fork. */
+export function Band({ msg, chat, cli, cursor }: { msg: Message; chat: string; cli?: boolean; cursor?: boolean }) {
   const you = msg.who === 'you'
   const { copied, copy } = useCopy()
-  const acts = bandActs(you ? 'user' : 'agent', msg.text, { fork: cli !== false })
+  const acts = bandActs(you ? 'user' : 'agent', msg.text, { fork: cli !== false && !cursor, rewind: !cursor })
   const react = has('reactions')
   const pills = msg.reactions?.length ? registry.messageEdge.map(({ View }, i) => <View key={i} msg={msg} chat={{ key: chat } as Chat} />) : null
   const time = clock(msg.at)

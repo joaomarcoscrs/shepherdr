@@ -79,8 +79,10 @@ export async function execTemplate(hub: Hub, name: string, machine: string | nul
   if (!head || !own) return plain;
   const has = async (prog: string) => (await exec(hub, ["sh", "-c", `${AGENT_PATH} command -v "$1" >/dev/null 2>&1`, "x", prog], machine).catch(() => null))?.code === 0;
   let cmd = own;
-  if (pick?.agent === "claude" || pick?.agent === "codex") {
-    if (await has(pick.agent)) cmd = argvFor(pick, { agent: null, argv: [] }).argv.map(shellWord).join(" ");
+  if (pick?.agent === "claude" || pick?.agent === "codex" || pick?.agent === "cursor") {
+    // Cursor: its CLI as either name, and as an Assistant it runs behind its chat bridge (herdr-task cursor-chat, SHEP-6)
+    const there = pick.agent === "cursor" ? (await has("cursor-agent")) || (await has("agent")) : await has(pick.agent);
+    if (there) cmd = argvFor(pick, { agent: null, argv: [] }, { chat: true }).argv.map(shellWord).join(" ");
     else if (!(await has(own.split(/\s+/)[0]))) {
       throw new Error(`${(NAMES as Record<string, string>)[pick.agent] ?? pick.agent} isn't installed on ${machine ?? "this computer"}. Install it, or pick another agent for the Assistant in Settings › Agents.`);
     }

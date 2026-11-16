@@ -98,6 +98,11 @@ def tool_path(inp, locations=None):
     return None
 
 
+def call_id(v):
+    """A tool call's id as one plain word (Cursor's hold a newline): what the chat's records join calls and results by."""
+    return re.sub(r"[^\w.:-]+", "_", str(v or "")) or "call"
+
+
 def strip_ticks(title):
     t = str(title or "").strip()
     return t[1:-1] if len(t) > 1 and t.startswith("`") and t.endswith("`") else t
@@ -162,7 +167,8 @@ class Transcript:
 
     def write(self, typ, **fields):
         rec = {"herdr": NAME, "type": typ, "at": now_iso(), **fields}
-        self.f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        # compact, as core/chat-log.js LOG finds them ({"herdr":"cursor",...})
+        self.f.write(json.dumps(rec, ensure_ascii=False, separators=(",", ":")) + "\n")
         self.f.flush()
 
     def close(self):
@@ -195,6 +201,8 @@ class Bridge:
                 self.resume = next(it, None)
             elif a.startswith("--resume="):
                 self.resume = a.split("=", 1)[1]
+            elif a.startswith("-") and not words:
+                continue   # a flag it doesn't take (another version's): never a first message
             else:
                 words.append(a)
         self.first = " ".join(words).strip() or None
@@ -479,10 +487,10 @@ class Bridge:
             self.status("working", "Thinking")
         elif kind == "tool_call":
             self.flush()
-            tid = str(u.get("toolCallId"))
+            tid = call_id(u.get("toolCallId"))
             inp = u.get("rawInput") if isinstance(u.get("rawInput"), dict) else {}
             title = strip_ticks(u.get("title")) or u.get("kind") or "a tool"
-            self.transcript.write("tool", id=tid, kind=u.get("kind") or "other", title=clip(title, 300), input=clipped(inp),
+            self.transcript.write("tool", call_id=tid, kind=u.get("kind") or "other", title=clip(title, 300), input=clipped(inp),
                                   path=tool_path(inp, u.get("locations")))
             self.say(f"\x1b[2m• {clip(title, 200)}\x1b[0m")
             self.status("working", clip(title, 200))
@@ -494,7 +502,7 @@ class Bridge:
                 o = out.get("stdout") or out.get("output") or out.get("content") or ""
                 e = out.get("stderr") or ""
                 out = (str(o) + ("\n" + str(e) if e else "")) if (o or e) else json.dumps(out)[:CLIP]
-            self.transcript.write("tool_done", id=str(u.get("toolCallId")), status=u.get("status"), output=clip(out))
+            self.transcript.write("tool_done", call_id=call_id(u.get("toolCallId")), status=u.get("status"), output=clip(out))
             if u.get("status") == "failed":
                 self.say("\x1b[2m  (failed)\x1b[0m")
         elif kind == "plan":
@@ -519,7 +527,7 @@ class Bridge:
         self.ask = {"rpc": m.get("id"), "options": p.get("options") or [], "req": req, "at": time.time(), "id": None}
         title = strip_ticks(tool.get("title")) or req["tool_name"]
         why = req["tool_input"].get("description") or req["tool_input"].get("why") or ""
-        self.transcript.write("permission", id=str(tool.get("toolCallId") or ""), title=clip(title, 300), detail=clip(why, 300))
+        self.transcript.write("permission", call_id=call_id(tool.get("toolCallId")), title=clip(title, 300), detail=clip(why, 300))
         self.status("blocked", report_msg(req), "permission")
         lines = [f"\x1b[1;33mCursor asks:\x1b[0m {clip(title, 300)}"] + ([f"  {why}"] if why else [])
         for i, o in enumerate(self.ask["options"], 1):

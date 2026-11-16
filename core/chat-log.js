@@ -3,7 +3,8 @@
 // Finding an agent's own session log and reading it as a conversation.
 // Claude Code: ~/.claude/sessions/<pid>.json names the session its process writes, so the
 // log is ~/.claude/projects/*/<sessionId>.jsonl. Codex keeps its rollout file open, so the
-// file is whatever rollout-*.jsonl its process (or a child) holds. Both are exact: no
+// file is whatever rollout-*.jsonl its process (or a child) holds. Cursor's chat bridge (herdr-task cursor-chat, SHEP-6)
+// holds its transcript open the same way: cursor-chats/<chat id>.jsonl. All exact: no
 // guessing by folder or time, so two agents in one folder never get mixed up.
 
 // Prints the log's path on the agent's machine, or nothing. Args: kind, pid. The processes under pid come
@@ -24,10 +25,12 @@ for p in "$pid" $(kids "$pid"); do
     for f in "$HOME"/.claude/projects/*/"$id".jsonl; do [ -f "$f" ] && { echo "$f"; exit 0; }; done
     echo "pending"; exit 0
   else
+    pat='/rollout-.*\\.jsonl$'
+    [ "$kind" = cursor ] && pat='/cursor-chats/[^/]*\\.jsonl$'
     if [ -d "/proc/$p/fd" ]; then
-      f=$(for d in /proc/$p/fd/*; do readlink "$d"; done 2>/dev/null | grep '/rollout-.*\\.jsonl$' | head -1)
+      f=$(for d in /proc/$p/fd/*; do readlink "$d"; done 2>/dev/null | grep "$pat" | head -1)
     else
-      f=$(lsof -p "$p" -Fn 2>/dev/null | sed -n 's/^n//p' | grep '/rollout-.*\\.jsonl$' | head -1)
+      f=$(lsof -p "$p" -Fn 2>/dev/null | sed -n 's/^n//p' | grep "$pat" | head -1)
     fi
     [ -n "$f" ] && { echo "$f"; exit 0; }
   fi
@@ -58,6 +61,8 @@ BEGIN { pos = base; first = base; msgs = 0 }
   head = substr(line, 1, 400)
   claude = index(head, "\"isSidechain\":false") && index(line, "\"type\":\"user\",\"message\"")
   codex = index(head, "\"type\":\"response_item\"")
+  # Cursor through herdr-task cursor-chat: its own records, each starting {"herdr":"cursor","type":...}
+  cursor = index(head, "{\"herdr\":\"cursor\",")
   # A background job (a shell, a watcher, a helper) that ended: Claude Code notes it the moment it
   # ends, as a message queued for the agent (which may read it much later).
   if (index(head, "\"type\":\"queue-operation\",\"operation\":\"enqueue\"") && index(line, "<task-notification>") && index(line, "<status>")) {
@@ -71,7 +76,7 @@ BEGIN { pos = base; first = base; msgs = 0 }
     if (length(line) <= 262144) print off "\tJ\t" line
     next
   }
-  if ((claude && index(line, "\"tool_result\"")) || (codex && (index(head, "\"function_call_output\"") || index(head, "\"custom_tool_call_output\"")))) {
+  if ((claude && index(line, "\"tool_result\"")) || (codex && (index(head, "\"function_call_output\"") || index(head, "\"custom_tool_call_output\""))) || (cursor && index(head, "\"type\":\"tool_done\""))) {
     if (count) next
     ids = ""; t = line
     while (match(t, /"(tool_use_id|call_id)":"[^"]*"/)) { m = substr(t, RSTART, RLENGTH); sub(/^"[a-z_]*":"/, "", m); sub(/"$/, "", m); ids = ids " " m; t = substr(t, RSTART + RLENGTH) }
@@ -103,6 +108,9 @@ BEGIN { pos = base; first = base; msgs = 0 }
     if (index(head, "\"task_complete\"") || index(head, "\"turn_aborted\"") || index(head, "\"token_count\"") || index(head, "\"thread_settings_applied\"")) keep = 1
   } else if (index(head, "\"type\":\"turn_context\"")) {
     keep = 1
+  } else if (cursor) {
+    keep = 1
+    if (index(head, "\"type\":\"user\"") || index(head, "\"type\":\"agent\"")) msgs++
   }
   if (!keep) next
   if (index(line, "\"type\":\"text\"") || index(line, "\"role\":\"user\",\"content\":\"") || index(head, "\"type\":\"message\"")) msgs++
@@ -570,6 +578,26 @@ function codexStep(name, args) {
   return { kind: "tool", line: `Used ${name}`, doing: `Using ${name}` };
 }
 
+// A tool call of Cursor's (herdr-task cursor-chat's tool record: ACP's kind, title, raw input and path) in words.
+function cursorStep(t) {
+  const inp = t.input && typeof t.input === "object" ? t.input : {};
+  const title = String(t.title ?? ""), path = t.path ?? null;
+  switch (t.kind) {
+    case "execute": {
+      const cmd = String(inp.command ?? title);
+      const wait = waitWords(cmd);
+      return { kind: "run", line: `Ran ${clip(cmd, 80)}`, doing: wait ?? `Running ${cmdWords(cmd)}`, waiting: Boolean(wait) };
+    }
+    case "read": return { kind: "read", line: `Read ${short(path ?? title)}`, doing: `Reading ${base(path ?? title)}` };
+    case "edit": case "delete": case "move":
+      return { kind: "edit", line: `${t.kind === "delete" ? "Deleted" : t.kind === "move" ? "Moved" : "Edited"} ${short(path ?? title)}`, doing: `Editing ${base(path ?? title)}` };
+    case "search": return { kind: "search", line: `Searched for “${clip(inp.pattern ?? inp.query ?? title, 50)}”`, doing: `Searching for “${clip(inp.pattern ?? inp.query ?? title, 40)}”` };
+    case "fetch": return { kind: "web", line: `Opened ${clip(inp.url ?? title, 80)}`, doing: `Reading ${host(inp.url ?? title)}` };
+    case "think": return { kind: "plan", line: "Thought it through", doing: "Thinking" };
+  }
+  return { kind: "tool", line: `Used ${clip(title || "a tool", 80)}`, doing: clip(title, 60) || "Using a tool" };
+}
+
 // The conversation in one log, built from LOG's records ({ off, kind, data }) in file order.
 // Items (ids come from byte offsets, so they stay the same when earlier pages are added):
 //   { kind: "user", id, text, from?, at, images, paths? }   { kind: "agent", id, text, at, suggest? }
@@ -885,7 +913,7 @@ export class Conversation {
       }
       const l = parse(r.data);
       if (!l || typeof l !== "object") continue;
-      if (this.kind === "codex") this.codex(l, r.off); else this.claude(l, r.off);
+      if (this.kind === "codex") this.codex(l, r.off); else if (this.kind === "cursor") this.cursor(l, r.off); else this.claude(l, r.off);
     }
   }
 
@@ -1041,6 +1069,65 @@ export class Conversation {
       this.doing = null;
     }
   }
+
+  // Cursor through herdr-task cursor-chat (SHEP-6): its transcript's records, one a line.
+  cursor(l, off) {
+    const at = time(l.at);
+    switch (l.type) {
+      case "session": case "model":
+        if (l.model) this.meta = { ...this.meta, model: l.model, label: l.name ?? null, at };
+        if (l.type === "session" && l.perm) this.meta.perm = l.perm;
+        return;
+      case "queue": {
+        const text = String(l.text ?? "");
+        if (l.op === "enqueue") {
+          const u = cleanUser(text);
+          this.queue.push({ id: `q${off}`, raw: text, at, text: u?.text ?? "", images: 0 });
+          if (this.queue.length > 50) this.queue.shift();
+        } else {
+          const i = this.queue.findIndex((x) => x.raw === text);
+          if (i >= 0) this.queue.splice(i, 1);
+        }
+        return;
+      }
+      case "user": {
+        const u = cleanUser(String(l.text ?? ""));
+        if (u) this.user(`u${off}`, { ...u, at });
+        return;
+      }
+      case "agent": {
+        const said = this.agentText(String(l.text ?? ""));
+        if (said) this.push({ kind: "agent", id: `a${off}`, text: said, at, ...this.takeSuggest() });
+        return;
+      }
+      case "tool": {
+        const st = cursorStep(l);
+        st.at = at || Date.now();
+        this.step(String(l.call_id ?? l.id ?? `c${off}`), off, st);
+        const cmd = l.kind === "execute" ? String(l.input?.command ?? l.title ?? "") : "";
+        if (ARTIFACT.test(cmd)) this.push({ kind: "artifact", id: `art${off}`, at });
+        if (cmd) this.sent(cmd, off, at);
+        return;
+      }
+      case "permission":
+        // its card (the chat's asks) shows what it asks; the working line says it waits
+        this.doing = `Waiting for you: ${clip(l.title ?? "a permission", 50)}`;
+        return;
+      case "plan":
+        this.step(`p${off}`, off, { kind: "plan", line: "Updated its plan", doing: clip(l.steps?.[0], 60) || "Planning" });
+        this.done(`p${off}`, off);
+        return;
+      case "error":
+        if (l.text) this.push({ kind: "error", id: `e${off}`, text: String(l.text) });
+        return;
+      case "turn_end":
+        this.open.clear();
+        this.waits.clear();
+        this.waiting = false;
+        this.doing = null;
+        return;
+    }
+  }
 }
 
 // Turns LOG's output into its header line and records.
@@ -1070,6 +1157,8 @@ export function resultText(line, id) {
       const v = b?.content;
       text = typeof v === "string" ? v : Array.isArray(v) ? v.map((x) => x?.text ?? "").join("\n") : null;
     }
+    // Cursor's (herdr-task cursor-chat): its tool_done record's output
+    if (text === null && l.herdr === "cursor" && typeof l.output === "string") text = l.output;
     const o = l.payload?.output;
     if (text === null && o !== undefined) text = typeof o === "string" ? o : String(o?.output ?? o?.content ?? JSON.stringify(o));
   } else {

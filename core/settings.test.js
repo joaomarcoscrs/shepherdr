@@ -122,7 +122,7 @@ test("Feedback offers and the repo they file to", () => {
 });
 
 // SHEP-2: Cursor where its CLI is installed, for task workers only; Ask by default, never --force unless chosen.
-test("Cursor is offered for workers where installed, its own Ask by default", () => {
+test("Cursor is offered for workers and Assistants where installed, its own Ask by default", () => {
   const dflts = { claude: { model: "opus", per: {} }, codex: { models: [{ id: "gpt-5", label: "GPT-5", efforts: ["low"] }] },
     cursor: { model: "gpt-5", label: "OpenAI GPT-5", installed: true, models: [{ id: "gpt-5", label: "OpenAI GPT-5", efforts: [], fast: false }] } };
   expect(Object.keys(S.choicesFrom(dflts).menus)).toEqual(["claude", "codex"]);
@@ -131,7 +131,8 @@ test("Cursor is offered for workers where installed, its own Ask by default", ()
   expect(permDefault.cursor).toBe("manual");
   expect(defaults.agent).toBe("claude");
   expect(Object.keys(S.forRole("worker", menus))).toEqual(["claude", "codex", "cursor"]);
-  expect(Object.keys(S.forRole("coordinator", menus))).toEqual(["claude", "codex"]);
+  // SHEP-6: an Assistant runs Cursor in its chat (herdr-task cursor-chat); a reviewer still can't (no read-only mode)
+  expect(Object.keys(S.forRole("coordinator", menus))).toEqual(["claude", "codex", "cursor"]);
   expect(Object.keys(S.forRole("reviewer", menus))).toEqual(["claude", "codex"]);
   const toCursor = S.chooseModel(menus, permDefault, { agent: "claude", model: "opus", effort: "high", perm: "auto" }, "cursor", "gpt-5");
   expect(toCursor).toMatchObject({ agent: "cursor", model: "gpt-5", effort: null, fast: false, perm: "manual" });

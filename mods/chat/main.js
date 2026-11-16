@@ -1486,7 +1486,7 @@ export default class Chat extends View {
         msg.stuck = !!r.stuck;
         // Its own dialog is open in its terminal (a question or a permission with no card
         // here): the words answer it the "Reply instead…" way.
-        if (r.code !== 0 && refusal(r).kind === "blocked" && (this.kind === "claude" || this.kind === "codex")) r = await this.replyInstead(p.sent, cx);
+        if (r.code !== 0 && refusal(r).kind === "blocked" && (this.kind === "claude" || this.kind === "codex" || this.kind === "cursor")) r = await this.replyInstead(p.sent, cx);
       } catch (e) {
         r = { code: 1, stderr: String(e?.message ?? e) };
       }
@@ -1745,7 +1745,7 @@ export default class Chat extends View {
         const head = /^---\n([\s\S]*?)\n---\n?/.exec(src);
         const body = head ? src.slice(head[0].length) : src;
         const own = /^command:[ \t]*(.+)$/m.exec(head?.[1] ?? "")?.[1]?.trim();
-        const cmd = st?.agent && there ? agent.argvFor(st, { agent: null, argv: [] }).argv.map(q).join(" ") : own;
+        const cmd = st?.agent && there ? agent.argvFor(st, { agent: null, argv: [] }, { chat: true }).argv.map(q).join(" ") : own;
         if (body.trim() && cmd) {
           words = body.trim();
           oneOff = `herdr-${template}-${Date.now().toString(36)}`;
@@ -2335,6 +2335,7 @@ export default class Chat extends View {
     const users = (this.conv?.items ?? []).filter((x) => x.kind === "user" && !x.from && !/^\//.test(x.text ?? ""));
     const i = users.findIndex((u) => u.id === row.of);
     const back = i < 0 ? 1 : users.length - i;
+    if (this.kind === "cursor") { toast({ title: "Can't rewind", body: "Cursor's chat can't rewind.", level: "info" }); return; }
     cx.spawn(async (cx) => {
       if (this.kind === "claude") {
         await personHc(["send", this.addr, "/rewind"]);
@@ -2767,10 +2768,10 @@ export default class Chat extends View {
         const offline = this.machine && !online(this.machine) ? this.machine : null;
         const currentRow = agent.rowFor(c.agent, c);
         // Installed agents only (and always the one running).
-        // Cursor for a task's worker only (core/settings.js forRole): an Assistant lives in this chat, which can't
-        // read Cursor's conversation, and a reviewer runs read-only
-        const worker = Boolean(this.t?.labels?.["herdr.task"]) && !["reviewer", "helper"].includes(this.t?.labels?.["herdr.role"]);
-        const menus = Object.fromEntries(["claude", "codex", "cursor"].filter((k) => k === c.agent || (installed[k] && (k !== "cursor" || worker)))
+        // Cursor for a task's worker (its own terminal UI) and a chat agent such as an Assistant (its chat bridge,
+        // herdr-task cursor-chat, SHEP-6), never a reviewer or a helper (core/settings.js forRole)
+        const cursorOk = !["reviewer", "helper"].includes(this.t?.labels?.["herdr.role"]);
+        const menus = Object.fromEntries(["claude", "codex", "cursor"].filter((k) => k === c.agent || (installed[k] && (k !== "cursor" || cursorOk)))
           .map((k) => [k, agent.menuFor(k, dflts[k], k === c.agent ? currentRow : null)]));
         // As tall as the menu can get (chat-models' sizes): border and padding, another machine's
         // offline line, agent tabs, search, the list (it scrolls past 8 rows), separator, Reasoning header
@@ -2780,7 +2781,7 @@ export default class Chat extends View {
           at: at ? { x: Math.max(8, at.x - W + 90), y: Math.max(8, at.y - H - 10) } : "pointer",
           props: { pane: this.pickKey(), offline, width: W, height: H, select: name ? findModel(menus, name) : null,
             current: { agent: c.agent, model: currentRow, effort: c.effort ?? null, fast: c.fast, perm: c.perm ?? null },
-            menus, icons, permDefault: { claude: dflts.claude?.mode ?? "manual", codex: "auto" } } });
+            menus, icons, permDefault: { claude: dflts.claude?.mode ?? "manual", codex: "auto", cursor: "manual" } } });
       } finally {
         this.picking = false;
         cx.notify();
@@ -2822,7 +2823,8 @@ export default class Chat extends View {
     cx.spawn(async (cx) => {
       try {
         const t = JSON.parse((await hc(["get", this.addr, "--json"])).stdout);
-        const built = agent.argvFor(pick, { agent: this.kind, argv: t.foreground?.argv ?? [], session: agent.sessionOf(this.kind, this.path) });
+        // a chat's own agent: Cursor runs behind its chat bridge (herdr-task cursor-chat), which this chat reads
+        const built = agent.argvFor(pick, { agent: this.kind, argv: t.foreground?.argv ?? [], session: agent.sessionOf(this.kind, this.path) }, { chat: true });
         this.swapping = true;
         const next = await agent.restart(t, built, mine);
         this.follow_to(next);
@@ -3031,7 +3033,7 @@ export default class Chat extends View {
         // Its actions in a band row under it (the row above draws them too: band()).
         if (x.text) {
           const bar = { id: `b:${x.id}`, of: x.id, target: x.text, text: x.text, side: "user", at: x.at, pills: this.pills(x.id),
-            acts: bandActs("user", x.text, { from: x.from }) };
+            acts: bandActs("user", x.text, { from: x.from, rewind: this.kind !== "cursor" }) };
           out[out.length - 1] = { ...out[out.length - 1], bar };
           out.push({ kind: "band", id: `ab:${x.id}`, bar });
         }
@@ -3067,7 +3069,7 @@ export default class Chat extends View {
         // under its last row.
         if (!(working && i === items.length - 1) && out.length > first) {
           const bar = { id: `b:${x.id}`, of: x.id, target: x.text, text: x.text, side: "agent", at: x.at, pills: this.pills(x.id),
-            acts: bandActs("agent", x.text, { fork: Boolean(this.kind) }) };
+            acts: bandActs("agent", x.text, { fork: Boolean(this.kind) && agent.canFork(this.kind) }) };
           out[out.length - 1] = { ...out[out.length - 1], bar };
           out.push({ kind: "band", id: `ab:${x.id}`, bar });
         }
@@ -3185,7 +3187,7 @@ export default class Chat extends View {
 
   // Whose ask a card shows: the CLI's short name ("Claude asks").
   cli() {
-    return this.kind === "codex" ? "Codex" : "Claude";
+    return this.kind === "codex" ? "Codex" : this.kind === "cursor" ? "Cursor" : "Claude";
   }
 
   // The empty box's words: whom it writes to.
