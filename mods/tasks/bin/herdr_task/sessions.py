@@ -113,11 +113,16 @@ def session_of(pid):
             m = CURSOR_CHAT.search(f)
             if m:
                 return m.group(1), log_by_session("cursor", m.group(1))
+            # Cursor in a chat (herdr-task cursor-chat, SHEP-6): its own transcript, named by Cursor's chat id
+            m = CURSOR_BRIDGE.search(f)
+            if m:
+                return m.group(1), f
     return None, None
 
 
 UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 CURSOR_CHAT = re.compile(rf"/\.cursor/chats/[0-9a-f]+/({UUID})/store\.db$")
+CURSOR_BRIDGE = re.compile(rf"/cursor-chats/({UUID})\.jsonl$")
 
 
 def cursor_home():

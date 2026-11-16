@@ -1,16 +1,37 @@
 # Cursor Agent
 
-Cursor Agent (`cursor-agent`, or `agent` in newer installs) runs a task's worker beside Claude Code and Codex. It is
-offered wherever its CLI is on the machine's PATH (core/agents.js `DEFAULTS` reports `bin`).
+Cursor Agent (`cursor-agent`, or `agent` in newer installs) runs beside Claude Code and Codex, as a task's worker and
+as an Assistant. It is offered wherever its CLI is on the machine's PATH (core/agents.js `DEFAULTS` reports `bin`).
 
 ## Picking it
 
-- Settings › Agents › Workers: the model menu has a Cursor tab (window and web). Assistant and Reviewer don't offer it
-  (core/settings.js `forRole`), and the service refuses a Cursor Assistant or Reviewer.
+- Settings › Agents › Assistant and Workers: the model menu has a Cursor tab (window and web). The Reviewer doesn't
+  offer it (core/settings.js `CURSOR_ROLES`): Cursor has no read-only mode in every version of its CLI. The service
+  refuses a Cursor reviewer or helper.
+- A running Assistant's model menu (its chat) switches it to Cursor, or back. On Cursor, a new model goes in place from
+  the web app (`/model`), and as a restart on the same Cursor chat from the window.
 - One task: `herdr-task add --agent cursor [--model <id>]`, or `start --agent cursor`.
 - A running worker's model menu (its chat) can restart it on Cursor; `herdr-task switch` does the restart.
 
-## How it starts
+## An Assistant on Cursor (SHEP-6)
+
+Cursor's own terminal UI keeps no log Shepherdr can read and reports no status, so an Assistant runs
+`herdr-task cursor-chat` (mods/tasks/bin/herdr_task/cursor_chat.py). It starts **one** `cursor-agent acp`, Cursor's
+Agent Client Protocol server (JSON-RPC over stdio), and is its client:
+
+| What | How |
+| --- | --- |
+| Messages in | What the chat sends (hc's paste, bracketed: a message of many lines is one) is a `session/prompt`. One sent mid-turn waits its turn (queued). Esc or Ctrl+C stops the turn (`session/cancel`). |
+| Conversation out | Cursor's words, tool calls and their results go to a transcript, `<data>/cursor-chats/<chat id>.jsonl` (layout kind `cursor-chats`), held open while it runs: the chat finds it by the process (core/chat-log.js `FIND`) and reads it (`Conversation.cursor`). |
+| Status | OSC 7501 with `app=cursor`: working, idle, blocked (`kind=permission`, msg `approve Bash: …`), error; `blocked kind=auth` when Cursor is signed out. |
+| Permissions | Cursor asks (`session/request_permission`) for what its allowlist lacks. The bridge shows a menu in its terminal (1 Allow once, 2 Allow always, 3 Reject, Esc rejects) and leaves the request where the chat's cards find Claude Code's hook requests (`data/chat-asks/req/<id>.json`, as mods/chat/ask-hook.sh). A card's Allow is Cursor's *Allow once*; Deny or Dismiss is *Reject*. Whichever answers first wins. It is never answered for the person, not even in Full access. |
+| Model | `--model <id>` at start; `/model <id>` in place (the model menu sends it). An id as the menu lists it (`composer-2.5[fast=true]`) or its short name (`composer-2.5`). Cursor saves a session's model as its default in `~/.cursor/cli-config.json`: the bridge puts those keys back, so a chat's model never changes the person's Cursor default. |
+| Models listed | Cursor lists the account's models when a session starts; the bridge keeps them in `cursor-chats/models.json`, which the menus read. Before any Cursor chat has run there, the menu lists the CLI's configured model; others are typed by id. |
+| Resume | `--resume <chat id>` (`session/load`): a restart, a model menu restart and a revive after a crash continue the same Cursor chat. A chat Cursor can't load starts a new one and says so in the chat and the terminal, with where the old transcript is. |
+| Switch from or to Claude/Codex | A restart with a handoff (mods/coordinator/restart.sh): the new agent is told the old one's log, the bridge's transcript included. Conversations don't move between CLIs. |
+| Full access | `cursor-agent --force acp` (Cursor's own: its deny list still applies). Ask is Cursor's allowlist, asking for the rest. |
+
+## How a worker starts
 
 | Choice | argv |
 | --- | --- |
@@ -19,22 +40,40 @@ offered wherever its CLI is on the machine's PATH (core/agents.js `DEFAULTS` rep
 | Permissions: Full access | `--force` (Cursor's deny list still applies) |
 | Resume | `--resume <chat id>` |
 
-There is no effort, speed or plan choice: Cursor's CLI has none in every version (a "thinking" model is a model id of
-its own). Its menu lists the configured model; any other is typed by id ("Use the id typed").
+There is no effort, speed or plan choice in the menus: a "thinking" model or a level is a model id of its own in Cursor
+(`claude-opus-5-5[context=300k,effort=medium,fast=false]`).
 
 ## Sessions
 
-herdr-task reads a live Cursor agent's chat id from the store it holds open (`~/.cursor/chats/<hash>/<id>/store.db`)
-and resumes it with `--resume`. A transcript (`~/.cursor/projects/*/agent-transcripts/<id>.jsonl`) is recorded as its log
-where the CLI writes one. With no chat id known, a restart starts fresh with a handoff.
+herdr-task reads a live Cursor worker's chat id from the store it holds open (`~/.cursor/chats/<hash>/<id>/store.db`),
+an Assistant's from its bridge transcript, and resumes it with `--resume`. With no chat id known, a restart starts fresh
+with a handoff.
 
 ## Limits
 
-- Cursor reports no status to Herdr (no OSC 7501): a Cursor task reads Working while its agent runs, Needs you
-  (Agent stopped) once it exits, and Ready once it says so. A turn that ends without `ready`, or a permission it
-  asks for in its terminal, is not shown as Needs you. The brief tells it so (launch.py `cursor_line`).
-- Its conversation isn't shown in the chat: the chat says it can't read this agent, and the Terminal view works.
-- In Ask mode every command its allowlist lacks, `herdr-task status` and `ready` too, waits for a yes in its terminal.
-- No in-place model switch (a restart resumes the chat), no fork, no slash-command list, no usage limits, no Backup
-  takeover to or from Cursor.
+- Cursor's CLI must be signed in (`cursor-agent login`, in a terminal, by the person). Signed out, the bridge stops,
+  says so, and reports `blocked kind=auth`.
+- A worker (Cursor's own UI) reports no status to Herdr: it reads Working while its agent runs, Needs you (Agent
+  stopped) once it exits, and Ready once it says so; its conversation isn't shown in the chat (the Terminal view
+  works). The brief tells it so (launch.py `cursor_line`). An Assistant has none of these limits.
+- No rewind, no fork, no slash-command list, no usage limits, no Backup takeover to or from Cursor.
+- No reasoning level or Fast row in the menus; Cursor's levels are part of its model ids.
+- Pictures pasted into the chat reach Cursor as their paths (it reads them with its own tools), not as images.
+- Whether `--force` changes what Cursor's ACP server asks was not checked against a real session (its permission
+  requests still go to the person).
 - Cursor's own `attribution` settings add a co-author trailer to its commits unless turned off in cli-config.json.
+
+## For another model menu (joão HQ's jhq-models)
+
+The chat gives its model menu (mods/chat-models, or a clone) these props; nothing else changed:
+
+- `menus.cursor` is now there for an Assistant and any chat agent but a reviewer or helper, where Cursor's CLI is
+  installed. Its `models` are the account's (from `cursor-chats/models.json`) once a Cursor chat has run on that
+  machine, ids as Cursor gives them (`composer-2.5[fast=true]`), `name` its short name; `efforts: []`, `fast: false`;
+  `perms`: `manual` (Ask) and `full` (Full access).
+- `current.chat: true` when the running agent is Cursor behind the bridge: it can take a model change in place, by
+  `/model <id>` typed into it (the web's model menu does so: core/live-switch.js `liveOK`). Shepherdr's window chat
+  restarts it on the same Cursor chat instead (`--resume`). Another permission mode, or another CLI, always restarts.
+  Without `current.chat` (a worker), any change restarts.
+- A pick of Cursor for an Assistant starts `herdr-task cursor-chat …` (core/agents.js `argvFor(pick, old, { chat:
+  true })`): its conversation shows in the chat, so a "Cursor shows in Terminal" note is only true for workers.

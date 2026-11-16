@@ -28,6 +28,7 @@ export const KINDS = {
   "secret-served": [".herdr/secret-served", "state", "secret-served"],
   "cli-check": [".herdr/cli-check.json", "state", "cli-check.json"],
   "machine-hold": [".herdr/machine-hold.json", "state", "machine-hold.json"],
+  "cursor-chats": [".herdr/cursor-chats", "data", "cursor-chats"],
 };
 
 const abs = (p) => (typeof p === "string" && p.startsWith("/") ? p.replace(/\/+$/, "") : null);
@@ -51,7 +52,7 @@ export function paths(home, env = {}, migrated = false, mac = false) {
  * @typedef {{ roots: { config: string, data: string, state: string, cache?: string }, migrated: boolean, settings: string,
  *   "model-picks": string, tasks: string, artifacts: string, vault: string, "secret-remote": string, tools: string,
  *   service: string, browser: string, "secret-drop": string, "secret-served": string, "cli-check": string,
- *   "machine-hold": string, worktrees: string }} ShepPaths
+ *   "machine-hold": string, "cursor-chats": string, worktrees: string }} ShepPaths
  */
 
 /** The same from roots already known (what SH_PRINT printed on that machine).

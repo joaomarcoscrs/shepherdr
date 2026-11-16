@@ -14,7 +14,9 @@ import { chatLabel } from "../core/spaces.js";
 import { agentKindOf as kindOf } from "../core/chat-reader.js";
 import * as LS from "../core/live-switch.js";
 
-const { DEFAULTS, parseDefaults, current, menuFor, rowFor, argvFor, sessionOf, NAMES, line, PICKS_FILE, parsePicks, pickKey, withPin, withRecent } = AG as any;
+const { DEFAULTS, parseDefaults, current, menuFor, rowFor, argvFor, sessionOf, NAMES, line, PICKS_FILE, parsePicks, pickKey, withPin, withRecent, isCursorChat } = AG as any;
+/** Whether Cursor may run this agent: anything but a reviewer or a helper (core/settings.js CURSOR_ROLES). */
+export const cursorRole = (t: any) => !["reviewer", "helper"].includes(t?.labels?.["herdr.role"]);
 
 async function run(cmd: string[]) {
   const p = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
@@ -69,10 +71,9 @@ export class Agents {
     const [claude, codex, cursor, have] = await Promise.all([this.defaults("claude", machine), this.defaults("codex", machine), this.defaults("cursor", machine),
       sh(this.hub, 'for c in "$@"; do command -v "$c" >/dev/null 2>&1 && echo "$c"; done', ["agents", "claude", "codex"], machine).then((r: any) => new Set(String(r?.stdout ?? "").split("\n").filter(Boolean)), () => null)]);
     const dflts: any = { claude, codex, cursor };
-    // Cursor only where its CLI is (cursor-agent or agent on that machine's PATH)
-    // and for a task's worker only (core/settings.js forRole): an Assistant lives in its chat, a reviewer runs read-only
-    const worker = !!t.labels?.["herdr.task"] && !["reviewer", "helper"].includes(t.labels?.["herdr.role"]);
-    const offered = (k: string) => k === kind || (k === "cursor" ? !!cursor?.installed && worker : !have || have.has(k));
+    // Cursor only where its CLI is (cursor-agent or agent on that machine's PATH), and never for a reviewer or a helper
+    // (core/settings.js forRole): a task's worker runs Cursor's own UI, an Assistant its chat bridge (SHEP-6)
+    const offered = (k: string) => k === kind || (k === "cursor" ? !!cursor?.installed && cursorRole(t) : !have || have.has(k));
     let meta = reader?.conv?.meta ?? {};
     // a resumed conversation's log names the model it ran on before: until this process writes, its arguments say
     if (t.created_ms && meta.at && meta.at < t.created_ms) meta = { used: meta.used, window: meta.window };
@@ -128,8 +129,7 @@ export class Agents {
     const [claude, codex, cursor] = await Promise.all([this.defaults("claude", machine), this.defaults("codex", machine), this.defaults("cursor", machine)]);
     const dflt: any = { claude, codex, cursor };
     const c = current(kind, t.foreground?.argv ?? t.argv ?? [], reader?.conv?.meta ?? {}, dflt[kind]);
-    const worker = !!t.labels?.["herdr.task"] && !["reviewer", "helper"].includes(t.labels?.["herdr.role"]);
-    const clis = ["claude", "codex", ...((cursor?.installed && worker) || kind === "cursor" ? ["cursor"] : [])].map((k) => {
+    const clis = ["claude", "codex", ...((cursor?.installed && cursorRole(t)) || kind === "cursor" ? ["cursor"] : [])].map((k) => {
       const m = menuFor(k, dflt[k], k === kind ? c.model : null);
       return { kind: k, name: NAMES[k], models: m.models.map((x: any) => ({ id: x.id, label: x.name, efforts: x.efforts, ...(x.defaultEffort ? { defaultEffort: x.defaultEffort } : {}) })),
         speeds: m.models.some((x: any) => x.fast) ? ["normal", "fast"] : ["normal"] };
@@ -149,7 +149,8 @@ export class Agents {
     let meta = reader?.conv?.meta ?? {};
     if (t.created_ms && meta.at && meta.at < t.created_ms) meta = { used: meta.used, window: meta.window };
     const c = current(kind, t.foreground?.argv ?? t.argv ?? [], meta, dflt);
-    const from = { agent: kind, model: rowFor(kind, c) ?? "", effort: c.effort ?? "", fast: !!c.fast, perm: c.perm ?? "" };
+    const from = { agent: kind, model: rowFor(kind, c) ?? "", effort: c.effort ?? "", fast: !!c.fast, perm: c.perm ?? "",
+      chat: isCursorChat(t.foreground?.argv ?? t.argv ?? []) };
     const to = { agent: pick.kind, model: pick.model ?? "", effort: pick.effort ?? "", fast: pick.speed === "fast", perm: pick.perm ?? "" };
     if (!LS.liveOK(from, to)) return { terminal: await this.restart(addr, reader, pick) };
     const state = t.status?.state;
@@ -189,9 +190,10 @@ export class Agents {
     if (!t || t.state !== "live") throw new Error("That agent isn't running.");
     const kind = kindOf(t) ?? "claude";
     const old = { agent: kind, argv: t.foreground?.argv ?? t.argv ?? [], session: sessionOf(kind, reader?.path ?? null) };
-    const built = argvFor({ agent: pick.kind, model: pick.model, effort: pick.effort, fast: pick.speed === "fast", perm: pick.perm ?? current(kind, old.argv, {}, {}).perm }, old);
-    const pane = t.labels?.["herdr.chat"] ?? "";
     const task = t.labels?.["herdr.task"];
+    // not a task's: Cursor runs in its chat (herdr-task cursor-chat), never its own terminal UI the chat can't read
+    const built = argvFor({ agent: pick.kind, model: pick.model, effort: pick.effort, fast: pick.speed === "fast", perm: pick.perm ?? current(kind, old.argv, {}, {}).perm }, old, { chat: !task });
+    const pane = t.labels?.["herdr.chat"] ?? "";
     if (task) {
       const r = await run(["herdr-task", "switch", task, "--folder", t.foreground?.cwd ?? t.cwd, "--argv", JSON.stringify(built.base), "--json"]);
       let out: any = {};

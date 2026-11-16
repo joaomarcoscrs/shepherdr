@@ -195,3 +195,17 @@ test("SHEP-2: Cursor never switches in place (no Codex or Claude keys typed into
   await expect(switchLive(io, "cursor", from, { ...from, model: "sonnet-4" })).rejects.toThrow("can't switch in place");
   expect(typed).toEqual([]);
 });
+
+test("SHEP-6: Cursor in a chat switches its model in place through its bridge's /model, and says when Cursor refuses", async () => {
+  const from = { agent: "cursor", model: "default[]", effort: null, fast: false, perm: "manual", chat: true };
+  expect(liveOK(from, { ...from, model: "composer-2.5[fast=true]" })).toBe(true);
+  // another permission mode still restarts (Full access is how Cursor's process starts)
+  expect(liveOK(from, { ...from, perm: "full" })).toBe(false);
+  let screen = "› hi\nhello\n";
+  const typed = [];
+  const io = { send: async (t) => { typed.push(t); screen += t.includes("nope") ? "Model not changed: Unknown model\n" : "Model set to composer-2.5\n"; },
+    keys: async () => {}, screen: async () => screen, sleep: async () => {} };
+  await switchLive(io, "cursor", from, { ...from, model: "composer-2.5[fast=true]" });
+  expect(typed).toEqual(["/model composer-2.5[fast=true]"]);
+  await expect(switchLive(io, "cursor", from, { ...from, model: "nope" })).rejects.toThrow("Model not changed: Unknown model");
+});

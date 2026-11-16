@@ -1,0 +1,16 @@
+{"herdr":"cursor","type":"session","at":"2026-11-16T20:22:03.841Z","session":"11111111-2222-3333-4444-555555555555","resumed":false,"model":"default[]","name":"Auto","perm":"manual","cwd":"/work/shop"}
+{"herdr":"cursor","type":"user","at":"2026-11-16T20:22:03.843Z","text":"<hc reply-to=\"PONG\"/>"}
+{"herdr":"cursor","type":"turn_end","at":"2026-11-16T20:22:03.844Z","reason":"end_turn"}
+{"herdr":"cursor","type":"user","at":"2026-11-16T20:22:03.844Z","text":"say hi there"}
+{"herdr":"cursor","type":"agent","at":"2026-11-16T20:22:03.844Z","text":"hi there"}
+{"herdr":"cursor","type":"turn_end","at":"2026-11-16T20:22:03.844Z","reason":"end_turn"}
+{"herdr":"cursor","type":"user","at":"2026-11-16T20:22:03.844Z","text":"run herdr-artifact publish proof"}
+{"herdr":"cursor","type":"tool","at":"2026-11-16T20:22:03.844Z","call_id":"call-1_fc_1","kind":"execute","title":"herdr-artifact publish proof","input":{"command":"herdr-artifact publish proof"},"path":null}
+{"herdr":"cursor","type":"permission","at":"2026-11-16T20:22:03.844Z","call_id":"call-1_fc_1","title":"herdr-artifact publish proof","detail":"Not in allowlist: herdr-artifact"}
+{"herdr":"cursor","type":"permission_done","at":"2026-11-16T20:22:04.504Z","outcome":"allowed","by":"terminal","option":"allow-once"}
+{"herdr":"cursor","type":"tool_done","at":"2026-11-16T20:22:04.506Z","call_id":"call-1_fc_1","status":"completed","output":"ran\n"}
+{"herdr":"cursor","type":"agent","at":"2026-11-16T20:22:04.506Z","text":"ALLOWED"}
+{"herdr":"cursor","type":"turn_end","at":"2026-11-16T20:22:04.506Z","reason":"end_turn"}
+{"herdr":"cursor","type":"user","at":"2026-11-16T20:22:04.506Z","text":"say queued one"}
+{"herdr":"cursor","type":"agent","at":"2026-11-16T20:22:04.507Z","text":"queued one"}
+{"herdr":"cursor","type":"turn_end","at":"2026-11-16T20:22:04.507Z","reason":"end_turn"}

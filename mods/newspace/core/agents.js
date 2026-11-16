@@ -2,14 +2,22 @@
 // rules both the window's model menu (lib/agent.js, mods/chat-models) and the web app's use. Reading an agent's own
 // settings and restarting it run where each side runs commands (lib/agent.js, service/agents.ts).
 // Shared core: the source is core/agents.js; bin/sync-shared copies it into the mods in lib/COPIES.
+import { SH } from "./paths.js";
+
 export const NAMES = { claude: "Claude Code", codex: "Codex", cursor: "Cursor" };
 // The agent kind a program word is: Cursor Agent's CLI is `cursor-agent`, or `agent` as newer installs (and Herdr's own
 // agent list) call it. Shepherdr starts `cursor-agent`, the name every install of it has.
-const KIND_OF_WORD = { claude: "claude", codex: "codex", "cursor-agent": "cursor", agent: "cursor" };
+// `cursor-chat` is herdr-task's bridge that runs Cursor as a chat agent (an Assistant, SHEP-6): herdr-task cursor-chat.
+const KIND_OF_WORD = { claude: "claude", codex: "codex", "cursor-agent": "cursor", agent: "cursor", "cursor-chat": "cursor" };
 export function kindOfWord(word) {
   return KIND_OF_WORD[String(word ?? "").split("/").pop()] ?? null;
 }
 export const CURSOR_BIN = "cursor-agent";
+// Cursor in a chat (an Assistant): Cursor's ACP server behind herdr-task's bridge, which shows its conversation in the
+// chat, reports its status and sends its permissions to the chat's cards (mods/tasks/bin/herdr_task/cursor_chat.py).
+export const CURSOR_CHAT = ["herdr-task", "cursor-chat"];
+/** Whether argv runs Cursor through the chat bridge (herdr-task cursor-chat). */
+export const isCursorChat = (argv) => (argv ?? []).some((a, i) => a === "cursor-chat" && i > 0 && /(?:^|\/)herdr-task$/.test(String(argv[i - 1])));
 
 // Claude Code's current models, as its /model menu offers them. `id` is what --model gets;
 // `match` the names a running agent may report for it.
@@ -82,6 +90,8 @@ if [ "$1" = claude ]; then
   f="$HOME/.claude/settings.json"
   command -v jq >/dev/null && [ -f "$f" ] && jq -r '"model\\t\\(.model // "")", "effort\\t\\(.effortLevel // "")", "fast\\t\\(if .fastMode == true then "on" else "" end)", "per\\t\\(.modelSettings // {} | with_entries(.value |= (.effortLevel // null)) | tojson)", "mode\\t\\(.permissions.defaultMode // "")"' "$f" 2>/dev/null
 elif [ "$1" = cursor ]; then
+${SH}  # the models Cursor lists for this account, as its chat bridge last read them (herdr-task cursor-chat)
+  [ -f "$SHEP_CURSOR_CHATS/models.json" ] && { printf 'chatmodels\\t'; tr -d '\\n' < "$SHEP_CURSOR_CHATS/models.json"; echo; }
   f="\${CURSOR_CONFIG_DIR:-$HOME/.cursor}/cli-config.json"
   [ -f "$f" ] || f="\${XDG_CONFIG_HOME:-$HOME/.config}/cursor/cli-config.json"
   command -v jq >/dev/null && [ -f "$f" ] && jq -r '"model\\t\\(.model.modelId // "")", "label\\t\\(.model.displayName // "")", "approval\\t\\(.approvalMode // "")", "sandbox\\t\\(.sandbox.mode // "")"' "$f" 2>/dev/null
@@ -122,8 +132,13 @@ export function parseDefaults(kind, stdout) {
     // Cursor's model is its own last pick (cli-config.json); it has no effort or speed setting. Its other models are
     // typed by id in the picker (Cursor lists them only for a signed-in account, and older versions not at all).
     const model = out.model || null;
-    return { model, label: out.label || null, mode: out.approval || null, sandbox: out.sandbox || null, installed: Boolean(out.bin),
-      models: model ? [{ id: model, label: out.label || model, efforts: [], fast: false, defaultEffort: null }] : [] };
+    // the account's whole list once a Cursor chat (herdr-task cursor-chat) read it: Cursor's own ids, each with its name
+    let listed = [];
+    try { listed = (JSON.parse(out.chatmodels || "{}").models ?? []).filter((m) => m?.id); } catch {}
+    const models = listed.map((m) => ({ id: m.id, label: m.name || m.id, efforts: [], fast: false, defaultEffort: null }));
+    if (model && !models.some((m) => m.id === model || m.id.split("[")[0] === model))
+      models.unshift({ id: model, label: out.label || model, efforts: [], fast: false, defaultEffort: null });
+    return { model, label: out.label || null, mode: out.approval || null, sandbox: out.sandbox || null, installed: Boolean(out.bin), models };
   }
   return kind === "claude"
     ? { model: out.model || null, effort: out.effort || null, fast: Boolean(out.fast), per: parsePer(out.per), mode: out.mode || null }
@@ -151,9 +166,11 @@ export function current(kind, argv, meta, dflt) {
       fast: Boolean(fast), perm: perm === "default" ? "manual" : perm, used: meta.used ?? null, window: meta.window ?? (big ? 1000000 : 200000) };
   }
   if (kind === "cursor") {
+    // a chat (herdr-task cursor-chat): its transcript names the model it runs now and its name, /model in place too
     const model = meta.model ?? flag(argv, "--model") ?? dflt.model ?? null;
     const full = argv.some((a) => a === "--force" || a === "-f" || a === "--yolo");
-    return { agent: "cursor", model, label: dflt.models?.find((m) => m.id === model)?.label ?? null, perm: full ? "full" : "manual",
+    const label = meta.label ?? dflt.models?.find((m) => m.id === model || m.id.split("[")[0] === model)?.label ?? (model ? String(model).split("[")[0] : null);
+    return { agent: "cursor", model, label: model === "default[]" ? "Auto" : label, perm: full ? "full" : "manual",
       effort: null, fast: false, used: meta.used ?? null, window: meta.window ?? null };
   }
   const o = overrides(argv);
@@ -372,7 +389,8 @@ function stripSession(kind, argv) {
   argv = argv ?? [];
   const at = agentAt(argv);
   if (at < 0) return null;
-  const rest = argv.slice(at + 1), out = [argv[at]];
+  // the chat bridge is herdr-task's command: herdr-task cursor-chat, as on any machine's PATH
+  const rest = argv.slice(at + 1), out = argv[at] === "cursor-chat" ? [...CURSOR_CHAT] : [argv[at]];
   let resumed = false;
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
@@ -401,7 +419,9 @@ function stripSession(kind, argv) {
 
 // How to start the chosen agent: { argv, resume } (resume: argv already continues the session).
 // `session`: the old conversation's id when it can be resumed (same agent only).
-export function argvFor(pick, old) {
+// opts.chat: it runs in a chat (an Assistant): Cursor then runs behind herdr-task's chat bridge (CURSOR_CHAT), as it
+// did already when old argv ran it so.
+export function argvFor(pick, old, opts = {}) {
   const same = pick.agent === old.agent;
   const flags = same ? kept(pick.agent, old.argv ?? []) : [];
   if (pick.agent === "claude") {
@@ -415,9 +435,10 @@ export function argvFor(pick, old) {
     return { argv: a, resume: false, base: a };
   }
   if (pick.agent === "cursor") {
-    // the same program word it ran as (agent or cursor-agent), else cursor-agent
-    const word = same ? argvWord(old.argv) : null;
-    const a = [word && kindOfWord(word) === "cursor" ? word : CURSOR_BIN, ...flags];
+    const chat = opts.chat || (same && isCursorChat(old.argv));
+    // the same program word it ran as (agent or cursor-agent), else cursor-agent; in a chat, the bridge
+    const word = same && !chat ? argvWord(old.argv) : null;
+    const a = chat ? [...CURSOR_CHAT, ...flags] : [word && word !== "cursor-chat" && kindOfWord(word) === "cursor" ? word : CURSOR_BIN, ...flags];
     if (pick.model) a.push("--model", pick.model);
     // Full access is --force, said only when chosen: Ask is Cursor's own default (its allowlist, asking in its terminal).
     if (pick.perm === "full") a.push("--force");

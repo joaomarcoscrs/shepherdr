@@ -162,6 +162,10 @@ def main():
     if argv[:1] == ["--version"]:
         print(VERSION)
         return 0
+    if argv[:1] == ["cursor-chat"]:
+        # SHEP-6: Cursor Agent as a chat agent (an Assistant) in this terminal, over its ACP server
+        from .cursor_chat import run as cursor_chat
+        return cursor_chat(argv[1:])
 
     p = argparse.ArgumentParser(prog="herdr-task", description="Herdr's tasks: add, start and finish work for a folder.",
                                 epilog="Run on another machine's folder: herdr-task --on <machine> <command> ...")

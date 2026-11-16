@@ -445,10 +445,10 @@ export class Settings {
       if (word !== null) {
         try { v = JSON.parse(word); } catch { throw new Error("Not an agent."); }
         const ok = (x: unknown) => x == null || (typeof x === "string" && /^[\w.\[\]-]{1,60}$/.test(x));
-        // Cursor only for task workers (core/settings.js forRole): an Assistant needs its chat, a reviewer read-only
+        // Cursor for workers and Assistants (core/settings.js forRole), never a reviewer (it runs read-only)
         const clis = CURSOR_ROLES.includes(field) ? ["claude", "codex", "cursor"] : ["claude", "codex"];
         if (!clis.includes(v?.agent) || !ok(v.model) || !ok(v.effort))
-          throw new Error(v?.agent === "cursor" ? "Cursor can only run task workers." : clis.includes("cursor") ? "Pick Claude Code, Codex or Cursor." : "Pick Claude Code or Codex.");
+          throw new Error(v?.agent === "cursor" ? "Cursor can't run the reviewer." : clis.includes("cursor") ? "Pick Claude Code, Codex or Cursor." : "Pick Claude Code or Codex.");
         // its permission mode, as the window's Permissions pick (one of the CLI's modes; none: the CLI's own default)
         const PERM: Record<string, string[]> = { claude: ["manual", "auto", "acceptEdits", "plan", "bypassPermissions"], codex: ["read-only", "auto", "full"], cursor: ["manual", "full"] };
         if (v.perm != null && !PERM[v.agent].includes(v.perm)) throw new Error("Not one of its permission modes.");

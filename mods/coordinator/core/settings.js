@@ -163,9 +163,9 @@ export function roleSel(role, own, choices, worker) {
     return { sel: { agent: o, model: choices.menus[o].models[0]?.id ?? null, effort: null, fast: false, perm: choices.permDefault?.[o] ?? null }, unset: true };
   return { sel: choices?.defaults ? { ...choices.defaults } : null, unset: true };
 }
-// The agents a role can run: Cursor only for task workers. An Assistant lives in its chat and a reviewer runs read-only,
-// and Cursor has neither a conversation log Shepherdr reads nor a read-only mode in every version of its CLI.
-export const CURSOR_ROLES = ["worker"];
+// The agents a role can run: Cursor for task workers (its own terminal UI) and Assistants (its chat bridge,
+// herdr-task cursor-chat, SHEP-6). Not reviewers: Cursor has no read-only mode in every version of its CLI.
+export const CURSOR_ROLES = ["worker", "coordinator"];
 export function forRole(role, menus) {
   if (CURSOR_ROLES.includes(role) || !menus?.cursor) return menus;
   const { cursor: _, ...rest } = menus;

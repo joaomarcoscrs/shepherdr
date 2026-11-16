@@ -63,6 +63,14 @@ if [ "$app" = claude-code ] && [ -n "$pid" ]; then
   sid=$(jq -r '.sessionId // empty' "$HOME/.claude/sessions/$pid.json" 2>/dev/null)
   [ -n "$sid" ] && log=$(find "$HOME/.claude/projects" -name "$sid.jsonl" 2>/dev/null | head -1)
 fi
+# Cursor's chat bridge (herdr-task cursor-chat) holds its transcript open: cursor-chats/<chat id>.jsonl
+if [ -z "$log" ] && [ "$app" = cursor ] && [ -n "$pid" ]; then
+  if [ -d "/proc/$pid/fd" ]; then
+    log=$(for d in /proc/"$pid"/fd/*; do readlink "$d"; done 2>/dev/null | grep '/cursor-chats/[^/]*\.jsonl$' | head -1)
+  else
+    log=$(lsof -p "$pid" -Fn 2>/dev/null | sed -n 's/^n//p' | grep '/cursor-chats/[^/]*\.jsonl$' | head -1)
+  fi
+fi
 if [ -z "$log" ] && [ -n "$created" ]; then
   log=$(find "$HOME/.claude/projects" "$HOME/.codex/sessions" "$HOME/.pi/agent/sessions" "$HOME/.local/share/opencode" \
       -type f \( -name '*.jsonl' -o -name '*.json' \) -newermt "@$((created / 1000))" 2>/dev/null \
@@ -117,10 +125,12 @@ own=""
 [ -z "$argv" ] && [ "$role" = coordinator ] && own=$(awk '/^---[[:space:]]*$/ {f++; next} f == 1 && sub(/^command:[ \t]*/, "") {print; exit}' "$tpl" 2>/dev/null)
 # argv's words into cmd. A read loop, not mapfile: macOS's /bin/bash is 3.2, which has no mapfile (#736).
 argv_cmd() { local a; cmd=(); while IFS= read -r a; do cmd+=("$a"); done < <(jq -r '.[]' <<<"$argv"); }
+# The agent's key for its herdr.agent label: its program, or cursor for Cursor's chat bridge (herdr-task cursor-chat).
+agent_key() { case " ${cmd[*]} " in *" cursor-chat "*) echo cursor ;; *) basename "${cmd[0]}" ;; esac; }
 if [ -n "${HERDR_RESTART_RESUME:-}" ] && [ -n "$argv" ]; then
   argv_cmd
   [ ${#cmd[@]} -gt 0 ] || exit 1
-  new=$(hc run --bg --json --no-parent --cwd "$cwd" "${labels[@]}" --label "herdr.agent=$(basename "${cmd[0]}")" -- sh -c "$clean"' exec "$@"' herdr-clean "${cmd[@]}" | jq -r '.address // empty')
+  new=$(hc run --bg --json --no-parent --cwd "$cwd" "${labels[@]}" --label "herdr.agent=$(agent_key)" -- sh -c "$clean"' exec "$@"' herdr-clean "${cmd[@]}" | jq -r '.address // empty')
 elif [ -z "$argv" ] && [ "$role" = coordinator ] && [ -z "$own" ]; then
   new=$(hc run --bg --json --no-parent --cwd "$cwd" "${labels[@]}" assistant "$handoff" | jq -r .address)
 else
@@ -130,7 +140,7 @@ else
   else
     argv_cmd
     [ ${#cmd[@]} -gt 0 ] || exit 1
-    key=$(basename "${cmd[0]}")
+    key=$(agent_key)
     # Codex runs its commands outside hc without --no-daemon.
     [ "$key" = codex ] && [[ " ${cmd[*]} " != *" --no-daemon "* ]] && cmd+=(--no-daemon)
     line=$(printf '%q ' "${cmd[@]}")
