@@ -410,7 +410,7 @@
         ]
       },
       "forms": {
-        "herdr": "Summary, changes, checks, proof, details; Accept merges",
+        "herdr": "Summary, try it (a Roboflow PR and its ephemeral), changes, checks, proof, details; Accept merges",
         "desktop": "Dialog; proof opens over it",
         "tablet": "Dialog",
         "phone": "Tall bottom sheet; proof opens over it"

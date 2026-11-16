@@ -2487,6 +2487,26 @@ class MergedOnlyWithOwnWork(unittest.TestCase):
             self.task.update(mode="here")  # worked in the folder itself: never merges
             self.assertFalse(merges())
 
+    def test_a_roboflow_tasks_card_links_its_pull_request_and_environment(self):
+        """SHEP-4: a roboflow/roboflow task's evidence carries its pull request and its ephemeral environment; any other
+        task's evidence is as before, and GitHub is never asked about an environment for it."""
+        from unittest import mock
+        import herdr_task.proof as proof
+        asked = []
+        env = lambda t: asked.append(t["pr"]["number"]) or {"state": "none"}
+        with mock.patch.object(proof, "artifacts_of", lambda folder: []), mock.patch.object(proof, "ephemeral_of", env), \
+                mock.patch.object(proof, "checks_of", lambda t: {"state": "none", "text": ""}):
+            self.task["pr"] = {"number": 7, "url": "https://github.com/o/r/pull/7", "repo": "o/r"}
+            e = proof.evidence(self.store, self.task)
+            self.assertNotIn("ephemeral", e)
+            self.assertNotIn("pr", e)
+            self.assertEqual(asked, [])
+            self.task["pr"] = {"number": 19640, "url": "https://github.com/roboflow/roboflow/pull/19640", "repo": "roboflow/roboflow"}
+            e = proof.evidence(self.store, self.task)
+            self.assertEqual(e["pr"], {"number": 19640, "url": "https://github.com/roboflow/roboflow/pull/19640"})
+            self.assertEqual(e["ephemeral"], {"state": "none"})
+            self.assertEqual(asked, [19640])
+
     def test_a_branch_caught_up_with_main_is_not_merged(self):
         self.commit(self.main, "another task merged")
         self.git(self.task["worktree"], "merge", "-q", "--ff-only", "main")  # SHEP-17's agent
@@ -6152,6 +6172,90 @@ class LinkActions(unittest.TestCase):
         r = self.link.again("vmb", ["list"], lambda: subprocess.CompletedProcess([], *answers.pop(0)))
         self.assertEqual((r.returncode, r.stdout), (0, "[]"))
         self.assertFalse(self.link.lost(subprocess.CompletedProcess([], 1, "", "herdr-task: no such task")))
+
+
+class RoboflowEphemeral(unittest.TestCase):
+    """SHEP-4: a Roboflow task's ephemeral environment, read only from featur's "featur / environment" check run on its
+    pull request's head (herdr_task/ephemeral.py): a link only when that check says Ready for this very pull request;
+    never made up, never inferred. gh is faked; nothing is labelled, built or torn down."""
+
+    AT = 1795000000000  # before the lease below ends (2026-11-19T17:43:20Z)
+
+    def setUp(self):
+        sys.path.insert(0, BIN)
+        import herdr_task.ephemeral as eph
+        self.eph = eph
+
+    def pr(self, state="open", labels=("ephemeral", "eph-shared-db"), merged=None, n=19640):
+        return {"number": n, "state": state, "merged_at": merged, "head": {"sha": "6eb37a3a74e2"},
+                "labels": [{"name": x} for x in labels]}
+
+    def run_(self, status="completed", conclusion="success", title="Ready — pr-19640.eph.roboflow.one",
+             url="https://pr-19640.eph.roboflow.one", app="roboflow-featur", started="2026-11-16T17:40:23Z", id=1):
+        # trimmed from a real check run (roboflow/roboflow#19640)
+        return {"id": id, "name": "featur / environment", "status": status, "conclusion": conclusion, "details_url": url,
+                "html_url": "https://github.com/roboflow/roboflow/runs/133487312816", "app": {"slug": app},
+                "started_at": started, "output": {"title": title, "summary":
+                "| Environment | https://pr-19640.eph.roboflow.one |\n| Expires | 2026-11-19T17:43:20Z (in 71h59m) |\n"}}
+
+    def test_ready_on_its_head_is_a_link(self):
+        r = self.eph.read(self.pr(), self.run_(), self.AT)
+        self.assertEqual(r["state"], "ready")
+        self.assertEqual(r["url"], "https://pr-19640.eph.roboflow.one")
+        self.assertEqual(r["host"], "pr-19640.eph.roboflow.one")
+        self.assertEqual(r["expires"], 1795110200000)
+
+    def test_dev_controller_host_is_its_own_too(self):
+        r = self.eph.read(self.pr(labels=("dev-ephemeral",)), self.run_(url="https://pr-19640.dev.eph.roboflow.one"), self.AT)
+        self.assertEqual((r["state"], r["url"]), ("ready", "https://pr-19640.dev.eph.roboflow.one"))
+
+    def test_nothing_but_ready_gets_a_link(self):
+        cases = [
+            (self.pr(), self.run_(status="in_progress", conclusion=None, title="Building — pr-19640.eph.roboflow.one"), "starting"),
+            (self.pr(), self.run_(conclusion="failure", title="Failed — pr-19640.eph.roboflow.one"), "failed"),
+            (self.pr(), self.run_(conclusion="neutral", title="Environment destroyed"), "gone"),
+            # merged minutes ago, the check still saying Ready (seen on roboflow/roboflow#19635): gone
+            (self.pr(state="closed", merged="2026-11-16T17:51:24Z"), self.run_(), "gone"),
+            (self.pr(labels=("eph-shared-db",)), self.run_(), "gone"),  # label taken off: being torn down
+            (self.pr(), self.run_(url="https://pr-1.eph.roboflow.one"), "unknown"),  # another PR's
+            (self.pr(), self.run_(url="https://evil.example/pr-19640.eph.roboflow.one"), "unknown"),
+            (self.pr(), self.run_(url="http://pr-19640.eph.roboflow.one"), "unknown"),
+            (self.pr(labels=()), None, "none"),
+            (self.pr(), None, "starting"),  # labelled, no check on its head yet
+        ]
+        for pr, run, want in cases:
+            r = self.eph.read(pr, run, self.AT)
+            self.assertEqual(r["state"], want, (pr, run and run["output"]["title"], r))
+            self.assertNotIn("url", r)
+        self.assertEqual(self.eph.read(self.pr(), self.run_(), 1795110200000)["state"], "gone")  # its lease is over
+        self.assertEqual(self.eph.read(self.pr(), self.run_(status="queued", conclusion=None,
+                                                            title="Building — x"), self.AT)["phase"], "Building")
+
+    def test_only_featurs_newest_check_counts(self):
+        old, new = self.run_(conclusion="failure", started="2026-11-16T10:00:00Z", id=1), self.run_(id=2)
+        fake = dict(self.run_(app="someone-else"), started_at="2026-11-17T00:00:00Z", id=3)
+        self.assertIs(self.eph.latest([old, fake, new]), new)
+        self.assertIsNone(self.eph.latest([fake]))
+
+    def test_asks_github_only_for_roboflow_tasks(self):
+        from unittest import mock
+        calls = []
+
+        def gh(*args):
+            calls.append(args)
+            if args[1].startswith("repos/roboflow/roboflow/pulls/"):
+                return True, json.dumps(self.pr()), ""
+            return True, json.dumps({"check_runs": [self.run_()]}), ""
+        with mock.patch.object(self.eph, "gh", gh):
+            self.assertIsNone(self.eph.ephemeral_of({"pr": {"number": 7, "repo": "o/r"}}))
+            self.assertIsNone(self.eph.ephemeral_of({"title": "no PR"}))
+            self.assertEqual(calls, [])
+            r = self.eph.ephemeral_of({"pr": {"number": 19640, "repo": "roboflow/roboflow"}}, at=self.AT)
+            self.assertEqual(r["state"], "ready")
+            self.assertEqual([c[1] for c in calls], ["repos/roboflow/roboflow/pulls/19640",
+                                                    "repos/roboflow/roboflow/commits/6eb37a3a74e2/check-runs?check_name=featur%20%2F%20environment"])
+        with mock.patch.object(self.eph, "gh", lambda *a: (False, "", "HTTP 502")):
+            self.assertEqual(self.eph.ephemeral_of({"pr": {"number": 19640, "repo": "roboflow/roboflow"}}), {"state": "unknown"})
 
 
 class AutoAccept(unittest.TestCase):
