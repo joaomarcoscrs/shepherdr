@@ -43,7 +43,7 @@ import { dirs } from "./dirs.js";
 // into its starting prompt; Herdr runs nothing itself.
 import { SECTIONS, ROLES, NOTES, MERGE, MUST_FIX, ROUNDS, ARCHIVE, ABOUT, BACKUP, REACTIONS, upgradeReactions, NOTIFY_ABOUT, TITLE, SPACE_TITLE,
   EVERYWHERE, CHANGED_HERE, RESET, EDIT_INSTRUCTIONS, USE_OTHER_CLI, LOADING_AGENTS, SAVED, sameAs as sameAsWords,
-  spacesOwn, otherCliWords, backupProblem, notifyMachineAbout, machineLabel, TASK_ROWS, LEVEL } from "./core/settings.js";
+  spacesOwn, otherCliWords, backupProblem, notifyMachineAbout, machineLabel, TASK_ROWS, LEVEL, forRole, otherCli } from "./core/settings.js";
 
 const I = (name) => `mods/shepherdr-settings/${name}.svg`;
 // A page's title, and a Tasks row's (by its key, section.field).
@@ -313,7 +313,7 @@ export default class ShepherdrSettings extends View {
   // The CLI a worker runs here, and the other one (an unset Reviewer and Backup use it).
   otherCli() {
     const worker = shepherdrFor(this.cfg, this.scope).worker?.agent ?? "claude";
-    return worker === "codex" ? "claude" : "codex";
+    return otherCli(worker);
   }
 
   // The model buttons start from what applies in this scope. An unset role shows what runs: the
@@ -328,7 +328,9 @@ export default class ShepherdrSettings extends View {
         sel = { agent: o, model: this.data.menus[o].models[0]?.id ?? null, effort: null, fast: false, perm: this.data.permDefault?.[o] ?? null };
       }
       sel ??= this.data?.defaults ?? null;
-      this.roles[r.id] = { ...(this.roles[r.id] ?? {}), sel: sel ? { ...sel } : null, data: this.data, saved: JSON.stringify(sel), unset };
+      // Cursor only where the role can run it (core/settings.js forRole: task workers)
+      const data = this.data ? { ...this.data, menus: forRole(r.id, this.data.menus) } : this.data;
+      this.roles[r.id] = { ...(this.roles[r.id] ?? {}), sel: sel ? { ...sel } : null, data, saved: JSON.stringify(sel), unset };
     }
   }
 

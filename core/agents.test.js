@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { argvFor, current, forkArgv, FORK_LIVE, line, liveTaskAgent, menuFor, modelSections, parseDefaults, parsePicks, pickKey, resumeArgv, rowFor, withPin, withRecent } from "./agents.js";
+import { argvFor, canFork, current, forkArgv, FORK_LIVE, line, liveTaskAgent, menuFor, modelSections, parseDefaults, parsePicks, permAcross, pickKey, resumeArgv, rowFor, sessionOf, withPin, withRecent } from "./agents.js";
 
 const codex = { models: Array.from({ length: 250 }, (_, i) => ({ id: `gpt-${i}`, label: `GPT ${i}`, efforts: ["low", "high"] })) };
 const menus = { claude: menuFor("claude", {}), codex: menuFor("codex", codex) };
@@ -127,4 +127,61 @@ test("an ended Codex Assistant resumes with codex resume <session>", () => {
 
 test("an Assistant that was itself resumed resumes the session it ran last, once", () => {
   expect(resumeArgv("claude", ["claude", "--resume", "old-id", "--model", "opus"], "new-id")).toEqual(["claude", "--model", "opus", "--resume", "new-id"]);
+});
+
+// SHEP-2: Cursor Agent as a third agent, never run as Codex or Claude Code.
+test("Cursor starts as cursor-agent with its model, --force only for full access, and resumes its chat", () => {
+  const ask = argvFor({ agent: "cursor", model: "gpt-5", perm: "manual" }, { agent: "claude", argv: ["claude"] });
+  expect(ask).toEqual({ argv: ["cursor-agent", "--model", "gpt-5"], resume: false, base: ["cursor-agent", "--model", "gpt-5"] });
+  expect(argvFor({ agent: "cursor", perm: "full" }, { agent: "codex", argv: ["codex"] }).argv).toEqual(["cursor-agent", "--force"]);
+  // the same agent: its own flags kept, its model and access chosen again, its chat resumed
+  const old = { agent: "cursor", argv: wrapped("agent", "--force", "--model", "gpt-5", "--workspace", "/w", "--resume", "C0", "Do it"), session: "C1" };
+  const r = argvFor({ agent: "cursor", model: "sonnet-4", perm: "manual" }, old);
+  expect(r.argv).toEqual(["agent", "--workspace", "/w", "--model", "sonnet-4", "--resume", "C1"]);
+  expect(r.resume).toBe(true);
+  expect(r.base).toEqual(["agent", "--workspace", "/w", "--model", "sonnet-4"]);
+  // Codex's or Claude's words never reach it
+  expect(r.argv.some((a) => ["--no-daemon", "--settings", "--effort", "-c"].includes(a))).toBe(false);
+});
+
+test("Cursor's settings, model menu and running line come from its own config, with no invented efforts", () => {
+  const d = parseDefaults("cursor", "model\tgpt-5\nlabel\tOpenAI GPT-5\napproval\t\nsandbox\t\nbin\t/usr/local/bin/cursor-agent\n");
+  expect(d).toMatchObject({ model: "gpt-5", label: "OpenAI GPT-5", installed: true });
+  expect(parseDefaults("cursor", "bin\t\n")).toMatchObject({ model: null, installed: false, models: [] });
+  const menu = menuFor("cursor", d, "sonnet-4-thinking");
+  expect(menu.name).toBe("Cursor");
+  expect(menu.perms.map((p) => p.id)).toEqual(["manual", "full"]);
+  expect(menu.models.map((m) => [m.id, m.efforts, m.fast])).toEqual([["sonnet-4-thinking", [], false], ["gpt-5", [], false]]);
+  const c = current("cursor", ["cursor-agent", "--force"], {}, d);
+  expect(c).toMatchObject({ agent: "cursor", model: "gpt-5", perm: "full", effort: null, fast: false });
+  expect(line(c)).toBe("Cursor · OpenAI GPT-5");
+  expect(current("cursor", ["cursor-agent", "--model", "sonnet-4"], {}, d)).toMatchObject({ model: "sonnet-4", perm: "manual" });
+  // a model typed by id: no levels made up for it
+  const typed = modelSections({ cursor: menu }, "cursor", null, "grok-9").find((x) => x.key === "typed");
+  expect(typed.rows[0]).toMatchObject({ agent: "cursor", id: "grok-9", efforts: [] });
+});
+
+test("switching to Cursor keeps full access as full access and never grants more than chosen", () => {
+  expect(permAcross("bypassPermissions", "cursor", {})).toBe("full");
+  expect(permAcross("full", "cursor", {})).toBe("full");
+  for (const p of ["auto", "acceptEdits", "plan", "read-only", "manual"]) expect(permAcross(p, "cursor", { cursor: "manual" })).toBe("manual");
+  expect(permAcross("full", "claude", {})).toBe("bypassPermissions");
+  expect(permAcross("manual", "claude", {})).toBe("manual");
+});
+
+test("a Cursor session: its id from its chat or transcript, resumed with --resume; no fork", () => {
+  const id = "11111111-2222-3333-4444-555555555555";
+  expect(sessionOf("cursor", `/h/.cursor/chats/abc123/${id}/store.db`)).toBe(id);
+  expect(sessionOf("cursor", `/h/.cursor/projects/x/agent-transcripts/${id}/${id}.jsonl`)).toBe(id);
+  expect(sessionOf("cursor", "/h/.cursor/cli-config.json")).toBe(null);
+  expect(resumeArgv("cursor", ["cursor-agent", "--model", "gpt-5", "--resume", "old", "hi"], id)).toEqual(["cursor-agent", "--model", "gpt-5", "--resume", id]);
+  expect(forkArgv("cursor", ["cursor-agent"], id)).toBe(null);
+  expect(canFork("cursor")).toBe(false);
+  expect(canFork("codex")).toBe(true);
+});
+
+test("a task's live Cursor worker (no status, running as node) still counts for #1050's fork ask", () => {
+  const cursor = { address: "t9", state: "live", labels: { "herdr.task": "repo#3" }, status: null,
+    foreground: { name: "node", argv: ["/h/.local/share/cursor-agent/versions/2025.09.12/node", "/h/.local/share/cursor-agent/versions/2025.09.12/index.js"] } };
+  expect(liveTaskAgent({ address: "t1", labels: { "herdr.task": "repo#3" } }, [cursor])?.address).toBe("t9");
 });

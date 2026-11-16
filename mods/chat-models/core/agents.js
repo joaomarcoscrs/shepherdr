@@ -2,7 +2,14 @@
 // rules both the window's model menu (lib/agent.js, mods/chat-models) and the web app's use. Reading an agent's own
 // settings and restarting it run where each side runs commands (lib/agent.js, service/agents.ts).
 // Shared core: the source is core/agents.js; bin/sync-shared copies it into the mods in lib/COPIES.
-export const NAMES = { claude: "Claude Code", codex: "Codex" };
+export const NAMES = { claude: "Claude Code", codex: "Codex", cursor: "Cursor" };
+// The agent kind a program word is: Cursor Agent's CLI is `cursor-agent`, or `agent` as newer installs (and Herdr's own
+// agent list) call it. Shepherdr starts `cursor-agent`, the name every install of it has.
+const KIND_OF_WORD = { claude: "claude", codex: "codex", "cursor-agent": "cursor", agent: "cursor" };
+export function kindOfWord(word) {
+  return KIND_OF_WORD[String(word ?? "").split("/").pop()] ?? null;
+}
+export const CURSOR_BIN = "cursor-agent";
 
 // Claude Code's current models, as its /model menu offers them. `id` is what --model gets;
 // `match` the names a running agent may report for it.
@@ -20,6 +27,9 @@ const PERMS = {
   claude: [{ id: "manual", label: "Ask" }, { id: "auto", label: "Auto" }, { id: "acceptEdits", label: "Accept edits" },
     { id: "plan", label: "Plan" }, { id: "bypassPermissions", label: "Full access" }],
   codex: [{ id: "read-only", label: "Read only" }, { id: "auto", label: "Auto" }, { id: "full", label: "Full access" }],
+  // Cursor Agent: its own allowlist (cli-config.json's permissions) asking in its terminal for anything else, or --force
+  // (every command its deny list doesn't stop). It has no read-only or plan flag in every version, so none here.
+  cursor: [{ id: "manual", label: "Ask" }, { id: "full", label: "Full access" }],
 };
 // A permission mode carried to the other agent when the agent is switched: its nearest mode there (auto stays auto,
 // full access stays full access, Claude's accept edits is Codex's auto, plan and read only swap), else that agent's
@@ -27,6 +37,8 @@ const PERMS = {
 const PERM_ACROSS = {
   claude: { "read-only": "plan", auto: "auto", full: "bypassPermissions" },
   codex: { plan: "read-only", auto: "auto", acceptEdits: "auto", bypassPermissions: "full" },
+  // Only full access carries over as full access; every other mode becomes Cursor's ask, never more access than chosen.
+  cursor: { bypassPermissions: "full", full: "full", auto: "manual", acceptEdits: "manual", plan: "manual", "read-only": "manual" },
 };
 export function permAcross(perm, agent, permDefault) {
   return PERM_ACROSS[agent]?.[perm] ?? (PERMS[agent]?.some((p) => p.id === perm) ? perm : null) ?? permDefault?.[agent] ?? null;
@@ -69,6 +81,11 @@ export const DEFAULTS = `
 if [ "$1" = claude ]; then
   f="$HOME/.claude/settings.json"
   command -v jq >/dev/null && [ -f "$f" ] && jq -r '"model\\t\\(.model // "")", "effort\\t\\(.effortLevel // "")", "fast\\t\\(if .fastMode == true then "on" else "" end)", "per\\t\\(.modelSettings // {} | with_entries(.value |= (.effortLevel // null)) | tojson)", "mode\\t\\(.permissions.defaultMode // "")"' "$f" 2>/dev/null
+elif [ "$1" = cursor ]; then
+  f="\${CURSOR_CONFIG_DIR:-$HOME/.cursor}/cli-config.json"
+  [ -f "$f" ] || f="\${XDG_CONFIG_HOME:-$HOME/.config}/cursor/cli-config.json"
+  command -v jq >/dev/null && [ -f "$f" ] && jq -r '"model\\t\\(.model.modelId // "")", "label\\t\\(.model.displayName // "")", "approval\\t\\(.approvalMode // "")", "sandbox\\t\\(.sandbox.mode // "")"' "$f" 2>/dev/null
+  printf 'bin\\t%s\\n' "$(command -v cursor-agent || command -v agent)"
 else
   f="$HOME/.codex/config.toml"
   for k in model model_reasoning_effort service_tier sandbox_mode approval_policy; do
@@ -101,6 +118,13 @@ export function parseDefaults(kind, stdout) {
       }));
     } catch {}
   }
+  if (kind === "cursor") {
+    // Cursor's model is its own last pick (cli-config.json); it has no effort or speed setting. Its other models are
+    // typed by id in the picker (Cursor lists them only for a signed-in account, and older versions not at all).
+    const model = out.model || null;
+    return { model, label: out.label || null, mode: out.approval || null, sandbox: out.sandbox || null, installed: Boolean(out.bin),
+      models: model ? [{ id: model, label: out.label || model, efforts: [], fast: false, defaultEffort: null }] : [] };
+  }
   return kind === "claude"
     ? { model: out.model || null, effort: out.effort || null, fast: Boolean(out.fast), per: parsePer(out.per), mode: out.mode || null }
     : { model: out.model || null, effort: out.model_reasoning_effort || null, fast: ["fast", "priority"].includes(out.service_tier),
@@ -125,6 +149,12 @@ export function current(kind, argv, meta, dflt) {
     const perm = argv.includes("--dangerously-skip-permissions") ? "bypassPermissions" : flag(argv, "--permission-mode") ?? dflt.mode ?? "manual";
     return { agent: "claude", model: meta.model ?? alias, alias, effort: meta.effort ?? flag(argv, "--effort") ?? per ?? dflt.effort,
       fast: Boolean(fast), perm: perm === "default" ? "manual" : perm, used: meta.used ?? null, window: meta.window ?? (big ? 1000000 : 200000) };
+  }
+  if (kind === "cursor") {
+    const model = meta.model ?? flag(argv, "--model") ?? dflt.model ?? null;
+    const full = argv.some((a) => a === "--force" || a === "-f" || a === "--yolo");
+    return { agent: "cursor", model, label: dflt.models?.find((m) => m.id === model)?.label ?? null, perm: full ? "full" : "manual",
+      effort: null, fast: false, used: meta.used ?? null, window: meta.window ?? null };
   }
   const o = overrides(argv);
   const tier = o.service_tier;
@@ -167,6 +197,12 @@ export function menuFor(agent, dflt, current = null) {
     if (current && !models.some((m) => m.id === current)) models.unshift({ id: current, name: modelName(current), efforts: CLAUDE_EFFORTS, defaultEffort: dflt?.effort ?? null, fast: false });
     return { name: NAMES.claude, perms: PERMS.claude, models };
   }
+  if (agent === "cursor") {
+    // No effort or speed choices: Cursor has none to give (a "thinking" model is a model of its own).
+    const all = (dflt?.models ?? []).map((m) => ({ id: m.id, name: m.label ?? m.id, efforts: [], defaultEffort: null, fast: false }));
+    if (current && !all.some((m) => m.id === current)) all.unshift({ id: current, name: current, efforts: [], defaultEffort: null, fast: false });
+    return { name: NAMES.cursor, perms: PERMS.cursor, models: all };
+  }
   const all = (dflt?.models ?? []).map((m) => ({ id: m.id, name: m.label, efforts: m.efforts?.length ? m.efforts : ["low", "medium", "high", "xhigh"],
     defaultEffort: m.defaultEffort ?? dflt?.effort ?? null, fast: m.fast }));
   if (current && !all.some((m) => m.id === current)) all.unshift({ id: current, name: current, efforts: ["low", "medium", "high", "xhigh"], defaultEffort: dflt?.effort ?? null, fast: false });
@@ -175,7 +211,8 @@ export function menuFor(agent, dflt, current = null) {
 
 // The levels a model typed by id gets: its agent's usual ones.
 export function typedModel(agent, id) {
-  return { id, name: agent === "claude" ? modelName(id) : id, efforts: agent === "claude" ? CLAUDE_EFFORTS : ["low", "medium", "high", "xhigh"], defaultEffort: null, fast: false, typed: true };
+  const efforts = agent === "claude" ? CLAUDE_EFFORTS : agent === "cursor" ? [] : ["low", "medium", "high", "xhigh"];
+  return { id, name: agent === "claude" ? modelName(id) : id, efforts, defaultEffort: null, fast: false, typed: true };
 }
 
 // The person's picks in the model menus (the window's and the web's alike), in PICKS_FILE under the
@@ -277,11 +314,16 @@ const CLAUDE_VALUE = new Set(["--add-dir", "--mcp-config", "--append-system-prom
   "--fallback-model", "--output-format", "--input-format", "--name", "--setting-sources", "--betas", "--debug-file"]);
 const CODEX_VALUE = new Set(["-c", "--config", "-m", "--model", "-p", "--profile", "-s", "--sandbox", "-a", "--ask-for-approval",
   "-C", "--cd", "--add-dir", "-i", "--image", "--enable", "--disable", "--local-provider", "--oss"]);
+// Cursor Agent's (its --resume takes an optional id, so it is read on its own).
+const CURSOR_VALUE = new Set(["--mode", "--sandbox", "--workspace", "--output-format", "-H", "--header", "--plugin-dir",
+  "--worktree-base", "--api-key"]);
+// Cursor's flags chosen again by a restart (its model and full access) or that pick a conversation.
+const CURSOR_DROP = new Set(["--force", "-f", "--yolo", "--continue"]);
 
-// Where the agent's own word (claude, codex) is in argv: a terminal's argv starts with what launched it (nice,
+// Where the agent's own word (claude, codex, cursor-agent) is in argv: a terminal's argv starts with what launched it (nice,
 // sh -c, env, the person's `bash -ic`), whose words are no agent flags (#1001: its -ic was Codex's `-i c`, an image).
 function agentAt(argv) {
-  return argv.findIndex((a, i) => (i === 0 || !String(a).startsWith("-")) && /^(claude|codex)$/.test(String(a).split("/").pop()));
+  return argv.findIndex((a, i) => (i === 0 || !String(a).startsWith("-")) && kindOfWord(a));
 }
 
 // The old agent's flags worth keeping (permissions, folders, ...), without what is chosen again
@@ -296,6 +338,14 @@ function kept(kind, argv) {
       if (CLAUDE_DROP.has(a)) { if (rest[i + 1] && !rest[i + 1].startsWith("-")) i++; continue; }
       if ([...CLAUDE_DROP].some((f) => a.startsWith(f + "="))) continue;
       if (CLAUDE_VALUE.has(a)) { out.push(a, rest[++i]); continue; }
+      if (a.startsWith("-")) out.push(a);
+    } else if (kind === "cursor") {
+      if (i === 0 && (a === "agent" || a === "resume")) continue;
+      if (CURSOR_DROP.has(a)) continue;
+      if (a === "--model") { i++; continue; }
+      if (a === "--resume") { if (rest[i + 1] && !rest[i + 1].startsWith("-")) i++; continue; }
+      if (/^--(model|resume)=/.test(a)) continue;
+      if (CURSOR_VALUE.has(a)) { out.push(a, rest[++i]); continue; }
       if (a.startsWith("-")) out.push(a);
     } else {
       if (i === 0 && (a === "resume" || a === "fork")) { if (rest[1] && !rest[1].startsWith("-")) i++; continue; }
@@ -332,6 +382,12 @@ function stripSession(kind, argv) {
       if (a === "--continue" || a === "-c") { resumed = true; continue; }
       if (a === "--fork-session") continue;
       if (CLAUDE_VALUE.has(a) || ["--model", "--effort", "--settings", "--permission-mode"].includes(a)) { out.push(a, rest[++i]); continue; }
+    } else if (kind === "cursor") {
+      if (i === 0 && a === "agent") continue;
+      if (i === 0 && a === "resume") { resumed = true; continue; }
+      if (a === "--resume") { resumed = true; if (rest[i + 1] && !rest[i + 1].startsWith("-")) i++; continue; }
+      if (/^--resume=/.test(a) || a === "--continue") { resumed = true; continue; }
+      if (CURSOR_VALUE.has(a) || a === "--model") { out.push(a, rest[++i]); continue; }
     } else {
       if (i === 0 && (a === "resume" || a === "fork")) { resumed = true; continue; }
       if (a === "--last") continue;
@@ -358,6 +414,16 @@ export function argvFor(pick, old) {
     if (same && old.session) return { argv: [...a, "--resume", old.session], resume: true, base: a };
     return { argv: a, resume: false, base: a };
   }
+  if (pick.agent === "cursor") {
+    // the same program word it ran as (agent or cursor-agent), else cursor-agent
+    const word = same ? argvWord(old.argv) : null;
+    const a = [word && kindOfWord(word) === "cursor" ? word : CURSOR_BIN, ...flags];
+    if (pick.model) a.push("--model", pick.model);
+    // Full access is --force, said only when chosen: Ask is Cursor's own default (its allowlist, asking in its terminal).
+    if (pick.perm === "full") a.push("--force");
+    if (same && old.session) return { argv: [...a, "--resume", old.session], resume: true, base: a };
+    return { argv: a, resume: false, base: a };
+  }
   // Codex runs its commands outside hc without --no-daemon (as herdr-task and restart.sh add).
   const a = [...flags, "--no-daemon"];
   if (pick.model) a.push("-m", pick.model);
@@ -371,8 +437,18 @@ export function argvFor(pick, old) {
   return { argv: ["codex", ...a], resume: false, base: ["codex", ...a] };
 }
 
-// The conversation's id, from its log's file name.
+function argvWord(argv) {
+  const at = agentAt(argv ?? []);
+  return at >= 0 ? argv[at] : null;
+}
+
+// The conversation's id, from its log's file name. Cursor's: its chat's folder (chats/<hash>/<id>/store.db) or its
+// transcript (agent-transcripts/<id>/<id>.jsonl).
 export function sessionOf(kind, path) {
+  if (kind === "cursor") {
+    const c = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\.jsonl|\/store\.db)$/.exec(path ?? "");
+    return c ? c[1] : null;
+  }
   const m = kind === "claude" ? /([0-9a-f-]{36})\.jsonl$/.exec(path ?? "") : /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/.exec(path ?? "");
   return m ? m[1] : null;
 }
@@ -381,11 +457,12 @@ export function sessionOf(kind, path) {
 // and speed, resuming `session`.
 export function resumeArgv(kind, argv, session) {
   const out = stripSession(kind, argv)?.out ?? [kind];
-  return kind === "claude" ? [...out, "--resume", session] : [out[0], "resume", ...out.slice(1), session];
+  return kind === "claude" || kind === "cursor" ? [...out, "--resume", session] : [out[0], "resume", ...out.slice(1), session];
 }
 
-// A copy of the conversation in a new tab beside this one, through the CLI's own fork.
+// A copy of the conversation in a new tab beside this one, through the CLI's own fork. null: the CLI has none (Cursor).
 export function forkArgv(kind, argv, session) {
+  if (!canFork(kind)) return null;
   argv = argv ?? [];
   // The same model, effort and speed as the original.
   const same = kind === "claude"
@@ -399,17 +476,24 @@ export function forkArgv(kind, argv, session) {
   return kind === "claude" ? ["claude", ...flags, "--resume", session, "--fork-session"] : ["codex", "fork", ...flags, session];
 }
 
+// Whether a chat with this agent can be forked: Cursor Agent's CLI has no fork of a conversation.
+export function canFork(kind) {
+  return kind === "claude" || kind === "codex";
+}
+
 // #1050: a fork of a task's conversation while the task's agent runs works in the same folder, so two agents would
 // edit one worktree. The task's live agent (a terminal record from `all`, reviewers and helpers aside) when `t` is a
 // task's terminal, else null: the fork then asks first (FORK_LIVE).
-const AGENT_APPS = new Set(["claude-code", "claude", "codex"]);
+const AGENT_APPS = new Set(["claude-code", "claude", "codex", "cursor", "cursor-agent", "agent"]);
 export function liveTaskAgent(t, all) {
   const task = t?.labels?.["herdr.task"];
   if (!task) return null;
   return [...(all ?? [])].find((k) => k?.state === "live" && k.labels?.["herdr.task"] === task
     && !["reviewer", "helper"].includes(k.labels?.["herdr.role"])
     // an agent runs there (a record that doesn't say what runs counts: better to ask once too often)
-    && (AGENT_APPS.has(k.status?.app) || AGENT_APPS.has(k.foreground?.name) || (!k.status?.app && !k.foreground))) ?? null;
+    && (AGENT_APPS.has(k.status?.app) || AGENT_APPS.has(k.foreground?.name) || (!k.status?.app && !k.foreground)
+      // Cursor Agent reports no status and runs as node: its own program word in the foreground's argv says it
+      || (k.foreground?.argv ?? []).some((a) => /(?:^|\/)cursor-agent(?:\/|$)/.test(String(a))))) ?? null;
 }
 // The ask, in the window's confirm and the web's alike: keep the live agent (Cancel) or fork anyway.
 export const FORK_LIVE = {

@@ -11,8 +11,9 @@ import * as AG from '@core/agents.js'
 import * as ST from '@core/settings.js'
 
 const { levelName, NAMES } = AG as unknown as { levelName: (e: string | null) => string | null; NAMES: Record<string, string> }
-const { MODEL_MENU, chooseModel, modelLabel } = ST as unknown as {
+const { MODEL_MENU, chooseModel, modelLabel, forRole } = ST as unknown as {
   MODEL_MENU: { reasoning: string; fast: string; permissions: string }
+  forRole: (role: string, menus: ModelMenus['menus']) => ModelMenus['menus']
   chooseModel: (menus: ModelMenus['menus'], permDefault: ModelMenus['permDefault'], sel: AgentPick, agent: string, id: string) => AgentPick
   modelLabel: (menus: ModelMenus['menus'] | undefined, sel: AgentPick | null | undefined) => string
 }
@@ -64,7 +65,7 @@ export function ModelButton({ row, level }: { row: SettingRow; level: string }) 
         <span className="truncate">{row.value}</span>
         <DownIcon className={clsx(ic, 'size-3.5')} />
       </button>
-      {open && sel ? <ModelMenu start={sel} up={up} onClose={() => setOpen(false)} save={(next) => act({ type: 'setting', key: row.key, value: JSON.stringify(next), place: level } as never)} /> : null}
+      {open && sel ? <ModelMenu role={String(row.key).split('.').pop() ?? ''} start={sel} up={up} onClose={() => setOpen(false)} save={(next) => act({ type: 'setting', key: row.key, value: JSON.stringify(next), place: level } as never)} /> : null}
     </span>
   )
 }
@@ -72,14 +73,15 @@ export function ModelButton({ row, level }: { row: SettingRow; level: string }) 
 /** the window's model menu in settings mode: the model list as the chat's (restart.tsx ModelList: agent tabs,
  *  search, pinned and recent; picking another CLI's switches agent), Reasoning (that model's levels), Fast (where the model has it), Permissions (a small list); no Restart, each change
  *  saved as it is made */
-function ModelMenu({ start, up, onClose, save }: { start: AgentPick; up: boolean; onClose: () => void; save: (sel: AgentPick) => Promise<any> }) {
+function ModelMenu({ role, start, up, onClose, save }: { role: string; start: AgentPick; up: boolean; onClose: () => void; save: (sel: AgentPick) => Promise<any> }) {
   const [data, setData] = useState<ModelMenus | null>(null)
   const [sel, setSel] = useState<AgentPick>(start)
   const [perms, setPerms] = useState(false)
   const [error, setError] = useState('')
   const [picks, setPicks] = useState<{ pinned: string[]; recent: string[] } | undefined>()
   const coarse = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches
-  useEffect(() => { void menusNow().then((m) => (m ? (setData(m), setPicks(m.picks)) : setError('Could not read the agents.'))) }, [])
+  // Cursor only where the role can run it (core/settings.js forRole: task workers)
+  useEffect(() => { void menusNow().then((m) => (m ? (setData({ ...m, menus: forRole(role, m.menus) }), setPicks(m.picks)) : setError('Could not read the agents.'))) }, [role])
   const change = (next: AgentPick) => {
     setSel(next)
     setError('')

@@ -8,7 +8,7 @@
 // from what runs now, one Restart button, said first to start a new conversation when it switches
 // agent. The chat does the restart.
 // Props (plain data from the chat; this mod reads nothing else about the agent):
-//   { pane, current: { agent, model, effort, fast, perm }, select?: { agent, model } (comes chosen), menus: { claude?, codex? }
+//   { pane, current: { agent, model, effort, fast, perm }, select?: { agent, model } (comes chosen), menus: { claude?, codex?, cursor? }
 //     (agent.js menuFor), icons: { <agent>: { icon, tint } }, permDefault, offline (its machine's name
 //     when it can't be reached now: said by the Restart button), overlay }
 // The overlay is frameless and as tall as the menu at its tallest (the chat counts it with the
@@ -26,7 +26,7 @@ import { theme, props, setShared, closeOverlay, home, readTextFile, writeTextFil
 import { modelSections, parsePicks, pickKey, withPin, withRecent, PICKS_FILE, permAcross } from "./core/agents.js";
 import { dirs } from "./dirs.js";
 
-const AGENTS = ["claude", "codex"];
+const AGENTS = ["claude", "codex", "cursor"];
 const LEVEL = { minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max", ultra: "Ultra", none: "None" };
 // Sizes, as the chat counts them for the overlay's height (mods/chat openPicker): the model list
 // scrolls past LIST; NOTE is a quiet line (an offline machine's; a new conversation's, two lines).

@@ -232,7 +232,9 @@ const readDefaults = async () => {
   try {
     let check: any = {};
     try { check = JSON.parse(readFileSync(where()["cli-check"], "utf8"))?.machines?.[""] ?? {}; } catch {}
-    settings.choices = SC.choicesFrom(await compat.agents!.ownDefaults(), { claude: check.claude !== "missing", codex: check.codex !== "missing" });
+    const own: any = await compat.agents!.ownDefaults();
+    // Cursor where its CLI is on this machine's PATH (core/agents.js DEFAULTS)
+    settings.choices = SC.choicesFrom(own, { claude: check.claude !== "missing", codex: check.codex !== "missing", cursor: !!own.cursor?.installed });
     model.rebuild();
   } catch {}
 };
