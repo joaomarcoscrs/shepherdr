@@ -377,6 +377,8 @@ def resume_argv(argv, session, folder=None):
         return argv + ([] if has else ["--permission-mode", mode]) + ["--resume", session]
     if k == "codex":
         return [argv[0], "resume"] + argv[1:] + [session]
+    if k == "cursor":
+        return argv + ["--resume", session]
     return None
 
 
@@ -578,7 +580,22 @@ def closing_line(s, task, parent=None, argv=None):
                  "`git add`/`git commit` and your review's `hc run`/`hc wait`/`hc read`/`hc kill` (its prompt in single quotes) "
                  "sandbox_permissions \"require_escalated\" from the first try, each as one plain command (no && chains, no $(…), "
                  "no git options before the verb): then they run without asking.")
+    if argv and agent_key(argv) == "cursor":
+        text += cursor_line(argv)
     # No "report to your coordinator": Herdr tells the Assistant itself (news_pass).
+    return text
+
+
+def cursor_line(argv):
+    """What a Cursor worker needs to know: Cursor Agent reports no status to Herdr (no working, idle or asking), so its
+    status line and ready are all the person sees of its progress; without --force it asks in its own terminal before
+    each command its allowlist doesn't have, herdr-task's own too."""
+    text = (" Cursor can't tell Herdr whether you are working, done or asking: your status line and ready are how the "
+            "person knows, so keep the status line current, and before you stop to wait for the person set it to why "
+            "and end your reply with the question.")
+    if not any(a in ("--force", "-f", "--yolo") for a in argv):
+        text += (" You run in Cursor's Ask mode: a command its allowlist doesn't have, these herdr-task commands too, "
+                 "waits for the person's yes in your terminal.")
     return text
 
 

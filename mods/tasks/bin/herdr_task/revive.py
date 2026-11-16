@@ -44,15 +44,19 @@ CLAUDE_VALUE = {"--add-dir", "--mcp-config", "--append-system-prompt", "--system
                 "--model", "--effort", "--settings", "--permission-mode"}
 CODEX_VALUE = {"-c", "--config", "-m", "--model", "-p", "--profile", "-s", "--sandbox", "-a", "--ask-for-approval",
                "-C", "--cd", "--add-dir", "-i", "--image", "--enable", "--disable", "--local-provider", "--oss"}
+# Cursor Agent's (core/agents.js CURSOR_VALUE; its --resume takes an optional id, read on its own).
+CURSOR_VALUE = {"--model", "--mode", "--sandbox", "--workspace", "--output-format", "-H", "--header", "--plugin-dir",
+                "--worktree-base", "--api-key"}
+# A program word and its kind: Cursor Agent's CLI is cursor-agent, or agent as newer installs call it.
+KINDS = {"claude": "claude", "codex": "codex", "cursor-agent": "cursor", "agent": "cursor"}
 
 
 def kind_of(word):
-    b = os.path.basename(str(word))
-    return b if b in ("claude", "codex") else None
+    return KINDS.get(os.path.basename(str(word)))
 
 
 def base_argv(argv):
-    """(kind, argv) for starting the agent in `argv` again: from its claude or codex word on, without
+    """(kind, argv) for starting the agent in `argv` again: from its claude, codex or cursor-agent word on, without
     what resumed a conversation or its first message (core/agents.js freshArgv), or (None, None)."""
     argv = list(argv or [])
     at = next((i for i, a in enumerate(argv) if (i == 0 or not str(a).startswith("-")) and kind_of(a)), None)
@@ -70,6 +74,20 @@ def base_argv(argv):
                 i += 1
                 continue
             if a in CLAUDE_VALUE and i + 1 < len(rest):
+                out += [a, rest[i + 1]]
+                i += 2
+                continue
+        elif kind == "cursor":
+            if i == 0 and a == "agent":
+                i += 1
+                continue
+            if i == 0 and a == "resume" or a == "--continue" or re.match(r"^--resume=", a):
+                i += 1
+                continue
+            if a == "--resume":
+                i += 2 if i + 1 < len(rest) and not rest[i + 1].startswith("-") else 1
+                continue
+            if a in CURSOR_VALUE and i + 1 < len(rest):
                 out += [a, rest[i + 1]]
                 i += 2
                 continue
@@ -94,7 +112,7 @@ def base_argv(argv):
 def resume_argv(kind, argv, session, message=None):
     """argv (base_argv's) resuming `session`, with a first message when given."""
     tail = [message] if message else []
-    if kind == "claude":
+    if kind in ("claude", "cursor"):
         return [*argv, "--resume", session, *tail]
     return [argv[0], "resume", *argv[1:], session, *tail]
 
@@ -179,7 +197,7 @@ def record_of(k):
     if not kind:
         kind, argv = base_argv(fg.get("argv"))
         if kind:
-            argv[0] = kind
+            argv[0] = "cursor-agent" if kind == "cursor" else kind
     if not kind:
         return None
     sid, log = session_of(pid)

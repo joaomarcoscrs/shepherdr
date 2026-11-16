@@ -2353,6 +2353,7 @@ export default class Chat extends View {
   fork(cx) {
     const session = agent.sessionOf(this.kind, this.path);
     if (!session) { toast({ title: "Can't fork", body: "This conversation has no saved session.", level: "info" }); return; }
+    if (!agent.canFork(this.kind)) { toast({ title: "Can't fork", body: "This agent's CLI can't fork a conversation.", level: "info" }); return; }
     const tab = panes().find((p) => p.pane === this.myPane())?.tab;
     const space = spaces().find((s) => s.tabs.some((x) => x.id === tab));
     const folder = this.t?.foreground?.cwd ?? this.t?.cwd ?? undefined;
@@ -2750,12 +2751,15 @@ export default class Chat extends View {
       try {
         const stale = !this.pickCache || Date.now() - this.pickCache.at > 60000 || this.pickCache.machine !== this.machine;
         if (stale) {
-          const [claude, codex, known] = await Promise.all([agent.defaults("claude", this.machine), agent.defaults("codex", this.machine),
-            knownAgents({ on: this.machine }).catch(() => [])]);
+          const [claude, codex, cursor, known] = await Promise.all([agent.defaults("claude", this.machine), agent.defaults("codex", this.machine),
+            agent.defaults("cursor", this.machine), knownAgents({ on: this.machine }).catch(() => [])]);
           const prog = (key) => known.find((a) => a.key === key || (a.run ?? [])[0] === key);
-          this.pickCache = { at: Date.now(), machine: this.machine, dflts: { claude, codex },
-            icons: Object.fromEntries(["claude", "codex"].map((k) => [k, { icon: prog(k)?.icon ?? null, tint: Boolean(prog(k)?.tint) }])),
-            installed: Object.fromEntries(["claude", "codex"].map((k) => [k, prog(k) ? prog(k).installed !== false : true])) };
+          const installed = Object.fromEntries(["claude", "codex"].map((k) => [k, prog(k) ? prog(k).installed !== false : true]));
+          // Cursor only where its CLI is (cursor-agent or agent on that machine's PATH, or Herdr's own list says so)
+          installed.cursor = Boolean(cursor?.installed) || prog("cursor")?.installed === true;
+          this.pickCache = { at: Date.now(), machine: this.machine, dflts: { claude, codex, cursor },
+            icons: Object.fromEntries(["claude", "codex", "cursor"].map((k) => [k, { icon: prog(k)?.icon ?? null, tint: Boolean(prog(k)?.tint) }])),
+            installed };
         }
         const { dflts, icons, installed } = this.pickCache;
         if (this.kind) dflts[this.kind] = this.dflt ?? dflts[this.kind];
@@ -2763,7 +2767,10 @@ export default class Chat extends View {
         const offline = this.machine && !online(this.machine) ? this.machine : null;
         const currentRow = agent.rowFor(c.agent, c);
         // Installed agents only (and always the one running).
-        const menus = Object.fromEntries(["claude", "codex"].filter((k) => k === c.agent || installed[k])
+        // Cursor for a task's worker only (core/settings.js forRole): an Assistant lives in this chat, which can't
+        // read Cursor's conversation, and a reviewer runs read-only
+        const worker = Boolean(this.t?.labels?.["herdr.task"]) && !["reviewer", "helper"].includes(this.t?.labels?.["herdr.role"]);
+        const menus = Object.fromEntries(["claude", "codex", "cursor"].filter((k) => k === c.agent || (installed[k] && (k !== "cursor" || worker)))
           .map((k) => [k, agent.menuFor(k, dflts[k], k === c.agent ? currentRow : null)]));
         // As tall as the menu can get (chat-models' sizes): border and padding, another machine's
         // offline line, agent tabs, search, the list (it scrolls past 8 rows), separator, Reasoning header

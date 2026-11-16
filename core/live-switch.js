@@ -16,9 +16,11 @@ const CODEX_KEYS = ["model", "model_reasoning_effort", "service_tier"];
 const LEVEL = { minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max", ultra: "Ultra", none: "None" };
 
 /** Whether the change from what runs (`from`: { agent, model, effort, fast, perm }) to `to` can happen in place:
- *  the same CLI and the same permission mode. */
+ *  the same CLI and the same permission mode, a CLI switched in place here (Claude Code or Codex; Cursor restarts on
+ *  its conversation instead). */
 export function liveOK(from, to) {
-  return !!from && !!to && from.agent === to.agent && (!to.perm || !from.perm || to.perm === from.perm);
+  return !!from && !!to && from.agent === to.agent && (from.agent === "claude" || from.agent === "codex")
+    && (!to.perm || !from.perm || to.perm === from.perm);
 }
 
 /** What changes: { model, effort, fast } (each only when it differs; model/effort '' for the CLI's default). A new
@@ -255,6 +257,7 @@ export async function switchLive(io, kind, from, to, labels = {}) {
   const ch = liveChanges(from, to);
   if (!Object.keys(ch).length) return ch;
   if (kind === "claude") await claude(io, ch);
-  else await codex(io, ch, { ...labels, model: from.model, effort: to.effort });
+  else if (kind === "codex") await codex(io, ch, { ...labels, model: from.model, effort: to.effort });
+  else throw new Error("This agent can't switch in place: restart it on the new choice.");
   return ch;
 }

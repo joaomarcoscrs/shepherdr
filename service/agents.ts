@@ -11,7 +11,7 @@ import { sh } from "./model.ts";
 import { layoutScript } from "./layout-scripts.ts";
 import * as AG from "../core/agents.js";
 import { chatLabel } from "../core/spaces.js";
-import { kindOf } from "../core/chat-reader.js";
+import { agentKindOf as kindOf } from "../core/chat-reader.js";
 import * as LS from "../core/live-switch.js";
 
 const { DEFAULTS, parseDefaults, current, menuFor, rowFor, argvFor, sessionOf, NAMES, line, PICKS_FILE, parsePicks, pickKey, withPin, withRecent } = AG as any;
@@ -66,17 +66,21 @@ export class Agents {
     if (!t) throw new Error("That agent isn't here any more.");
     const machine = addr.includes("/") ? addr.split("/")[0] : null;
     const kind = kindOf(t) ?? reader?.kind ?? "claude";
-    const [claude, codex, have] = await Promise.all([this.defaults("claude", machine), this.defaults("codex", machine),
+    const [claude, codex, cursor, have] = await Promise.all([this.defaults("claude", machine), this.defaults("codex", machine), this.defaults("cursor", machine),
       sh(this.hub, 'for c in "$@"; do command -v "$c" >/dev/null 2>&1 && echo "$c"; done', ["agents", "claude", "codex"], machine).then((r: any) => new Set(String(r?.stdout ?? "").split("\n").filter(Boolean)), () => null)]);
-    const dflts: any = { claude, codex };
+    const dflts: any = { claude, codex, cursor };
+    // Cursor only where its CLI is (cursor-agent or agent on that machine's PATH)
+    // and for a task's worker only (core/settings.js forRole): an Assistant lives in its chat, a reviewer runs read-only
+    const worker = !!t.labels?.["herdr.task"] && !["reviewer", "helper"].includes(t.labels?.["herdr.role"]);
+    const offered = (k: string) => k === kind || (k === "cursor" ? !!cursor?.installed && worker : !have || have.has(k));
     let meta = reader?.conv?.meta ?? {};
     // a resumed conversation's log names the model it ran on before: until this process writes, its arguments say
     if (t.created_ms && meta.at && meta.at < t.created_ms) meta = { used: meta.used, window: meta.window };
     const c = current(kind, t.foreground?.argv ?? t.argv ?? [], meta, dflts[kind]);
     const row = rowFor(kind, c);
-    const menus = Object.fromEntries(["claude", "codex"].filter((k) => k === kind || !have || have.has(k)).map((k) => [k, menuFor(k, dflts[k], k === kind ? row : null)]));
+    const menus = Object.fromEntries(["claude", "codex", "cursor"].filter(offered).map((k) => [k, menuFor(k, dflts[k], k === kind ? row : null)]));
     return { current: { agent: kind, model: row, effort: c.effort ?? null, fast: !!c.fast, perm: c.perm ?? null }, menus,
-      permDefault: { claude: claude?.mode ?? "manual", codex: "auto" }, picks: this.picks(), offline: machine && !(await this.reachable(machine)) ? machine : null };
+      permDefault: { claude: claude?.mode ?? "manual", codex: "auto", cursor: "manual" }, picks: this.picks(), offline: machine && !(await this.reachable(machine)) ? machine : null };
   }
 
   /** whether another machine answers now (hc machine ls: connected) */
@@ -87,15 +91,16 @@ export class Agents {
 
   /** Each CLI's own settings here (Settings › Agents' model menu: core/settings.js choicesFrom). */
   async ownDefaults() {
-    const [claude, codex] = await Promise.all([this.defaults("claude", null), this.defaults("codex", null)]);
-    return { claude, codex };
+    const [claude, codex, cursor] = await Promise.all([this.defaults("claude", null), this.defaults("codex", null), this.defaults("cursor", null)]);
+    return { claude, codex, cursor };
   }
 
   /** What an unset role runs, in the window's words ("Opus 5.5 · 1M · High"): each CLI's own defaults here. */
   async defaultLines(): Promise<Record<string, string>> {
     const out: Record<string, string> = {};
-    for (const k of ["claude", "codex"]) {
+    for (const k of ["claude", "codex", "cursor"]) {
       const d: any = await this.defaults(k, null).catch(() => null);
+      if (k === "cursor" && !d?.installed) continue;
       if (d) out[k] = line({ agent: k, model: d.model, effort: d.effort ?? d.per?.[String(d.model ?? "").replace(/\[1m\]$/, "")] ?? null, fast: d.fast }).split(" · ").slice(1).join(" · ");
     }
     return out;
@@ -103,13 +108,14 @@ export class Agents {
 
   /** What each CLI offers on a machine (null: here), as the restart sheet lists them. */
   async choices(machine: string | null) {
-    const [claude, codex] = await Promise.all([this.defaults("claude", machine), this.defaults("codex", machine)]);
-    const dflt: any = { claude, codex };
-    return ["claude", "codex"].map((k) => {
+    const [claude, codex, cursor] = await Promise.all([this.defaults("claude", machine), this.defaults("codex", machine), this.defaults("cursor", machine)]);
+    const dflt: any = { claude, codex, cursor };
+    return ["claude", "codex", ...(cursor?.installed ? ["cursor"] : [])].map((k) => {
       const m = menuFor(k, dflt[k], null);
       // its permission modes, and the one a new agent gets unless picked (the CLI's own: Claude Code's settings mode)
       return { kind: k, name: NAMES[k], models: m.models.map((x: any) => ({ id: x.id, label: x.name, efforts: x.efforts, ...(x.defaultEffort ? { defaultEffort: x.defaultEffort } : {}) })),
-        speeds: m.models.some((x: any) => x.fast) ? ["normal", "fast"] : ["normal"], perms: m.perms ?? [], permDefault: k === "claude" ? dflt.claude?.mode ?? "manual" : "auto" };
+        speeds: m.models.some((x: any) => x.fast) ? ["normal", "fast"] : ["normal"], perms: m.perms ?? [],
+        permDefault: k === "claude" ? dflt.claude?.mode ?? "manual" : k === "cursor" ? "manual" : "auto" };
     });
   }
 
@@ -119,10 +125,11 @@ export class Agents {
     if (!t) throw new Error("That agent isn't here any more.");
     const machine = addr.includes("/") ? addr.split("/")[0] : null;
     const kind = kindOf(t) ?? "claude";
-    const [claude, codex] = await Promise.all([this.defaults("claude", machine), this.defaults("codex", machine)]);
-    const dflt: any = { claude, codex };
+    const [claude, codex, cursor] = await Promise.all([this.defaults("claude", machine), this.defaults("codex", machine), this.defaults("cursor", machine)]);
+    const dflt: any = { claude, codex, cursor };
     const c = current(kind, t.foreground?.argv ?? t.argv ?? [], reader?.conv?.meta ?? {}, dflt[kind]);
-    const clis = ["claude", "codex"].map((k) => {
+    const worker = !!t.labels?.["herdr.task"] && !["reviewer", "helper"].includes(t.labels?.["herdr.role"]);
+    const clis = ["claude", "codex", ...((cursor?.installed && worker) || kind === "cursor" ? ["cursor"] : [])].map((k) => {
       const m = menuFor(k, dflt[k], k === kind ? c.model : null);
       return { kind: k, name: NAMES[k], models: m.models.map((x: any) => ({ id: x.id, label: x.name, efforts: x.efforts, ...(x.defaultEffort ? { defaultEffort: x.defaultEffort } : {}) })),
         speeds: m.models.some((x: any) => x.fast) ? ["normal", "fast"] : ["normal"] };
