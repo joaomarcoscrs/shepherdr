@@ -564,8 +564,9 @@ export default class Chat extends View {
             cx.notify();
           } else if (req?.pane && req.pane === me && String(req.text ?? "").trim()) {
             await fs.unlink(f).catch(() => {});
-            // files: paths to go with it, as a drop gives them.
-            const files = attach.paths(Array.isArray(req.files) ? req.files.map(String) : []);
+            // files: paths to go with it, as a drop gives them (relayed: a script's, not the person's own share, so
+            // never in the shared pictures' list: attach.shareable)
+            const files = attach.paths(Array.isArray(req.files) ? req.files.map(String) : []).map((f) => ({ ...f, relayed: true }));
             this.deliver({ id: `m${Date.now()}`, text: String(req.text).trim(), files, quote: null }, cx);
             this.pinned = true;
             this.stick = true;
