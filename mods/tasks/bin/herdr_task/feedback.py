@@ -221,19 +221,19 @@ def os_words():
 
 
 def cli_version(agent):
-    """`<cli> --version`'s first line, for claude or codex; else ''."""
-    if agent not in ("claude", "codex"):
+    """`<cli> --version`'s first line, for claude, codex or cursor (cursor-agent); else ''."""
+    if agent not in ("claude", "codex", "cursor"):
         return ""
     try:
-        r = subprocess.run([agent, "--version"], capture_output=True, text=True, timeout=5)
+        r = subprocess.run(["cursor-agent" if agent == "cursor" else agent, "--version"], capture_output=True, text=True, timeout=5)
         return one_line(r.stdout.split("\n")[0], 60) if r.returncode == 0 else ""
     except (OSError, subprocess.SubprocessError):
         return ""
 
 
 def environment(agent=None, surface=None):
-    agent = agent if agent in ("claude", "codex") else None
-    names = {"claude": "Claude Code", "codex": "Codex"}
+    agent = agent if agent in ("claude", "codex", "cursor") else None
+    names = {"claude": "Claude Code", "codex": "Codex", "cursor": "Cursor"}
     v = cli_version(agent) if agent else ""
     return {"shepherdr": shepherdr_version(), "os": os_words(),
             "agent": (f"{names[agent]} {v}".strip() if agent else "not known"),

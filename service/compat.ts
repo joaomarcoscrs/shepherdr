@@ -7,7 +7,7 @@ import { failedOf } from "./send-once.ts";
 import type { Snapshot, Place, Task, Need, Section, Machine, Chat, Message, Status, TaskStatus, StepKind, ActivityAnswer, Question, Artifact, SettingSection, Job } from "../web/shared/types.ts";
 import * as T from "../core/tasks.js";
 import * as SPc from "../core/spaces.js";
-import { kindOf as kindOfTerm } from "../core/chat-reader.js";
+import { kindOf as kindOfTerm, agentKindOf } from "../core/chat-reader.js";
 import * as CL from "../core/chat-log.js";
 import * as CV from "../core/chat-view.js";
 import { taskArtifacts } from "../core/task-artifacts.js";
@@ -401,7 +401,7 @@ export class Compat {
         ...(r.said ? { report: { msg: r.section === "working" && r.why ? r.why : r.said.text, ...(r.said.done != null ? { progress: r.said.done } : {}),
           ...(r.said.left != null && !r.said.paused ? { eta: r.said.left } : {}), ...(r.said.paused ? { paused: true } : {}) } }
           : r.section === "working" && r.why ? { report: { msg: r.why, ...(r.pct != null ? { progress: r.pct } : {}) } } : {}),
-        ...(r.worker ? { agent: { chat: `${id}/worker`, role: "worker", cli: "claude", status: r.section === "needs" ? "need" : "work", running: true, age: "", note: "" } } : {}),
+        ...(r.worker ? { agent: { chat: `${id}/worker`, role: "worker", cli: (r as any).cli ?? "claude", status: r.section === "needs" ? "need" : "work", running: true, age: "", note: "" } } : {}),
         ...(!r.worker && r.lastLog ? { agent: { chat: `${id}/worker`, role: "worker", cli: r.lastLog.kind, status: "idle", running: false, age: "", note: "" } } : {}),
       };
       return t;
@@ -685,7 +685,8 @@ export class Compat {
     try {
       // as the window's chat: the CLI's own settings fill what its arguments and log don't say; a resumed log's model
       // counts only once this process writes
-      const kind = reader.kind ?? "claude", dflt = (this.agents as any)?.cached?.(kind, machine) ?? {};
+      // a Cursor worker's chat can't be read (no reader kind), but its line under the box says what it runs on
+      const kind = reader.kind ?? agentKindOf(t) ?? "claude", dflt = (this.agents as any)?.cached?.(kind, machine) ?? {};
       let meta = reader.conv?.meta ?? {};
       if (t?.created_ms && meta.at && meta.at < t.created_ms) meta = { used: meta.used, window: meta.window };
       const c = current(kind, t?.foreground?.argv ?? t?.argv ?? [], meta, dflt);
@@ -711,6 +712,6 @@ export class Compat {
       : reader.state === "none" || reader.state === "missing" ? ((t && t.state !== "live") || !t ? "ended" : kind ? "none" : "unsupported")
       : !reader.pinned && (!t || t.state !== "live") && !items.length ? "ended" : null;
     const failed = failedOf(addr);
-    return { key, messages, ...(failed.length ? { failed } : {}), ...head, ...under, ...(note ? { note } : {}), ...(notice ? { notice } : {}), ...(agent ? { agent } : {}), ...(jobs.length ? { jobs } : {}), working: st === "working", cli: reader.kind === "codex" ? "codex" : "claude", ...(reader.pinned || (t && t.state !== "live") ? { finished: true } : {}) };
+    return { key, messages, ...(failed.length ? { failed } : {}), ...head, ...under, ...(note ? { note } : {}), ...(notice ? { notice } : {}), ...(agent ? { agent } : {}), ...(jobs.length ? { jobs } : {}), working: st === "working", cli: reader.kind === "codex" ? "codex" : !reader.kind && agentKindOf(t) === "cursor" ? "cursor" : "claude", ...(reader.pinned || (t && t.state !== "live") ? { finished: true } : {}) };
   }
 }
