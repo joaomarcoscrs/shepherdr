@@ -63,7 +63,8 @@ export const AUTO_ACCEPT = {
   on: "Auto-accept is on",
   off: "Auto-accept is off",
 };
-export const autoAcceptOffered = (status, on = false) => ["todo", "queued", "scheduled", "working", "needs"].includes(status) || (status === "ready" && on);
+// status: the window's section (working, needs) or the web's (work, need).
+export const autoAcceptOffered = (status, on = false) => ["todo", "queued", "scheduled", "working", "needs", "work", "need"].includes(status) || (status === "ready" && on);
 export const taskMenu = ({ pinned = false, status = null, autoAccept = false } = {}) => {
   const later = ["todo", "queued", "scheduled"].includes(status);
   const auto = autoAcceptOffered(status, autoAccept);

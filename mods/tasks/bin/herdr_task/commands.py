@@ -1334,7 +1334,7 @@ def cmd_auto_accept(args):
             t["auto_accept"] = {"at": now()}
             s.dirty = True
             msg = (f"{s.ref(t)}: auto-accept is on. Once it is Ready (checks passed, nothing waiting on you), Herdr "
-                   f"accepts it as your Accept would" + (", merging it first" if t.get("mode") == "worktree" else "") +
+                   f"accepts it as the person's Accept would" + (", merging it first" if t.get("mode") == "worktree" else "") +
                    ". Turn it off any time before then.")
         v = view(s, t)
     say(args, v, msg)

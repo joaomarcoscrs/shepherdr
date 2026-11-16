@@ -66,6 +66,8 @@ test("SHEP-3: Accept when ready, until a task is done; on a Ready one only to tu
   expect(auto({ status: "done" })).toBe(null);
   expect(auto({ status: null })).toBe(null); // an archived task's menu
   expect(autoAcceptOffered("working")).toBe(true);
+  // the web's own words for a status (work, need) are the window's (working, needs)
+  expect(["work", "need", "merging"].map((s) => autoAcceptOffered(s))).toEqual([true, true, false]);
   // its note says what it does, in plain words
   expect(AUTO_ACCEPT.note).toBe("Merges it by itself once it's Ready. Checks still apply.");
 });
