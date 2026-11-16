@@ -91,6 +91,24 @@ class CursorChat(unittest.TestCase):
         argvs = [r["argv"] for r in self.sent() if "argv" in r]
         self.assertEqual(argvs, [["acp"]])
 
+    def test_a_model_for_this_chat_leaves_the_persons_default(self):
+        """Cursor saves a session's model as the default (cli-config.json): put back, everything else kept."""
+        cfg_dir = os.path.join(self.dir, "cursor-home")
+        os.makedirs(cfg_dir)
+        cfg = os.path.join(cfg_dir, "cli-config.json")
+        before = {"permissions": {"allow": ["Shell(ls)"], "deny": []}, "model": {"modelId": "default", "displayName": "Auto"},
+                  "modelSelectionHistory": ["default"], "version": 1}
+        with open(cfg, "w") as f:
+            json.dump(before, f, indent=2)
+        code, out, err = self.run_bridge("say hi\n<hc from=\"t3 x\">/model composer-2.5</hc>\nsay bye\n", "--model", "claude-opus-5-5",
+                                         env={"CURSOR_CONFIG_DIR": cfg_dir})
+        self.assertEqual(code, 0, err)
+        with open(cfg) as f:
+            self.assertEqual(json.load(f), before)
+        # the chat still runs on what was picked: both changes went through (one sent by another agent)
+        self.assertEqual([r["model"] for r in self.transcript() if r["type"] == "model"],
+                         ["claude-opus-5-5[context=300k,effort=medium,fast=false]", "composer-2.5[fast=true]"])
+
     def test_full_access_is_cursors_force(self):
         code, _, err = self.run_bridge("say hi\n", "--force")
         self.assertEqual(code, 0, err)

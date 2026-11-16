@@ -7,6 +7,7 @@ allowlist is empty), and runs nothing; "hang" works until cancelled. A session/l
 replays one exchange. FAKE_ACP_SIGNED_OUT=1: session/new fails as Cursor does signed out."""
 import json
 import os
+import re
 import sys
 import threading
 
@@ -41,7 +42,8 @@ def opts():
 
 def prompt(i, p):
     sid = p["sessionId"]
-    text = p["prompt"][0]["text"]
+    # the words without the tag hc wraps a message from another agent in (<hc from="t3">...</hc>)
+    text = re.sub(r"^<hc[^>]*>|</hc>$", "", p["prompt"][0]["text"].strip())
     if text.startswith("say "):
         for w in text[4:].split(" "):
             update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": w + " "}})
@@ -101,6 +103,16 @@ def main():
                 send({"jsonrpc": "2.0", "id": i, "error": {"code": -32602, "message": "Unknown model"}})
             else:
                 current["model"] = p["value"]
+                # as Cursor does: the pick saved as the default for new sessions in cli-config.json
+                cfg = os.path.join(os.environ.get("CURSOR_CONFIG_DIR") or os.path.expanduser("~/.cursor"), "cli-config.json")
+                if os.path.exists(cfg):
+                    with open(cfg) as f:
+                        d = json.load(f)
+                    d["model"] = {"modelId": p["value"].split("[")[0]}
+                    d["selectedModel"] = {"modelId": p["value"].split("[")[0]}
+                    d["modelSelectionHistory"] = [p["value"].split("[")[0]] + d.get("modelSelectionHistory", [])
+                    with open(cfg, "w") as f:
+                        json.dump(d, f, indent=2)
                 send({"jsonrpc": "2.0", "id": i, "result": {"configOptions": opts()}})
         elif meth == "session/prompt":
             threading.Thread(target=prompt, args=(i, p), daemon=True).start()

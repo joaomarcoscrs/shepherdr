@@ -50,6 +50,64 @@ def cursor_bin():
     return shutil.which("cursor-agent") or shutil.which("agent")
 
 
+# What Cursor saves as the default for new sessions when a session's model changes (session/set_config_option writes
+# them to cli-config.json, as its own /model does; seen in SHEP-6): put back afterwards, so a model picked for one chat
+# never changes the person's Cursor default (as core/live-switch.js puts Claude Code's and Codex's back).
+MODEL_KEYS = ("model", "selectedModel", "modelParameters", "modelSelectionHistory", "hasChangedDefaultModel")
+
+
+def cursor_config():
+    d = os.environ.get("CURSOR_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".cursor")
+    f = os.path.join(d, "cli-config.json")
+    if not os.path.exists(f):
+        alt = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config"), "cursor", "cli-config.json")
+        if os.path.exists(alt):
+            return alt
+    return f
+
+
+def read_config(path):
+    try:
+        with open(path) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def restore_model_keys(path, before):
+    """cli-config.json with MODEL_KEYS as they were in `before` (only those keys: anything else written meanwhile
+    stays). -> whether it wrote."""
+    now = read_config(path)
+    if before is None or now is None:
+        return False
+    changed = False
+    for k in MODEL_KEYS:
+        if json.dumps(before.get(k), sort_keys=True) == json.dumps(now.get(k), sort_keys=True):
+            continue
+        changed = True
+        if k in before:
+            now[k] = before[k]
+        else:
+            now.pop(k, None)
+    if not changed:
+        return False
+    tmp = f"{path}.herdr-{os.getpid()}.tmp"
+    try:
+        mode = os.stat(path).st_mode & 0o777
+        with open(tmp, "w") as f:
+            f.write(json.dumps(now, indent=2, ensure_ascii=False) + "\n")
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+
+
 def asks_dir():
     return os.path.join(os.environ.get("HERDR_APP_HOME") or os.path.join(os.path.expanduser("~"), ".config", "herdr-app"),
                         "data", "chat-asks")
@@ -230,6 +288,9 @@ class Bridge:
         self.eof = False
         self.lost = None
         self.setting = False     # a model change waits for Cursor's answer
+        self.cfg = None          # Cursor's cli-config.json and its model keys before a change (restore_model_keys)
+        self.cfg_before = None
+        self.restores = []       # when to put them back
 
     # ---- output ----
 
@@ -335,6 +396,8 @@ class Bridge:
         elif why and why.startswith("model:"):
             want = why.split(":", 1)[1]
             self.setting = False
+            # now, and twice more in case Cursor saves after it answers
+            self.restores = [time.time(), time.time() + 1.5, time.time() + 5]
             if err:
                 self.note(f"Model not changed: {clip(err.get('message') or err, 200)}")
             else:
@@ -407,6 +470,9 @@ class Bridge:
         if not value:
             return
         self.setting = True
+        # what it saves as the person's default goes back once it's set (MODEL_KEYS)
+        self.cfg = cursor_config()
+        self.cfg_before = read_config(self.cfg)
         self.call("session/set_config_option", {"sessionId": self.session, "configId": "model", "value": value}, f"model:{value}")
 
     def save_models(self):
@@ -438,6 +504,10 @@ class Bridge:
         text = text.strip("\n")
         if not text.strip():
             return
+        # another agent's send comes wrapped (<hc from="t3">/model x</hc>): a command of this chat still counts
+        bare = re.sub(r"^<hc from=[^>]*>([\s\S]*)</hc>$", r"\1", text.strip()).strip()
+        if re.match(r"^/(model|exit|quit)\b", bare):
+            text = bare
         if text.strip() in ("/exit", "/quit"):
             return self.stop()
         if self.busy or not self.session or self.setting:
@@ -580,6 +650,14 @@ class Bridge:
         if time.time() - a["at"] > ASK_WAIT:
             self.answer(["reject_once", "reject_always"], "No answer in 30 minutes: rejected")
 
+    def put_back(self):
+        """The person's Cursor default model as it was before this chat changed its own (MODEL_KEYS)."""
+        due = [t for t in self.restores if t <= time.time()]
+        if not due:
+            return
+        self.restores = [t for t in self.restores if t > time.time()]
+        restore_model_keys(self.cfg, self.cfg_before)
+
     def forget_ask(self):
         if self.ask and self.ask.get("id"):
             for sub in ("req", "ans"):
@@ -696,6 +774,9 @@ class Bridge:
         self.done = True
 
     def close(self):
+        if self.restores:
+            self.restores = [0]
+            self.put_back()
         if self.ask:
             self.answer(["reject_once", "reject_always"], "Agent stopped")
         if self.proc and self.proc.poll() is None:
@@ -775,6 +856,7 @@ class Bridge:
                 if ev:
                     self.handle(ev, val)
                 self.check_ask()
+                self.put_back()
                 if self.eof and not self.busy and not self.queue and not self.ask and self.session:
                     self.done = True
             return self.code
