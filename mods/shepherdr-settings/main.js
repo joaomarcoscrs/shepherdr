@@ -27,6 +27,7 @@ import { over } from "./over.js";
 import { secretsInit, secretsSection } from "./secrets-section.js";
 import { baseInit, baseRow } from "./base-branch.js";
 import { branchInit, branchRow } from "./branch-names.js";
+import { deliveryInit, deliveryRows } from "./delivery-rows.js";
 import { feedbackInit, feedbackRow, feedbackRepoRow } from "./feedback-repo.js";
 import { autopilotInit, autopilotSection, autopilotFlush } from "./autopilot-section.js";
 import { spaceName } from "./core/spaces.js";
@@ -41,7 +42,7 @@ import { dirs } from "./dirs.js";
 // herdr-task's merge policy (MERGE): "ask" waits for the person's Accept (which merges), the others merge without it.
 // NOTES: what a task's agent is told to do first and last (tasks.start_notes / finish_notes): herdr-task puts them
 // into its starting prompt; Herdr runs nothing itself.
-import { SECTIONS, ROLES, NOTES, MERGE, MUST_FIX, ROUNDS, ARCHIVE, ABOUT, BACKUP, REACTIONS, upgradeReactions, NOTIFY_ABOUT, TITLE, SPACE_TITLE,
+import { SECTIONS, ROLES, NOTES, MERGE, DELIVERY, PR_REVIEW, MUST_FIX, ROUNDS, ARCHIVE, ABOUT, BACKUP, REACTIONS, upgradeReactions, NOTIFY_ABOUT, TITLE, SPACE_TITLE,
   EVERYWHERE, CHANGED_HERE, RESET, EDIT_INSTRUCTIONS, USE_OTHER_CLI, LOADING_AGENTS, SAVED, sameAs as sameAsWords,
   spacesOwn, otherCliWords, backupProblem, notifyMachineAbout, machineLabel, TASK_ROWS, LEVEL, forRole, otherCli } from "./core/settings.js";
 
@@ -97,6 +98,8 @@ export default class ShepherdrSettings extends View {
     this.bb = baseInit(this);
     // Tasks > Branch names, Everywhere's or a space's (branch-names.js).
     this.bn = branchInit(this);
+    // Tasks > Delivery's Open PR boxes, Everywhere's or a space's (delivery-rows.js, SHEP-7).
+    this.dr = deliveryInit(this);
     this.fr = feedbackInit(this);
     // Autopilot: one setting for every space, kept by herdr-task (autopilot-section.js).
     this.ap = autopilotInit(this, cx);
@@ -548,8 +551,16 @@ export default class ShepherdrSettings extends View {
     const autoOn = shepherdrFor(this.cfg, this.scope).automations.enabled !== false;
     const base = baseRow(this, t);
     const branch = branchRow(this, t);
+    // SHEP-7: the space's delivery profile (herdr-task's delivery_for: a space's own by its id, else Everywhere's); Open PR
+    // shows its approval, assignees and next step
+    const openPr = k.delivery === "open_pr";
     return v_flex()
       .child(this.title(t, page("tasks")))
+      .child(this.row(t, rowTitle("tasks.delivery"), ABOUT["tasks.delivery"],
+        segmented("delivery", DELIVERY, k.delivery ?? "merge", (v, _e, cx) => this.set("tasks", "delivery", v, cx)), this.scoped("tasks", "delivery")))
+      .when(openPr, (el) => el.child(this.row(t, rowTitle("tasks.pr_review"), ABOUT["tasks.pr_review"],
+        segmented("pr-review", PR_REVIEW, k.pr_review ?? "none", (v, _e, cx) => this.set("tasks", "pr_review", v, cx)), this.scoped("tasks", "pr_review")))
+        .children(deliveryRows(this, t)))
       .child(this.row(t, rowTitle("tasks.merge"), ABOUT["tasks.merge"],
         segmented("merge", MERGE, k.merge, (v, _e, cx) => this.set("tasks", "merge", v, cx)), this.scoped("tasks", "merge")))
       // SHEP-5: the person's Accept given ahead for every new task here (herdr-task's auto_accept_default: a space's own

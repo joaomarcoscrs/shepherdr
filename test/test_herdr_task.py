@@ -6790,3 +6790,286 @@ class CursorAgent(unittest.TestCase):
         self.assertEqual(feedback.environment("cursor")["agent"].split(" ")[0], "Cursor")
         self.assertEqual(output.subagent({"address": "t2", "agent": "cursor-agent"})["agent"], "cursor")
         self.assertEqual(output.subagent({"address": "t2", "agent": "codex"})["agent"], "codex")
+
+
+class DeliveryProfiles(unittest.TestCase):
+    """SHEP-7: a space's delivery profile for its tasks: Merge (as before) or Open PR (its pull request opened, assigned,
+    approved by Jarbas Local for its exact head, then handed to the person, never merged). AutoAccept's real task list on
+    disk and real worktrees; GitHub is a fake (no real pull request is touched): every gh call is recorded, and `pr merge`
+    fails the test."""
+    ROBO = "spRobo"   # the roboflow/roboflow space
+    HQ = "spHQ"       # joão HQ
+    setUp_auto, run_cmd, task, git = AutoAccept.setUp, Scheduled.run_cmd, Scheduled.task, AutoAccept.git
+    tick_at, status, auto, on_main, work = AutoAccept.tick_at, AutoAccept.status, AutoAccept.auto, AutoAccept.on_main, SpaceAutoAccept.work
+
+    def setUp(self):
+        self.setUp_auto()
+        from unittest import mock
+        import herdr_task.delivery as delivery
+        import herdr_task.github as github
+        import herdr_task.settings as settings
+        self.delivery, self.settings_mod = delivery, settings
+        delivery._login.clear()
+        self.calls = []
+        self.gh_state = {"login": "joao", "pr": None, "state": "open", "head": None, "assignees": ["someone"], "comments": []}
+
+        def gh(*args, cwd=None):
+            self.calls.append(args)
+            st = self.gh_state
+            if args[:2] == ("api", "user"):
+                return True, st["login"], ""
+            if args[0] == "pr" and args[1] == "merge":
+                raise AssertionError("Herdr merged an Open PR task's pull request")
+            if args[0] == "api" and st["pr"] and args[1] == f"repos/o/r/pulls/{st['pr']}":
+                return True, json.dumps({"state": "closed" if st["state"] != "open" else "open", "merged_at": "x" if st["state"] == "merged" else None,
+                                         "head": {"sha": st["head"]}, "html_url": f"https://github.com/o/r/pull/{st['pr']}",
+                                         "assignees": [{"login": a} for a in st["assignees"]]}), ""
+            if args[:2] == ("api", "--paginate"):
+                return True, "\n".join(json.dumps(c) for c in st["comments"]), ""
+            if args[:2] == ("pr", "edit"):
+                st["assignees"] += args[args.index("--add-assignee") + 1].split(",")
+                return True, "", ""
+            return False, "", "not faked"
+
+        def pr_open(s, t, repo, summary=None):
+            # opens (once) and "pushes": GitHub's head is the branch's commit now
+            st = self.gh_state
+            st["pr"] = st["pr"] or 7
+            st["head"] = self.git(t["worktree"], "rev-parse", "HEAD")
+            t["pr"] = {"number": st["pr"], "url": f"https://github.com/o/r/pull/{st['pr']}", "repo": repo}
+            return t["pr"]
+        for mod, name, value in ((delivery, "gh", gh), (github, "gh", gh), (github, "github", lambda s: "o/r"),
+                                 (github, "pr_open", pr_open)):
+            p = mock.patch.object(mod, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def settings(self, d):
+        with open(os.path.join(self.tmp, "settings.json"), "w") as f:
+            json.dump(d, f)
+
+    def spaces(self, everywhere=None, robo=None):
+        """João's two spaces: joão HQ merges, roboflow opens a PR for João, approved by Jarbas Local."""
+        self.settings({"everywhere": everywhere or {}, "spaces": {
+            self.HQ: {"folder": "/srv/hq", "tasks": {"delivery": "merge", "auto_accept": True}},
+            self.ROBO: {"folder": self.folder, "tasks": robo or {"delivery": "open_pr", "pr_assign": "joao",
+                                                                  "pr_review": "jarbas-local", "pr_next": "Find a human reviewer"}}}})
+
+    def briefed(self, n, space):
+        """Its brief made (as begin()'s launch does): its delivery kept on it."""
+        with self.store_mod.Store(self.store_mod.locate(self.folder)) as s:
+            t = s.find(n)
+            self.settings_mod.keep_delivery(t, space)
+            block = self.settings_mod.settings_block(s, t, space, ["claude"])
+            s.dirty = True
+        return block
+
+    def ready(self, n, **kw):
+        return self.run_cmd(self.commands.cmd_ready, id=str(n), summary=kw.pop("summary", "It works"), details=None, proof=None,
+                            agents_md=None, blocked=kw.pop("blocked", None), **kw)
+
+    def verdict(self, head, word="APPROVED", login="joao", n=7):
+        self.gh_state["comments"].append({"id": len(self.gh_state["comments"]) + 1, "user": login, "url": f"https://github.com/o/r/pull/{n}#c",
+                                          "body": f"[Jarbas Local João] — **{word}** at `{head[:12]}`\n\nGist: https://gist.github.com/joao/abc\n"
+                                                  f"<!-- brains:jarbas-local:o/r#{n}:{head} -->"})
+
+    def open_pr_task(self, title="Fix login", n=1):
+        self.spaces()
+        self.add(title, space=self.ROBO)
+        wt = self.work(n, title)
+        self.briefed(n, self.ROBO)
+        return wt
+
+    def add(self, title, **kw):
+        return self.run_cmd(self.commands.cmd_add, title=title, **kw)
+
+    def head(self, wt):
+        return self.git(wt, "rev-parse", "HEAD")
+
+    def commit(self, wt, name):
+        with open(os.path.join(wt, name), "w") as f:
+            f.write(name)
+        self.git(wt, "add", "-A")
+        self.git(wt, "-c", "user.name=T", "-c", "user.email=t@example.com", "commit", "-q", "-m", name)
+
+    # ---- settings: per space, inherited, a task's own, kept from its brief ----
+
+    def test_profile_by_space_id_everywhere_and_a_task_override(self):
+        dfor = self.settings_mod.delivery_for
+        self.assertEqual(dfor("sp1", None, {})["mode"], "merge")  # Herdr's default
+        d = {"spaces": {self.ROBO: {"folder": "/x", "tasks": {"delivery": "open_pr", "pr_assign": "joao, @ana", "pr_review": "jarbas-local"}},
+                        "spSameFolder": {"folder": "/x"}}}
+        p = dfor(self.ROBO, None, d)
+        self.assertEqual((p["mode"], p["assign"], p["review"], p["by"]["delivery"]), ("open_pr", ["joao", "ana"], "jarbas-local", "space"))
+        # another space, even in the same folder, keeps Everywhere's (read by the space's id, never its folder)
+        self.assertEqual(dfor("spSameFolder", None, d)["mode"], "merge")
+        # Everywhere's for every space without its own; a space can still set merge for itself
+        e = {"everywhere": {"tasks": {"delivery": "open_pr"}}, "spaces": {self.HQ: {"tasks": {"delivery": "merge"}}}}
+        self.assertEqual((dfor("spB", None, e)["by"]["delivery"], dfor(self.HQ, None, e)["mode"]), ("everywhere", "merge"))
+        # a task's own --set wins over its space's; an unknown value is no choice (Merge stands)
+        self.assertEqual(dfor(self.ROBO, {"set": {"delivery": "merge"}}, d)["mode"], "merge")
+        self.assertEqual(dfor("spB", None, {"everywhere": {"tasks": {"delivery": "yolo", "pr_review": "x"}}})["mode"], "merge")
+        t = {}
+        self.settings_mod.set_task(t, "delivery", "open pr")
+        self.settings_mod.set_task(t, "delivery.assign", "none")
+        self.settings_mod.set_task(t, "delivery.review", "jarbas")
+        self.assertEqual(t["set"], {"delivery": "open_pr", "pr_assign": "", "pr_review": "jarbas-local"})
+        self.assertEqual(dfor(self.ROBO, t, d)["assign"], [])  # its own "nobody" over the space's
+        with self.assertRaises(self.Fail):
+            self.settings_mod.set_task(t, "delivery", "deploy")
+        with self.assertRaises(self.Fail):
+            self.settings_mod.set_task(t, "delivery.assign", "not a login!")
+
+    def test_brief_captures_it_and_a_later_change_or_an_older_task_keeps_its_own(self):
+        self.spaces()
+        self.add("Fix login", space=self.ROBO)
+        block = self.briefed(1, self.ROBO)
+        self.assertIn("- Merge: never: this task's delivery is Open PR", block)
+        line = next(x for x in block.splitlines() if x.startswith("- Delivery:"))
+        for words in ("open PR, never merge", "assigns it to @joao", "/jarbas-review local iterate", "exact head",
+                      "--blocked", "Find a human reviewer", "this space's setting", "request reviewers"):
+            self.assertIn(words, line)
+        # the space set back to merge: the briefed task keeps Open PR
+        self.spaces(robo={"delivery": "merge"})
+        self.assertEqual(self.settings_mod.delivery_of(self.task(1))["mode"], "open_pr")
+        # joão HQ's tasks: no Delivery line, the Merge line as before
+        self.spaces()
+        self.add("HQ chore", space=self.HQ)
+        hq = self.briefed(2, self.HQ)
+        self.assertNotIn("Delivery", hq)
+        self.assertIn("- Merge: ask the person first", hq)
+        # a task running from before profiles (never briefed with one) keeps merging, whatever its space says now
+        self.add("Older", space=self.ROBO)
+        with self.store_mod.Store(self.store_mod.locate(self.folder)) as s:
+            s.find(3).update(state="running", started=1)
+            s.dirty = True
+        self.assertEqual(self.settings_mod.delivery_of(self.task(3))["mode"], "merge")
+
+    # ---- ready: opened, assigned, approved for the exact head, handed off ----
+
+    def test_ready_waits_for_jarbas_approval_of_the_exact_head_then_hands_off_never_merged(self):
+        wt = self.open_pr_task()
+        h1 = self.head(wt)
+        # first ready: the pull request opens and is assigned (João added, nobody taken off); no verdict yet: Working
+        with self.assertRaises(self.Fail) as e:
+            self.ready(1)
+        self.assertIn("/jarbas-review local iterate", str(e.exception))
+        self.assertIn("https://github.com/o/r/pull/7", str(e.exception))
+        t = self.task(1)
+        self.assertEqual((t["state"], t["handoff"]["pr"], t["handoff"]["tries"]), ("running", 7, 1))
+        self.assertEqual(self.gh_state["assignees"], ["someone", "joao"])
+        # what is never an approval: another account's APPROVED, an older head's, a verdict that isn't APPROVED
+        self.verdict(h1, login="mallory")
+        self.commit(wt, "jarbas-fix")  # Jarbas's iterate repaired and pushed: a new head
+        h2 = self.head(wt)
+        self.verdict(h1)  # approved, but the older head
+        with self.assertRaises(self.Fail):
+            self.ready(1)
+        self.assertEqual(self.task(1)["state"], "running")
+        self.assertEqual(sum(1 for c in self.calls if c[:2] == ("pr", "edit")), 1)  # assigned once, not again
+        self.verdict(h2, "REQUEST CHANGES")
+        with self.assertRaises(self.Fail) as e:
+            self.ready(1)
+        self.assertIn("don't start it over", str(e.exception))
+        # approved at the exact head: handed off. Merge says right away and auto-accept... nothing merges
+        self.gh_state["comments"] = []
+        self.verdict(h2)
+        out = self.ready(1)
+        self.assertEqual(out["state"], "ready")
+        self.assertNotIn("auto_merge", out)
+        self.assertEqual((out["handoff"]["verdict"], out["handoff"]["head"]), ("APPROVED", h2))
+        self.assertNotIn("Fix login", self.on_main())
+        self.assertNotIn(("pr", "merge"), [c[:2] for c in self.calls])
+
+    def test_no_merge_however_it_is_asked(self):
+        self.open_pr_task()
+        with self.store_mod.Store(self.store_mod.locate(self.folder)) as s:
+            t = s.find(1)
+            t.update(state="ready", ready_at=1, auto_merge="auto", pr={"number": 7, "repo": "o/r"})
+            self.assertEqual(self.commands.merge_now(s, t), self.delivery.NO_MERGE)
+            s.dirty = True
+        with self.assertRaises(self.Fail):
+            self.run_cmd(self.commands.cmd_merge, id="1")
+        self.tick_at(self.now)  # the tick's auto-merge goes through merge_now: refused
+        self.assertNotEqual(self.task(1).get("merged"), True)
+        self.assertNotIn(("pr", "merge"), [c[:2] for c in self.calls])
+
+    def test_accept_takes_the_handoff_not_a_merge_and_refuses_a_moved_head(self):
+        wt = self.open_pr_task()
+        with self.assertRaises(self.Fail):
+            self.ready(1)
+        self.verdict(self.head(wt))
+        self.ready(1)
+        # someone pushed to the pull request since: Accept refuses (its approval was for another head)
+        real = self.gh_state["head"]
+        self.gh_state["head"] = "f" * 40
+        with self.assertRaises(SystemExit):
+            self.run_cmd(self.commands.cmd_accept, id="1")
+        self.assertEqual(self.task(1)["state"], "ready")
+        self.gh_state["head"] = real
+        out = self.run_cmd(self.commands.cmd_accept, id="1")
+        self.assertEqual(out["accepted"], "handoff")
+        t = self.task(1)
+        self.assertEqual((t["state"], bool(t.get("handed_off")), t.get("merged")), ("done", True, None))
+        self.assertNotIn("Fix login", self.on_main())
+        self.assertNotIn(("pr", "merge"), [c[:2] for c in self.calls])
+
+    def test_blocked_handoff_and_bounded_tries(self):
+        wt = self.open_pr_task()
+        for i in range(self.delivery.MAX_TRIES):
+            with self.assertRaises(self.Fail):
+                self.ready(1)
+        with self.assertRaises(self.Fail) as e:
+            self.ready(1)
+        self.assertIn("Don't run the review again", str(e.exception))
+        out = self.ready(1, blocked="Jarbas stopped after four rounds on the cache design")
+        self.assertEqual((out["state"], out["handoff"]["blocked"]), ("ready", "Jarbas stopped after four rounds on the cache design"))
+        self.assertIsNone(out["handoff"].get("verdict"))
+        with self.store_mod.Store(self.store_mod.locate(self.folder), write=False) as s:
+            e = self.commands.evidence(s, s.find(1))
+        self.assertEqual((e["merges"], e["delivery"], e["pr"]["number"]), (False, "open_pr", 7))
+        self.assertEqual(e["handoff"]["next"], "Find a human reviewer")
+        self.assertTrue(e["handoff"]["current"])
+        # --blocked is only for Open PR
+        self.spaces()
+        self.add("HQ chore", space=self.HQ)
+        self.work(2, "HQ chore")
+        self.briefed(2, self.HQ)
+        with self.assertRaises(self.Fail):
+            self.ready(2, blocked="nope")
+        self.assertTrue(os.path.isdir(wt))
+
+    def test_auto_accept_never_takes_a_handoff(self):
+        # Accept when ready on everywhere: a roboflow task isn't armed; turned on by hand is refused
+        self.spaces(everywhere={"tasks": {"auto_accept": True}})
+        out = self.add("Fix login", space=self.ROBO)
+        self.assertNotIn("auto_accept", out)
+        with self.assertRaises(self.Fail):
+            self.auto(1)
+        # joão HQ's tasks still get it
+        self.assertEqual(self.add("HQ chore", space=self.HQ)["auto_accept"]["by"], "space")
+        # one armed before its delivery was known: the tick never accepts it, and says why
+        wt = self.work(1, "Fix login")
+        self.briefed(1, self.ROBO)
+        with self.assertRaises(self.Fail):
+            self.ready(1)
+        self.verdict(self.head(wt))
+        self.ready(1)
+        with self.store_mod.Store(self.store_mod.locate(self.folder)) as s:
+            s.find(1)["auto_accept"] = {"at": 1}
+            s.dirty = True
+        report = self.tick_at(self.now + 50)
+        self.assertNotIn("auto_accepted", report)
+        t = self.task(1)
+        self.assertEqual(t["state"], "ready")
+        self.assertIn("Open PR", t["auto_accept"]["failed"])
+
+    def test_merge_profile_unchanged(self):
+        """joão HQ (Merge): ready never reads GitHub for a verdict, and Accept merges as before."""
+        self.spaces()
+        self.add("HQ chore", space=self.HQ)
+        self.work(1, "HQ chore")
+        self.briefed(1, self.HQ)
+        self.ready(1)
+        self.assertFalse([c for c in self.calls if c[:2] == ("api", "--paginate") or c[:2] == ("pr", "edit")])
+        self.assertNotIn("handoff", self.task(1))

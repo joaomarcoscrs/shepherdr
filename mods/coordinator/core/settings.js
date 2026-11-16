@@ -189,6 +189,9 @@ export function chooseModel(menus, permDefault, sel, agent, id) {
 // ---- Tasks -----------------------------------------------------------------------------------------------------
 // One line under each row's title (by its key, section.field).
 export const ABOUT = {
+  // SHEP-7: what Ready leads to (herdr-task's delivery_for: a space's own by its id, else Everywhere's; a task's --set wins)
+  "tasks.delivery": "Merge: a Ready task is merged, as Merge says. Open PR: its pull request is handed to you, never merged by Herdr.",
+  "tasks.pr_review": "Open PR waits for this approval of the pull request's exact head before it hands off.",
   "tasks.merge": "Who merges a task once it's Ready: you, by accepting it, or Herdr.",
   // SHEP-5: the Accept given ahead for every new task (herdr-task's auto_accept_default; a task's menu turns it off)
   "tasks.auto_accept": "New tasks are accepted for you once Ready, merged first. Checks still apply; a task's menu turns it off.",
@@ -220,6 +223,29 @@ export const BASE = {
 export const branchShape = (b) => !/^-|[\s~^:?*[\\]|\.\.|@\{/.test(b);
 // Branch names (tasks.branch, #570): a folder's new task branches, Everywhere's or a space's own; herdr-task fills
 // it in (settings.py BRANCH_PATTERN, branch_pattern_problem). A task's own --branch wins.
+// SHEP-7: Open PR's text rows: who its pull request is assigned to (GitHub logins, added, nobody taken off) and what the
+// person does next (on the card). herdr-task's settings.py logins() reads the logins the same way.
+export const PR_ASSIGN = {
+  title: "Assign PR to",
+  about: "GitHub logins its pull request is assigned to. Added only, nobody is taken off. Empty: nobody.",
+  placeholder: "octocat",
+  bad: "Write GitHub logins, like octocat or octocat, hubot.",
+};
+export const PR_NEXT = {
+  title: "Next step",
+  about: "What you do once it's handed off. Shown on its card.",
+  placeholder: "Find a human reviewer",
+};
+// "octocat, @hubot" -> "octocat,hubot"; "" for none; null when one isn't a GitHub login.
+export function prAssign(v) {
+  const out = [];
+  for (const w of String(v ?? "").trim().split(/[\s,]+/).map((x) => x.replace(/^@/, "")).filter(Boolean)) {
+    if (!/^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/.test(w)) return null;
+    if (!out.some((x) => x.toLowerCase() === w.toLowerCase())) out.push(w);
+  }
+  return out.join(",");
+}
+
 export const BRANCH = {
   title: "Branch names",
   about: "New tasks' branches. {n} is its number, {key} its id (SHEP-4), {slug} its title.",
@@ -292,7 +318,8 @@ export const MACHINES = {
 };
 // What the old machine scope could hold, as the person knows it.
 export const OLD_NAMES = { coordinator: "Assistant", worker: "Workers", reviewer: "Reviewer", backup: "Backup agent",
-  automations: "Run automations", merge: "Merge", auto_accept: "Accept when ready", review_rounds: "Review", must_fix: "Must fix", proof: "Proof",
+  automations: "Run automations", merge: "Merge", auto_accept: "Accept when ready", delivery: "Delivery", pr_assign: "Assign PR to",
+  pr_review: "Approval before handoff", pr_next: "Next step", review_rounds: "Review", must_fix: "Must fix", proof: "Proof",
   max_running: "Tasks at once", archive_after: "Archive Done after", worktrees: "Worktrees",
   start_notes: "When a task starts", finish_notes: "When a task finishes", base: "Base branch", branch: "Branch names", agents: "Reactions" };
 // Home Assistant's line: on or off, and what herdr-task's home round last found there (~/.local/share/shepherdr/tasks/.home.json).
@@ -352,16 +379,21 @@ export const webState = (off, loaded, w) => (off ? "Off. Turn it on under Window
 
 // ---- the rows' choices -----------------------------------------------------------------------------------------
 export const MERGE = [["ask", "On Accept"], ["checks", "After checks pass"], ["auto", "Right away"]];
+// SHEP-7: the delivery profiles, and the approvals Open PR can wait for
+export const DELIVERY = [["merge", "Merge"], ["open_pr", "Open PR"]];
+export const PR_REVIEW = [["none", "None"], ["jarbas-local", "Jarbas Local"]];
 export const MUST_FIX = [["blocker", "Blockers"], ["major", "Major and up"], ["minor", "Everything"]];
 export const ROUNDS = [[0, "Off"], [1, "1 round"], [2, "2 rounds"], [3, "3 rounds"]];
 export const ARCHIVE = [[0, "Off"], [1, "1 day"], [3, "3 days"], [7, "1 week"], [30, "1 month"]];
 export const ONOFF = [[true, "On"], [false, "Off"]];
 
-export const DEFAULTS = { tasks: { merge: "ask", auto_accept: false, review_rounds: 0, must_fix: "major", max_running: 10, worktrees: true, archive_after: 7, proof: true }, automations: { enabled: true },
+export const DEFAULTS = { tasks: { delivery: "merge", pr_review: "none", merge: "ask", auto_accept: false, review_rounds: 0, must_fix: "major", max_running: 10, worktrees: true, archive_after: 7, proof: true }, automations: { enabled: true },
   agents: { reactions: true, suggestions: true, feedback: true, feedback_repo: "" } };
 
 // [section, field, label, choices | { min, max }]
 export const TASK_ROWS = [
+  ["tasks", "delivery", "Delivery", DELIVERY],
+  ["tasks", "pr_review", "Approval before handoff", PR_REVIEW],
   ["tasks", "merge", "Merge", MERGE],
   ["tasks", "auto_accept", "Accept when ready", ONOFF],
   ["tasks", "review_rounds", "Review", ROUNDS],

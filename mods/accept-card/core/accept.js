@@ -32,6 +32,11 @@ export const ACCEPT = {
   github: "GitHub",
   environment: "Ephemeral",
   onGitHub: "On GitHub",
+  // SHEP-7: an Open PR task's card: its hand-off, and the button that takes it (done, never merged)
+  handoff: "Hand-off",
+  takeTitle: (ref) => `Take ${ref}?`,
+  take: "Take it, no merge",
+  taking: "Taking…",
 };
 
 // Auto-accept (SHEP-3) on for it, its try stopped (e.auto_accept.failed: why, from herdr-task's tick): the card says so
@@ -44,7 +49,34 @@ export function autoNote(e) {
 // The Accept button's words (SHEP-225, #1046): what pressing it will do. herdr-task's evidence says `merges` when its
 // branch has work to merge (whatever the Merge setting, Accept merges that first); plain Accept when it only marks the
 // task done (it worked in the folder itself, or nothing is left to merge), and while the card is still being read.
-export const acceptLabel = (e) => (e?.merges ? ACCEPT.acceptMerge : ACCEPT.accept);
+export const acceptLabel = (e) => (e?.handoff ? ACCEPT.take : e?.merges ? ACCEPT.acceptMerge : ACCEPT.accept);
+// The card's title: "Take SHEP-7?" for an Open PR hand-off (never merged), else "Accept SHEP-7?".
+export const cardTitle = (ref, e) => (e?.handoff ? ACCEPT.takeTitle(ref) : ACCEPT.title(ref));
+
+// SHEP-7: an Open PR task's hand-off (herdr-task's evidence.handoff: mods/tasks/bin/herdr_task/delivery.py status()),
+// in lines: [{ text, tone }] (tone colors its dot, as ephemeralWords: ready, work, need, muted). Its approval is for the
+// pull request's exact head: approved but moved since, another verdict, or none yet say so, never "approved". Passing
+// checks are never an approval. null when it isn't one.
+const GATE = { "jarbas-local": "Jarbas Local" };
+export function handoffWords(h) {
+  if (!h) return null;
+  const head = String(h.head ?? "").slice(0, 7);
+  const name = GATE[h.review] ?? h.review;
+  const lines = [];
+  lines.push(h.blocked ? { text: `Handed off blocked: ${String(h.blocked).replace(/\s+/g, " ").trim()}`, tone: "need" }
+    : h.state === "merged" ? { text: "Merged on GitHub since it was handed off", tone: "ready" }
+    : h.state === "closed" ? { text: "Its pull request was closed since it was handed off", tone: "need" }
+    : { text: "Handed off to you: Herdr never merges it", tone: "muted" });
+  if (!h.review || h.review === "none") lines.push({ text: "No approval asked before the hand-off", tone: "muted" });
+  else if (h.verdict === "APPROVED" && h.current === false) lines.push({ text: `${name} approved ${head}, but the pull request has moved since`, tone: "need" });
+  else if (h.verdict === "APPROVED") lines.push({ text: `${name} approved ${head}, the pull request's head`, tone: "ready" });
+  else if (h.verdict) lines.push({ text: `${name} said ${String(h.verdict).replace(/_/g, " ").toLowerCase()} at ${head}`, tone: "need" });
+  else lines.push({ text: `${name} hasn't approved ${head || "its head"}`, tone: "need" });
+  const who = (h.assignees ?? []).map((x) => `@${x}`).join(", ");
+  lines.push({ text: who ? `Assigned to ${who}` : "Not assigned to anyone", tone: "muted" });
+  lines.push({ text: h.next ? `Next: ${h.next}` : "Next: it's yours from here", tone: "muted" });
+  return lines;
+}
 
 export const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 // "3 commits", "12 files changed", "And 4 more"

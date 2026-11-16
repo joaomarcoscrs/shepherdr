@@ -130,6 +130,9 @@ export function autoArmed(task) {
   return aa.tried !== task.ready_at && (task.accepted_at ?? 0) < (task.ready_at ?? 1);
 }
 // Its row's mark: on and not done yet ("Auto-accept"), or its try stopped (the second line says why).
+// SHEP-7: a task whose delivery is Open PR (herdr-task's delivery_of(): its own --set, else what its brief kept; a task
+// briefed before profiles merges): handed to the person with its pull request open, never merged nor accepted by itself.
+export const openPr = (task) => ((task?.set?.delivery ?? task?.brief_delivery?.mode) === "open_pr");
 export const autoAcceptOn = (task) => !!task.auto_accept && typeof task.auto_accept === "object" && task.state !== "done";
 export const autoAcceptStopped = (task) => (autoAcceptOn(task) && task.state === "ready" && task.auto_accept.failed) || null;
 
@@ -311,6 +314,9 @@ export function secondLine(p, w, queued = null, now = Date.now()) {
   return section === "needs" || section === "merging" ? p.why : section === "working" ? p.why ?? w?.text ?? null
     : section === "queued" ? queued
     : section === "scheduled" ? startsLine(p.task.scheduled_for, now)
+    // SHEP-7: an Open PR task waits for the person to take its hand-off, never to merge
+    : section === "ready" && p.task.handoff ? (`Handed off${p.task.handoff.blocked ? " blocked" : ""}`
+      + (p.task.handoff.pr ? ` · PR #${p.task.handoff.pr}` : ""))
     : section === "ready" ? (autoAcceptStopped(p.task) ? `Auto-accept stopped: ${autoAcceptStopped(p.task)}`
       : p.task.ready_at ? `Ready ${ago(p.task.ready_at, true, now)}` : "Ready to accept") : null;
 }

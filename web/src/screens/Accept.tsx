@@ -32,6 +32,10 @@ type Evidence = {
   /** SHEP-4, a Roboflow task only: its pull request and its ephemeral environment (url only once featur says Ready) */
   pr?: { number: number; url?: string }
   ephemeral?: { state: string; phase?: string | null; url?: string; host?: string; expires?: number; check_url?: string; why?: string }
+  /** SHEP-7, an Open PR task: its hand-off (never merged); the button takes it instead of accepting and merging */
+  delivery?: 'open_pr'
+  handoff?: { pr?: number; url?: string; assignees?: string[]; review?: string; verdict?: string | null; head?: string; comment?: string
+    blocked?: string; next?: string; state?: string; current?: boolean }
 }
 type Shown = { ref: string; title: string; state: string; status_text?: string; accepted_at?: number; evidence?: Evidence }
 
@@ -166,6 +170,28 @@ function TryIt({ e }: { e: Evidence }) {
   )
 }
 
+// SHEP-7: an Open PR task's hand-off: its pull request, its approval for the exact head, who it's assigned to, what's next
+function Handoff({ e }: { e: Evidence }) {
+  const lines = A.handoffWords(e.handoff) as { text: string; tone: string }[]
+  return (
+    <div className="flex min-w-0 flex-col gap-1.5">
+      {e.handoff?.url ? <LinkRow href={e.handoff.url} label={A.ACCEPT.pullRequest(e.handoff.pr)} action={A.ACCEPT.github} /> : null}
+      {lines.map((w, i) => (
+        <p key={i} className="flex min-w-0 items-center gap-2">
+          {TONE[w.tone] ? <span className={clsx('size-[7px] shrink-0 rounded-full', TONE[w.tone])} /> : null}
+          <span className={clsx('min-w-0', w.tone === 'muted' && 'text-fg3')}>{w.text}</span>
+          {i === 1 && e.handoff?.comment ? (
+            <a href={e.handoff.comment} target="_blank" rel="noreferrer noopener" className="flex shrink-0 items-center gap-1 text-xs text-fg3 hover:text-fg phone:text-[0.8125rem]">
+              {A.ACCEPT.onGitHub}
+              <OpenIcon className="size-3 shrink-0" />
+            </a>
+          ) : null}
+        </p>
+      ))}
+    </div>
+  )
+}
+
 export function AcceptCard() {
   const task = useOpen()
   const named = useStore((s) => (task && s.snap ? taskOf(s.snap, task)?.name : undefined))
@@ -218,7 +244,8 @@ export function AcceptCard() {
   // what follows the summary (and the proof, when it shows in the card)
   const rest = (
     <>
-      {e.ephemeral ? <Section label={A.ACCEPT.tryIt}><TryIt e={e} /></Section> : null}
+      {e.handoff ? <Section label={A.ACCEPT.handoff}><Handoff e={e} /></Section> : null}
+      {e.ephemeral ? <Section label={A.ACCEPT.tryIt}><TryIt e={{ ...e, pr: e.handoff ? undefined : e.pr }} /></Section> : null}
       <Section label={A.ACCEPT.changes}><Changes e={e} /></Section>
       <Section label={A.ACCEPT.checks}>
         <p className="flex items-center gap-2">
@@ -249,7 +276,7 @@ export function AcceptCard() {
   )
 
   return (
-    <Dialog title={settled ? ref : A.ACCEPT.title(ref)} sub={t?.title ?? named ?? ''} closer wide large={!!proofArt} onCancel={cancel} safe
+    <Dialog title={settled ? ref : A.cardTitle(ref, e)} sub={t?.title ?? named ?? ''} closer wide large={!!proofArt} onCancel={cancel} safe
       cancel={settled ? A.ACCEPT.close : A.ACCEPT.cancel}
       foot={t && (error || settled) ? (
         <>
@@ -260,7 +287,7 @@ export function AcceptCard() {
         </>
       ) : null}
       // Accept shows while it is read too, not yet pressable; once settled only Close is left
-      buttons={settled ? null : <Primary disabled={!ready || busy} onClick={accept}>{busy ? A.ACCEPT.accepting : A.acceptLabel(e)}</Primary>}>
+      buttons={settled ? null : <Primary disabled={!ready || busy} onClick={accept}>{busy ? (e.handoff ? A.ACCEPT.taking : A.ACCEPT.accepting) : A.acceptLabel(e)}</Primary>}>
       {!t ? (
         <div className="pt-2 pb-1"><p className={error ? 'text-need-fg' : 'text-fg3'} role={error ? 'alert' : undefined}>{error ?? A.ACCEPT.reading}</p></div>
       ) : proofArt ? (

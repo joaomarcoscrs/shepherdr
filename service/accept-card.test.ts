@@ -62,3 +62,26 @@ test("any other task: no Try it, as before", () => {
   expect(byId("open-pr")).toBeUndefined();
   expect(byId("open-eph")).toBeUndefined();
 });
+
+// SHEP-7: an Open PR task's card in the window: its Hand-off (the pull request, its approval for the exact head, who it's
+// assigned to, what's next) and a button that takes it, never "Accept and merge"; the ephemeral environment still shows
+const HEAD = "0123456789abcdef0123456789abcdef01234567";
+const handoff = { pr: 19640, url: PR.url, review: "jarbas-local", verdict: "APPROVED", head: HEAD, current: true,
+  comment: `${PR.url}#issuecomment-1`, assignees: ["joao"], next: "Find a human reviewer", state: "open" };
+
+test("an Open PR hand-off: its section, its links, and Take it, no merge", () => {
+  card({ merges: false, delivery: "open_pr", handoff, pr: PR, ephemeral: { state: "ready", url: "https://pr-19640.eph.roboflow.one", host: "pr-19640.eph.roboflow.one" } });
+  const w = words();
+  for (const x of ["Hand-off", "Take RF-1?", "Jarbas Local approved 0123456, the pull request's head", "Assigned to @joao", "Next: Find a human reviewer", "Try it"]) expect(w).toContain(x);
+  expect(w).toContain("Take it, no merge");
+  expect(w).not.toContain("Accept and merge");
+  expect(opened("open-handoff-pr")).toEqual([PR.url]);
+  expect(opened("handoff-review")).toEqual([handoff.comment]);
+  expect(opened("open-eph")).toEqual(["https://pr-19640.eph.roboflow.one"]);
+  expect(byId("open-pr")).toBeUndefined();  // its pull request once, in the Hand-off
+});
+
+test("a hand-off whose pull request moved since its approval says so", () => {
+  card({ merges: false, handoff: { ...handoff, current: false } });
+  expect(words()).toContain("Jarbas Local approved 0123456, but the pull request has moved since");
+});

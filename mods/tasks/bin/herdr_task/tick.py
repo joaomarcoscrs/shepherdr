@@ -9,7 +9,7 @@ import subprocess
 import time
 
 from .base import Fail, git, guard, hc_json, now, PR_EVERY, run, SHELLS, STORE, stop_note
-from .settings import machine_name, worker_argv
+from .settings import machine_name, open_pr, worker_argv
 from .agents import (
     agent_log, agent_running, auto_armed, busy_again, detail, held_ask, last_question, live_agents, mid_turn_agents, own_work, ready_turns,
     status_word,
@@ -254,6 +254,9 @@ def settle_back(s, t, report):
     return True
 
 
+OPEN_PR_NO_AUTO = "its delivery is Open PR, so the hand-off is yours to take"
+
+
 def auto_accept_pass(s, t, report):
     """SHEP-3: a task the person said to accept by itself (herdr-task auto-accept) is accepted once it is Ready (the
     person's Accept the only thing left: task_status() without its auto-accept says "ready"), as their Accept would:
@@ -266,6 +269,12 @@ def auto_accept_pass(s, t, report):
     if task_status({**t, "auto_accept": None}, live)[0] != "ready":
         return
     aa, how = t["auto_accept"], None
+    if open_pr(t):
+        # SHEP-7: an Open PR hand-off is the person's to take: never accepted by itself (said once per ready)
+        aa["tried"], aa["tried_at"], aa["failed"] = t.get("ready_at"), now(), OPEN_PR_NO_AUTO
+        s.dirty = True
+        report.setdefault("auto_accept_failed", []).append({"ref": s.ref(t), "why": OPEN_PR_NO_AUTO})
+        return
     try:
         error = accept_refusal(s, t)
     except Fail as e:

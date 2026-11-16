@@ -13,7 +13,7 @@ import os
 import sys
 
 from .base import addon_off, hc_json, MAX_RUNNING, now, run, STORE
-from .settings import DEFAULTS, LOCAL_MACHINE, MUST_WORDS, SETTINGS, agent_key, bare, read_settings
+from .settings import DEFAULTS, DELIVERY, LOCAL_MACHINE, MUST_WORDS, PR_REVIEWS, SETTINGS, agent_key, bare, logins, read_settings
 from .launch import coordinators, is_coordinator
 from . import reactions
 
@@ -82,6 +82,19 @@ def autopilot_of(space, cfg):
         return False, "", ""
 
 
+def delivery_text(t):
+    """The Delivery line's words for a space's tasks settings (SHEP-7)."""
+    if t.get("delivery") != "open_pr":
+        return "merge (a Ready task is merged as Merge says)"
+    who = logins(t.get("pr_assign")) or []
+    gate = t.get("pr_review") if t.get("pr_review") in PR_REVIEWS else "none"
+    return ("open PR (each task's ready opens its pull request" + (f", assigns it to {', '.join('@' + x for x in who)}" if who else "")
+            + (f", waits for {'Jarbas Local' if gate == 'jarbas-local' else gate}'s approval of its exact head" if gate != "none" else "")
+            + " and hands it to the person, never merged: Merge and Accept when ready don't apply"
+            + (f"; next: {' '.join(str(t.get('pr_next')).split())}" if str(t.get("pr_next") or "").strip() else "")
+            + "; `--set delivery=merge` merges one task instead, only when the person asks)")
+
+
 def rows(space, d=None, auto=None):
     """The block's lines for a space: [{key, label, text, value, by, scope}]. by: who set a line
     that differs from Herdr's default (None: the default); scope: "space" when the space sets one of
@@ -115,6 +128,9 @@ def rows(space, d=None, auto=None):
              "person's Accept, only when they ask)" if t.get("auto_accept") is True
              else "off (each Ready task waits for the person's Accept)", "on" if t.get("auto_accept") is True else "off",
              [("tasks", "auto_accept")]),
+            # SHEP-7: the space's delivery profile for its tasks (settings.py delivery_for(): its own by its id)
+            ("delivery", "Delivery", delivery_text(t), t.get("delivery") if t.get("delivery") in DELIVERY else "merge",
+             [("tasks", "delivery"), ("tasks", "pr_assign"), ("tasks", "pr_review"), ("tasks", "pr_next")]),
             ("proof", "Proof", "on" if t.get("proof") is not False else "off (tasks show no proof artifact)",
              "off" if t.get("proof") is False else "on", [("tasks", "proof")]),
             ("agent", "Task agent", pick_words(cfg.get("worker"), "claude, its own default model and effort"),
@@ -254,7 +270,8 @@ def settings_pass(report, quiet):
             text = (f'<herdr-setting name="all">{block(rs)}' + (f"\n{guide}" if guide else "") + f" {NOTICE_END}</herdr-setting>")
             changed = [{"key": "all"}]
         else:
-            changed = [r for r in rs if had.get(r["key"]) != now_digest[r["key"]]]
+            # a line it was never told that still says Herdr's default (one added since, as SHEP-7's Delivery) is no change
+            changed = [r for r in rs if had.get(r["key"]) != now_digest[r["key"]] and (r["key"] in had or r["by"])]
             if not changed:  # a line no longer said: just note it
                 run(["hc", "label", addr, f"{LABEL}={digest(rs)}"])
                 continue

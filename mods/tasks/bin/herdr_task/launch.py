@@ -16,7 +16,7 @@ import sys
 import time
 
 from .base import ASK_HOME, ENTRY, Fail, git, hc_json, now, run, WORKTREES
-from .settings import agent_key, ASSISTANT_TEMPLATES, trust_roots, bare, BRANCH_PATTERN, branch_pattern_problem, keep_review, notes, notes_part, review_limits, settings_block, settings_for
+from .settings import agent_key, ASSISTANT_TEMPLATES, keep_delivery, trust_roots, bare, BRANCH_PATTERN, branch_pattern_problem, keep_review, notes, notes_part, review_limits, settings_block, settings_for
 from .templates import instructions
 from .agents import detail, LINE_MAX, live_agents, SUMMARY_MAX
 from .github import finish, remote_of
@@ -609,6 +609,10 @@ def where_line(task):
 def brief(s, task, parent=None, space=None, argv=None):
     instructions("reviewer")  # the file its review's reviewer gets (WORKER_MD)
     keep_review(s, task, space)
+    if not isinstance(task.get("brief_delivery"), dict):
+        # SHEP-7: its delivery profile, decided at its first brief and kept (a later change of the setting is for tasks
+        # briefed after; its own --set still wins)
+        keep_delivery(task, space or task.get("space"))
     start = notes_part("Before you start", notes(s, task, "start", space))
     if start and task.get("worktree"):
         start += f"\n(The main folder is {s.loc['folder']}.)"

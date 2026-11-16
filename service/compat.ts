@@ -385,6 +385,7 @@ export class Compat {
         ...(r.scheduled_for ? { startsAt: r.scheduled_for } : {}),
         // Accept when ready (SHEP-3): on, and why its try stopped when it did
         ...(r.auto_accept ? { autoAccept: { on: true as const, ...(r.auto_accept.failed ? { failed: String(r.auto_accept.failed) } : {}) } } : {}),
+        ...(r.open_pr ? { openPr: true as const } : {}),
         ...(r.done_at ? { doneAt: r.done_at } : {}),
         // it ran (an agent once started): never "hasn't started", its summary when its chat is gone (SHEP-26)
         ...(r.started ? { started: r.started } : {}), ...(r.summary ? { summary: r.summary } : {}), ...(r.details ? { details: r.details } : {}),
