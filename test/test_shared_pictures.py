@@ -265,7 +265,10 @@ class PicturesSentBeforeTheList(Fixture, unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def lines(self):
-        return open(self.ledger).read().splitlines() if os.path.exists(self.ledger) else []
+        if not os.path.exists(self.ledger):
+            return []
+        with open(self.ledger) as f:
+            return f.read().splitlines()
 
     def test_jhq9_a_picture_sent_before_the_update(self):
         relayed = self.picture(os.path.join(self.home, "Desktop", "from an agent.png"))
