@@ -370,7 +370,7 @@ export async function act(hub: Hub, b: any, compat: Compat): Promise<unknown> {
     if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().split("\n").pop() || "Autopilot didn't change.");
     return { ok: true };
   }
-  if (b?.type === "model-pin" && compat.agents && ["claude", "codex"].includes(b.agent) && typeof b.model === "string" && /^[\w.\[\]-]{1,60}$/.test(b.model)) {
+  if (b?.type === "model-pin" && compat.agents && ["claude", "codex", "cursor"].includes(b.agent) && typeof b.model === "string" && /^[\w.\[\]-]{1,60}$/.test(b.model)) {
     // the model menu's star: pinned to the top of its agent's list (core/agents.js PICKS_FILE, as the window's)
     return { ok: true, picks: (compat.agents as any).pin(b.agent, b.model) };
   }
@@ -380,7 +380,11 @@ export async function act(hub: Hub, b: any, compat: Compat): Promise<unknown> {
     const a = chat(b.chat), reader = compat.reader?.(a);
     if (b.type === "restart-info") return compat.agents.info(a, reader);
     if (b.type === "model-menu") return { ok: true, menu: await (compat.agents as any).menu(a, reader) };
-    if (!["claude", "codex"].includes(b.kind)) throw new Error("Pick Claude Code or Codex.");
+    if (!["claude", "codex", "cursor"].includes(b.kind)) throw new Error("Pick Claude Code, Codex or Cursor.");
+    // Cursor runs a task's worker only (core/settings.js forRole), never an Assistant or a reviewer
+    const tt: any = hub.terminals.get(a);
+    if (b.kind === "cursor" && (!tt?.labels?.["herdr.task"] || ["reviewer", "helper"].includes(tt?.labels?.["herdr.role"])))
+      throw new Error("Cursor can only run task workers.");
     const opt = (v: unknown) => (typeof v === "string" && /^[\w.\[\]-]{1,60}$/.test(v) ? v : undefined);
     const pick = { kind: b.kind, model: opt(b.model), effort: opt(b.effort), speed: opt(b.speed), perm: opt(b.perm) };
     // the model menu (live): in place when only the model, level or Fast changes; the restart sheet restarts
@@ -549,6 +553,7 @@ export async function act(hub: Hub, b: any, compat: Compat): Promise<unknown> {
     const a = chat(b.chat), t: any = hub.terminals.get(a), r = compat.reader?.(a);
     const kind = kindOf(t) ?? "claude", session = sessionOf(kind, r?.path ?? null);
     if (!session) throw new Error("This conversation has no saved session to fork.");
+    if (!forkArgv(kind, [], session)) throw new Error("This agent's CLI can't fork a conversation.");
     // #1050: the task's agent still runs in that folder: the person says first whether a second agent should
     if (!b.force && liveTaskAgent(t, hub.terminals.values())) return { ok: false, ask: FORK_LIVE };
     const space = ["herdr.space", "herdr.task.space", "herdr.coordinator.space"].map((k) => t?.labels?.[k]).find(Boolean);

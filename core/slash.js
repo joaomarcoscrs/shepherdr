@@ -47,7 +47,8 @@ export function scanned(stdout) {
 
 // Every command an agent knows, its CLI's first: [{ name, about }]. mine: the person's own (Claude Code only).
 export function commandList(kind, mine = []) {
-  const list = (kind === "codex" ? CODEX : CLAUDE).map(([name, about]) => ({ name, about }));
+  // a CLI this list doesn't know (Cursor) gets none rather than another CLI's
+  const list = (kind === "codex" ? CODEX : kind === "claude" ? CLAUDE : []).map(([name, about]) => ({ name, about }));
   if (kind !== "claude") return list;
   const seen = new Set(list.map((c) => c.name));
   return [...list, ...mine.filter((c) => !seen.has(c.name) && seen.add(c.name))];
@@ -72,6 +73,6 @@ export function opensMenu(kind, text) {
   if (!m) return null;
   if (MENU[kind]?.has(m[1])) return m[1];
   // The CLI completes a prefix to its first match ("/mo" runs /model).
-  const all = (kind === "codex" ? CODEX : CLAUDE).map(([n]) => n).filter((n) => n.startsWith(m[1]));
+  const all = (kind === "codex" ? CODEX : kind === "claude" ? CLAUDE : []).map(([n]) => n).filter((n) => n.startsWith(m[1]));
   return all.length && MENU[kind]?.has(all[0]) ? all[0] : null;
 }

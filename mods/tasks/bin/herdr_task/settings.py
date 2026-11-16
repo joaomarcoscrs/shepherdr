@@ -12,7 +12,9 @@ from .base import Fail, git, HOME, MAX_RUNNING, WHERE
 
 
 # What each agent key starts by default. Unknown keys run as themselves; --argv overrides.
-AGENTS = {"claude": ["claude"], "codex": ["codex", "--no-daemon"]}
+AGENTS = {"claude": ["claude"], "codex": ["codex", "--no-daemon"], "cursor": ["cursor-agent"]}
+# Cursor Agent's CLI is `cursor-agent`, or `agent` as newer installs and Herdr's agent list call it: both are "cursor".
+WORDS = {"cursor-agent": "cursor", "agent": "cursor"}
 
 
 # ---- the person's settings ------------------------------------------------------------------
@@ -179,6 +181,15 @@ def argv_for(pick):
             a.append("--dangerously-skip-permissions")
         elif perm:
             a += ["--permission-mode", "default" if perm == "manual" else perm]
+        return a
+    if agent == "cursor":
+        # Cursor has no effort, speed or plan flag in every version: its model, and --force only for full access
+        # (Ask, its own allowlist asking in its terminal, is its default and needs no flag).
+        a = ["cursor-agent"]
+        if pick.get("model"):
+            a += ["--model", pick["model"]]
+        if pick.get("perm") == "full":
+            a.append("--force")
         return a
     if agent == "codex":
         a = ["codex", "--no-daemon"]
@@ -350,8 +361,8 @@ def cli_here(kind):
     return (((read_checks().get("machines") or {}).get("") or {}).get(kind))
 
 
-CLI_NAMES = {"claude": "Claude Code", "codex": "Codex"}
-LOGIN = {"claude": "claude auth login", "codex": "codex login"}
+CLI_NAMES = {"claude": "Claude Code", "codex": "Codex", "cursor": "Cursor"}
+LOGIN = {"claude": "claude auth login", "codex": "codex login", "cursor": "cursor-agent login"}
 
 
 def codex_models():
@@ -482,7 +493,14 @@ def task_settings(s, t, space=None, argv=None, live=False):
             if t.get(f"reviewer_{f}"):
                 rv[f] = t[f"reviewer_{f}"]
         other = {"claude": "codex", "codex": "claude"}.get(agent)
+        if agent == "cursor":
+            # Cursor has no read-only mode in every version: a Cursor worker's reviewer is Claude Code, else Codex
+            other = next((c for c in ("claude", "codex") if shutil.which(c)), None)
         want = rv.get("agent") or (other if other and shutil.which(other) else agent)
+        no_cursor = want == "cursor"
+        if no_cursor:
+            # its model and effort are Cursor's, not the other CLI's
+            want, rv = other or next((c for c in ("claude", "codex") if shutil.which(c)), "claude"), {}
         who, said = want, ""
         if want != agent and cli_here(want) == "signed-out":
             # Signed out here, it would sit at its sign-in screen and never review (#745): the task's own CLI does.
@@ -506,6 +524,8 @@ def task_settings(s, t, space=None, argv=None, live=False):
             text += (f" (your own CLI: {CLI_NAMES.get(want, want)} isn't signed in here"
                      + (f", `{LOGIN.get(want, want + ' login')} status` says \"{said}\"" if said and not re.match(r"not logged in", said, re.I) else "")
                      + f"; the person runs `{LOGIN.get(want, want + ' login')}` on this machine, then asks for the review again)")
+        elif no_cursor:
+            text += " (Cursor can't review read-only, so another CLI does)"
         elif not rv.get("agent"):
             text += " (the other CLI)" if who != agent else " (your own CLI: no other is installed)"
         folder = t.get("worktree") or getattr(s, "loc", {}).get("folder")
@@ -635,7 +655,8 @@ def agent_argv(key, argv_json=None):
 
 
 def agent_key(argv):
-    return os.path.basename(argv[0])
+    b = os.path.basename(argv[0])
+    return WORDS.get(b, b)
 
 
 def bare(i):

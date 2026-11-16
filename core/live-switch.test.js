@@ -186,3 +186,12 @@ test("the log reader keeps the lines a switch writes (Claude Code 2.1.308, Codex
   ]);
   expect(x.meta).toMatchObject({ model: "gpt-6-sol", effort: "medium", speed: "fast" });
 });
+
+test("SHEP-2: Cursor never switches in place (no Codex or Claude keys typed into it): it restarts on its chat", async () => {
+  const from = { agent: "cursor", model: "gpt-5", effort: null, fast: false, perm: "manual" };
+  expect(liveOK(from, { ...from, model: "sonnet-4" })).toBe(false);
+  const typed = [];
+  const io = { send: async (t) => typed.push(t), keys: async (...k) => typed.push(k.join(" ")), screen: async () => "", sleep: async () => {} };
+  await expect(switchLive(io, "cursor", from, { ...from, model: "sonnet-4" })).rejects.toThrow("can't switch in place");
+  expect(typed).toEqual([]);
+});

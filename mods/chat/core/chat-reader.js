@@ -13,6 +13,15 @@ export const KINDS = { "claude-code": "claude", claude: "claude", codex: "codex"
 
 // The CLI a terminal runs, as the chat knows them ("claude", "codex"), else null.
 export const kindOf = (t) => KINDS[t?.status?.app] ?? KINDS[t?.foreground?.name] ?? null;
+// The agent a terminal runs, for its model menu, restart and fork: the chat's own kinds, or Cursor Agent, whose
+// conversation the chat can't read (its log is no file the chat knows): it reports no status and runs as node, so
+// its label (herdr.agent, as herdr-task and restart.sh start it) or its own program in the foreground's argv says it.
+export const agentKindOf = (t) => kindOf(t) ?? (isCursor(t) ? "cursor" : null);
+export function isCursor(t) {
+  if (["cursor", "cursor-agent"].includes(t?.status?.app) || ["cursor-agent", "agent"].includes(t?.foreground?.name)) return true;
+  if (t?.labels?.["herdr.agent"] === "cursor") return true;
+  return (t?.foreground?.argv ?? []).some((a) => /(?:^|\/)cursor-agent(?:\/|$)/.test(String(a)));
+}
 
 export class ChatReader {
   constructor(io, addr) {

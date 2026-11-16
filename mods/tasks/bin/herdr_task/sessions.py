@@ -1,4 +1,4 @@
-"""Agent sessions: the Claude Code or Codex session a task's agent runs, so it can resume."""
+"""Agent sessions: the Claude Code, Codex or Cursor session a task's agent runs, so it can resume."""
 
 import json
 import os
@@ -107,7 +107,21 @@ def session_of(pid):
             m = re.search(r"/rollout-.*?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$", f)
             if m:
                 return m.group(1), f
+        # Cursor Agent: its chat's store (~/.cursor/chats/<hash>/<chat id>/store.db) held open, and its transcript
+        # (agent-transcripts/<chat id>.jsonl) where its version writes one.
+        for f in files:
+            m = CURSOR_CHAT.search(f)
+            if m:
+                return m.group(1), log_by_session("cursor", m.group(1))
     return None, None
+
+
+UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+CURSOR_CHAT = re.compile(rf"/\.cursor/chats/[0-9a-f]+/({UUID})/store\.db$")
+
+
+def cursor_home():
+    return os.environ.get("CURSOR_CONFIG_DIR") or os.path.join(HOME, ".cursor")
 
 
 def refresh_sessions(s, task, live):
@@ -189,6 +203,10 @@ def log_by_session(kind, sid):
     import glob
     if kind == "codex":
         found = glob.glob(os.path.join(HOME, ".codex", "sessions", "*", "*", "*", f"rollout-*{sid}.jsonl"))
+    elif kind == "cursor":
+        # Cursor's transcript, where its version writes one: agent-transcripts/<id>/<id>.jsonl, or <id>.jsonl
+        base = os.path.join(cursor_home(), "projects", "*", "agent-transcripts")
+        found = glob.glob(os.path.join(base, sid, sid + ".jsonl")) + glob.glob(os.path.join(base, sid + ".jsonl"))
     else:
         found = glob.glob(os.path.join(HOME, ".claude", "projects", "*", sid + ".jsonl"))
     return found[0] if found else None
@@ -199,9 +217,11 @@ def find_log(a, ref, folders, taken=()):
     or None: by its session when it has one, else the earliest log of its kind that started from
     its launch on (until it ended) and whose first message names its task."""
     import glob
-    kind = "codex" if a.get("agent") == "codex" else "claude"
+    kind = a.get("agent") if a.get("agent") in ("codex", "cursor") else "claude"
     if a.get("session"):
         return log_by_session(kind, a["session"])
+    if kind == "cursor":
+        return None  # Cursor's logs are found by their chat id only
     at = a.get("at")
     if not at:
         return None

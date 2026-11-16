@@ -6389,3 +6389,104 @@ class AutoAccept(unittest.TestCase):
         with mock.patch.object(proof, "artifacts_of", lambda folder: []), mock.patch.object(proof, "checks_of", lambda t: {"state": "none", "text": ""}):
             with self.store_mod.Store(self.store_mod.locate(self.folder), write=False) as s:
                 self.assertEqual(proof.evidence(s, s.find(1))["auto_accept"], {"on": True})
+
+
+class CursorAgent(unittest.TestCase):
+    """SHEP-2: Cursor Agent (cursor-agent) as a task's worker: started, labelled and resumed as itself, never as Codex or
+    Claude Code; reviewed by another CLI (it has no read-only mode in every version); told it reports no status."""
+
+    def setUp(self):
+        sys.path.insert(0, BIN)
+        from unittest import mock
+        from herdr_task import settings, takeover
+        self.settings, self.mock = settings, mock
+        d = tempfile.mkdtemp()
+        self.checks = os.path.join(d, "cli-check.json")
+        with open(self.checks, "w") as f:
+            json.dump({"machines": {"": {"claude": "ready", "codex": "ready"}}}, f)
+        with open(os.path.join(d, "settings.json"), "w") as f:
+            json.dump({"everywhere": {"tasks": {"review_rounds": 2}}}, f)
+        for p in (mock.patch.object(settings, "SETTINGS", os.path.join(d, "settings.json")),
+                  mock.patch.object(takeover, "CLI_CHECK", self.checks),
+                  mock.patch.object(settings.shutil, "which", lambda name: f"/usr/bin/{name}")):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_start_argv_and_key(self):
+        s = self.settings
+        self.assertEqual(s.argv_for({"agent": "cursor"}), ["cursor-agent"])
+        self.assertEqual(s.argv_for({"agent": "cursor", "model": "gpt-5", "effort": "high", "fast": True, "perm": "manual"}),
+                         ["cursor-agent", "--model", "gpt-5"])
+        self.assertEqual(s.argv_for({"agent": "cursor", "perm": "full"}), ["cursor-agent", "--force"])
+        self.assertEqual(s.agent_argv("cursor"), ["cursor-agent"])
+        for word in ("cursor-agent", "/home/x/.local/bin/cursor-agent", "agent"):
+            self.assertEqual(s.agent_key([word, "--model", "gpt-5"]), "cursor")
+        self.assertEqual(s.agent_key(["codex", "--no-daemon"]), "codex")
+        self.assertEqual(s.agent_key(["pi"]), "pi")
+        # the task's own --agent cursor starts from Cursor's own defaults, not Settings' Claude model
+        pick = s.worker_pick(Store([]), {"agent": "cursor"})
+        self.assertEqual(pick, {"agent": "cursor"})
+        self.assertEqual(s.worker_argv(Store([]), {"agent": "cursor", "model": "sonnet-4"}), ["cursor-agent", "--model", "sonnet-4"])
+
+    def test_resume_argv(self):
+        from herdr_task import launch, revive
+        self.assertEqual(launch.resume_argv(["cursor-agent", "--force"], "C1"), ["cursor-agent", "--force", "--resume", "C1"])
+        # a crash's revive: from its own word on, without the old chat or first message, then that chat again
+        argv = ["sh", "-c", "x", "herdr-low", "/bin/zsh", "-lic", '"$@"', "/bin/zsh", "cursor-agent", "--model", "gpt-5",
+                "--force", "--resume", "OLD", "Do the task"]
+        kind, base = revive.base_argv(argv)
+        self.assertEqual((kind, base), ("cursor", ["cursor-agent", "--model", "gpt-5", "--force"]))
+        self.assertEqual(revive.resume_argv(kind, base, "C2", "carry on"), ["cursor-agent", "--model", "gpt-5", "--force", "--resume", "C2", "carry on"])
+        self.assertEqual(revive.base_argv(["agent", "--continue", "--workspace", "/w"]), ("cursor", ["agent", "--workspace", "/w"]))
+        # Claude and Codex are read as before
+        self.assertEqual(revive.base_argv(["claude", "--resume", "S", "--model", "opus"]), ("claude", ["claude", "--model", "opus"]))
+        self.assertEqual(revive.base_argv(["codex", "resume", "S", "-m", "gpt-5"]), ("codex", ["codex", "-m", "gpt-5"]))
+
+    def test_session_and_transcript(self):
+        from herdr_task import sessions
+        sid = "11111111-2222-3333-4444-555555555555"
+        home = tempfile.mkdtemp()
+        t = os.path.join(home, "projects", "Users-x-repo", "agent-transcripts", sid)
+        os.makedirs(t)
+        open(os.path.join(t, sid + ".jsonl"), "w").close()
+        with self.mock.patch.dict(os.environ, {"CURSOR_CONFIG_DIR": home}):
+            self.assertEqual(sessions.log_by_session("cursor", sid), os.path.join(t, sid + ".jsonl"))
+            self.assertIsNone(sessions.log_by_session("cursor", "22222222-2222-3333-4444-555555555555"))
+            # its chat's store held open names the session
+            with self.mock.patch.object(sessions, "kids", lambda pid: []), \
+                    self.mock.patch.object(sessions.os.path, "isdir", lambda p: False if p.startswith("/proc") else os.path.isdir(p)), \
+                    self.mock.patch.object(sessions.shutil, "which", lambda n: "/usr/sbin/lsof"), \
+                    self.mock.patch.object(sessions, "run", lambda argv: subprocess.CompletedProcess(argv, 0, f"p1\nn/w\nn/h/.cursor/chats/ab12/{sid}/store.db\n", "")):
+                self.assertEqual(sessions.session_of(1), (sid, os.path.join(t, sid + ".jsonl")))
+        # a Cursor agent with no session is never matched to a Claude Code log by its folder
+        self.assertIsNone(sessions.find_log({"agent": "cursor", "at": 1}, "SHEP-2", ["/x"]))
+
+    def test_reviewer_is_another_cli(self):
+        t = {"id": 1, "title": "x", "mode": "worktree"}
+        r = next(x for x in self.settings.task_settings(Store([t]), t, argv=["cursor-agent", "--force"]) if x["label"] == "Reviewer")
+        self.assertEqual(r["value"]["agent"], "claude")
+        self.assertTrue(r["value"]["command"].startswith("claude --permission-mode plan"))
+        a = next(x for x in self.settings.task_settings(Store([t]), t, argv=["cursor-agent", "--force"]) if x["label"] == "Agent")
+        self.assertEqual(a["value"]["agent"], "cursor")
+        # a Reviewer set to Cursor: another CLI, read-only, says why
+        t = {"id": 2, "title": "y", "mode": "worktree", "reviewer": "cursor", "reviewer_model": "gpt-5"}
+        r = next(x for x in self.settings.task_settings(Store([t]), t, argv=["claude"]) if x["label"] == "Reviewer")
+        self.assertEqual(r["value"]["agent"], "codex")
+        self.assertIsNone(r["value"]["model"])
+        self.assertIn("Cursor can't review read-only", r["text"])
+
+    def test_brief_says_it_reports_no_status(self):
+        from herdr_task import launch
+        ask = launch.cursor_line(["cursor-agent"])
+        self.assertIn("Cursor can't tell Herdr", ask)
+        self.assertIn("Ask mode", ask)
+        self.assertNotIn("Ask mode", launch.cursor_line(["cursor-agent", "--force"]))
+        # own_argv leaves Cursor's argv as it is: no Claude --settings, no Codex -c hooks
+        self.assertEqual(launch.own_argv(["cursor-agent", "--model", "gpt-5"]), ["cursor-agent", "--model", "gpt-5"])
+
+    def test_cli_names(self):
+        from herdr_task import feedback, output
+        self.assertEqual(self.settings.CLI_NAMES["cursor"], "Cursor")
+        self.assertEqual(feedback.environment("cursor")["agent"].split(" ")[0], "Cursor")
+        self.assertEqual(output.subagent({"address": "t2", "agent": "cursor-agent"})["agent"], "cursor")
+        self.assertEqual(output.subagent({"address": "t2", "agent": "codex"})["agent"], "codex")

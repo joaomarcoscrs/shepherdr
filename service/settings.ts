@@ -14,7 +14,7 @@ import * as APc from "../core/autopilot.js";
 import type { SettingRow, SettingSection } from "../web/shared/types.ts";
 
 const { TASK_ROWS, DEFAULTS, wordFor, valueFor, ROLES: CORE_ROLES, NOTES: CORE_NOTES, ABOUT, BACKUP, REACTIONS, SUGGESTIONS, FEEDBACK, feedbackRepo, upgradeReactions, BASE, BRANCH, branchPattern, MACHINES, OLD_NAMES, SECTIONS,
-  WEB, modelLabel, roleSel, otherCli, otherCliWords, backupProblem, homeAbout, webState, fromWord, LOADING_AGENTS, RESET, machineLabel } = C as any;
+  WEB, modelLabel, roleSel, otherCli, otherCliWords, CURSOR_ROLES, backupProblem, homeAbout, webState, fromWord, LOADING_AGENTS, RESET, machineLabel } = C as any;
 const AP = APc as any;
 /** Autopilot as Everywhere has it now (herdr-task's view: what Settings keeps, else what it kept before, else the
  *  defaults): its schedule's words, events, heartbeat words and what wakes it in plain words */
@@ -445,9 +445,12 @@ export class Settings {
       if (word !== null) {
         try { v = JSON.parse(word); } catch { throw new Error("Not an agent."); }
         const ok = (x: unknown) => x == null || (typeof x === "string" && /^[\w.\[\]-]{1,60}$/.test(x));
-        if (!["claude", "codex"].includes(v?.agent) || !ok(v.model) || !ok(v.effort)) throw new Error("Pick Claude Code or Codex.");
+        // Cursor only for task workers (core/settings.js forRole): an Assistant needs its chat, a reviewer read-only
+        const clis = CURSOR_ROLES.includes(field) ? ["claude", "codex", "cursor"] : ["claude", "codex"];
+        if (!clis.includes(v?.agent) || !ok(v.model) || !ok(v.effort))
+          throw new Error(v?.agent === "cursor" ? "Cursor can only run task workers." : clis.includes("cursor") ? "Pick Claude Code, Codex or Cursor." : "Pick Claude Code or Codex.");
         // its permission mode, as the window's Permissions pick (one of the CLI's modes; none: the CLI's own default)
-        const PERM: Record<string, string[]> = { claude: ["manual", "auto", "acceptEdits", "plan", "bypassPermissions"], codex: ["read-only", "auto", "full"] };
+        const PERM: Record<string, string[]> = { claude: ["manual", "auto", "acceptEdits", "plan", "bypassPermissions"], codex: ["read-only", "auto", "full"], cursor: ["manual", "full"] };
         if (v.perm != null && !PERM[v.agent].includes(v.perm)) throw new Error("Not one of its permission modes.");
         v = { agent: v.agent, model: v.model ?? null, effort: v.effort ?? null, fast: !!v.fast, perm: v.perm ?? null };
       }
@@ -490,7 +493,7 @@ export class Settings {
       // off is "off"; on follows what it would get anyway when that is on, else names the other CLI (as the window's)
       const parent = space ? file.everywhere?.backup?.agent ?? null : null;
       const worker = (space ? file.spaces?.[space]?.worker?.agent : null) ?? file.everywhere?.worker?.agent ?? "claude";
-      put("backup", "agent", word === null ? null : word === "off" ? "off" : parent === "off" ? (worker === "codex" ? "claude" : "codex") : null);
+      put("backup", "agent", word === null ? null : word === "off" ? "off" : parent === "off" ? otherCli(worker) : null);
     } else throw new Error("That setting can't be changed here.");
 
     writeSettings(next);

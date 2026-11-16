@@ -120,3 +120,24 @@ test("Feedback offers and the repo they file to", () => {
   expect(S.feedbackRepo("not a repo")).toBeNull();
   expect(read("mods/shepherdr-settings/main.js")).toContain("feedbackRow(this, t)");
 });
+
+// SHEP-2: Cursor where its CLI is installed, for task workers only; Ask by default, never --force unless chosen.
+test("Cursor is offered for workers where installed, its own Ask by default", () => {
+  const dflts = { claude: { model: "opus", per: {} }, codex: { models: [{ id: "gpt-5", label: "GPT-5", efforts: ["low"] }] },
+    cursor: { model: "gpt-5", label: "OpenAI GPT-5", installed: true, models: [{ id: "gpt-5", label: "OpenAI GPT-5", efforts: [], fast: false }] } };
+  expect(Object.keys(S.choicesFrom(dflts).menus)).toEqual(["claude", "codex"]);
+  const { menus, permDefault, defaults } = S.choicesFrom(dflts, { claude: true, codex: true, cursor: true });
+  expect(Object.keys(menus)).toEqual(["claude", "codex", "cursor"]);
+  expect(permDefault.cursor).toBe("manual");
+  expect(defaults.agent).toBe("claude");
+  expect(Object.keys(S.forRole("worker", menus))).toEqual(["claude", "codex", "cursor"]);
+  expect(Object.keys(S.forRole("coordinator", menus))).toEqual(["claude", "codex"]);
+  expect(Object.keys(S.forRole("reviewer", menus))).toEqual(["claude", "codex"]);
+  const toCursor = S.chooseModel(menus, permDefault, { agent: "claude", model: "opus", effort: "high", perm: "auto" }, "cursor", "gpt-5");
+  expect(toCursor).toMatchObject({ agent: "cursor", model: "gpt-5", effort: null, fast: false, perm: "manual" });
+  expect(S.chooseModel(menus, permDefault, { agent: "claude", model: "opus", perm: "bypassPermissions" }, "cursor", "gpt-5").perm).toBe("full");
+  expect(S.modelLabel(menus, toCursor)).toBe("OpenAI GPT-5");
+  // a Cursor worker's unset Reviewer is Claude Code
+  expect(S.otherCli("cursor")).toBe("claude");
+  expect(S.roleSel("reviewer", null, { menus, defaults, permDefault }, "cursor").sel.agent).toBe("claude");
+});

@@ -11,8 +11,9 @@ import * as AG from '@core/agents.js'
 import * as ST from '@core/settings.js'
 
 const { levelName, NAMES } = AG as unknown as { levelName: (e: string | null) => string | null; NAMES: Record<string, string> }
-const { MODEL_MENU, chooseModel, modelLabel } = ST as unknown as {
+const { MODEL_MENU, chooseModel, modelLabel, forRole } = ST as unknown as {
   MODEL_MENU: { reasoning: string; fast: string; permissions: string }
+  forRole: (role: string, menus: ModelMenus['menus']) => ModelMenus['menus']
   chooseModel: (menus: ModelMenus['menus'], permDefault: ModelMenus['permDefault'], sel: AgentPick, agent: string, id: string) => AgentPick
   modelLabel: (menus: ModelMenus['menus'] | undefined, sel: AgentPick | null | undefined) => string
 }
@@ -64,7 +65,7 @@ export function ModelButton({ row, level }: { row: SettingRow; level: string }) 
         <span className="truncate">{row.value}</span>
         <DownIcon className={clsx(ic, 'size-3.5')} />
       </button>
-      {open && sel ? <ModelMenu start={sel} up={up} onClose={() => setOpen(false)} save={(next) => act({ type: 'setting', key: row.key, value: JSON.stringify(next), place: level } as never)} /> : null}
+      {open && sel ? <ModelMenu role={String(row.key).split('.').pop() ?? ''} start={sel} up={up} onClose={() => setOpen(false)} save={(next) => act({ type: 'setting', key: row.key, value: JSON.stringify(next), place: level } as never)} /> : null}
     </span>
   )
 }
@@ -72,14 +73,15 @@ export function ModelButton({ row, level }: { row: SettingRow; level: string }) 
 /** the window's model menu in settings mode: the model list as the chat's (restart.tsx ModelList: agent tabs,
  *  search, pinned and recent; picking another CLI's switches agent), Reasoning (that model's levels), Fast (where the model has it), Permissions (a small list); no Restart, each change
  *  saved as it is made */
-function ModelMenu({ start, up, onClose, save }: { start: AgentPick; up: boolean; onClose: () => void; save: (sel: AgentPick) => Promise<any> }) {
+function ModelMenu({ role, start, up, onClose, save }: { role: string; start: AgentPick; up: boolean; onClose: () => void; save: (sel: AgentPick) => Promise<any> }) {
   const [data, setData] = useState<ModelMenus | null>(null)
   const [sel, setSel] = useState<AgentPick>(start)
   const [perms, setPerms] = useState(false)
   const [error, setError] = useState('')
   const [picks, setPicks] = useState<{ pinned: string[]; recent: string[] } | undefined>()
   const coarse = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches
-  useEffect(() => { void menusNow().then((m) => (m ? (setData(m), setPicks(m.picks)) : setError('Could not read the agents.'))) }, [])
+  // Cursor only where the role can run it (core/settings.js forRole: task workers)
+  useEffect(() => { void menusNow().then((m) => (m ? (setData({ ...m, menus: forRole(role, m.menus) }), setPicks(m.picks)) : setError('Could not read the agents.'))) }, [role])
   const change = (next: AgentPick) => {
     setSel(next)
     setError('')
@@ -99,14 +101,19 @@ function ModelMenu({ start, up, onClose, save }: { start: AgentPick; up: boolean
             onPick={(x) => { if (x.agent === sel.agent && x.id === sel.model) return; const menus = withTyped(data.menus, x); if (menus !== data.menus) setData({ ...data, menus }); change(chooseModel(menus, data.permDefault, sel, x.agent, x.id)) }}
             onPin={(agent, id) => void act({ type: 'model-pin', agent, model: id } as never).then((r: any) => r?.picks && setPicks(r.picks), () => undefined)} />
           <MenuSeparator />
-          <MenuLabel>{MODEL_MENU.reasoning}</MenuLabel>
-          <div className="px-2 pb-1 phone:px-3">
-            <Tabs label={MODEL_MENU.reasoning} className="flex! w-full">
-              {(model?.efforts ?? []).map((e) => (
-                <Tab key={e} fill on={level === e} onClick={() => level !== e && change({ ...sel, effort: e })}>{levelName(e)}</Tab>
-              ))}
-            </Tabs>
-          </div>
+          {/* a model with no levels to pick (Cursor's) has no Reasoning, as the window's menu */}
+          {model?.efforts?.length ? (
+            <>
+              <MenuLabel>{MODEL_MENU.reasoning}</MenuLabel>
+              <div className="px-2 pb-1 phone:px-3">
+                <Tabs label={MODEL_MENU.reasoning} className="flex! w-full">
+                  {model.efforts.map((e) => (
+                    <Tab key={e} fill on={level === e} onClick={() => level !== e && change({ ...sel, effort: e })}>{levelName(e)}</Tab>
+                  ))}
+                </Tabs>
+              </div>
+            </>
+          ) : null}
           {fast ? <MenuSwitch name={MODEL_MENU.fast} icon={<SpeedIcon className={ic} />} on={!!sel.fast} onClick={() => change({ ...sel, fast: !sel.fast })} /> : null}
           {menu?.perms.length ? (
             <>
