@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { ACCEPT, acceptLabel, words, readable, whereNow, commitsLine, filesLine, moreLine, proofTitle, ephemeralWords } from "./accept.js";
+import { ACCEPT, acceptLabel, autoNote, words, readable, whereNow, commitsLine, filesLine, moreLine, proofTitle, ephemeralWords } from "./accept.js";
 
 const root = join(import.meta.dir, "..");
 const read = (p) => readFileSync(join(root, p), "utf8");
@@ -67,4 +67,11 @@ test("SHEP-4: a Roboflow task's environment in words; only Ready reads as ready"
   expect(ephemeralWords({ state: "unknown" })).toEqual({ text: "Couldn't ask GitHub about it", tone: "need" });
   expect(ephemeralWords({ state: "unknown", why: "link" }).tone).toBe("need");
   for (const s of ["starting", "failed", "gone", "none", "unknown"]) expect(ephemeralWords({ state: s }).tone).not.toBe("ready");
+});
+
+test("SHEP-3: a stopped auto-accept says why over the summary; on and fine says nothing", () => {
+  expect(autoNote({ auto_accept: { on: true, failed: "hc send to t9 failed" } })).toBe("Auto-accept stopped: hc send to t9 failed. It waits for your Accept.");
+  expect(autoNote({ auto_accept: { on: true, failed: "Checks failing: test." } })).toBe("Auto-accept stopped: Checks failing: test. It waits for your Accept.");
+  expect(autoNote({ auto_accept: { on: true } })).toBe(null);
+  expect(autoNote({})).toBe(null);
 });

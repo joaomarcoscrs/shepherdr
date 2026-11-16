@@ -2,8 +2,8 @@
 // box (kept on this device, SHEP-182). Status, the default: what needs the person first (Needs you, Ready), then Working,
 // Queued and the rest, each row saying its machine and space, Done hidden behind its count at the end. Place: each
 // machine, its spaces inside it, every status mixed (a row's icon says which). Pinned tasks first in both. Each group
-// folds. ⋯ narrows it all to the space picked. A Ready row has Review. A row's menu only pins it (core/menus.js taskMenu,
-// the window's too); the Assistant does the rest. Done tasks archive themselves: the Archived row at the bottom opens them.
+// folds. ⋯ narrows it all to the space picked. A Ready row has Review. A row's menu pins it, starts it later and turns on
+// Accept when ready (core/menus.js taskMenu, the window's too); the Assistant does the rest. Done tasks archive themselves: the Archived row at the bottom opens them.
 import clsx from 'clsx'
 import { openAccept, useAccepting } from '@client/screens/Accept.tsx'
 import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react'
@@ -29,6 +29,7 @@ import {
   pinTask,
   placeOf,
   scheduleTask,
+  autoAcceptTask,
   registry,
   setFilter,
   setGroup,
@@ -140,6 +141,7 @@ function TaskRow({ t, ix, where }: { t: Task; ix: number; where?: string[] }) {
       leftQuiet={t.status === 'scheduled'}
       dim={t.status === 'done'}
       where={where?.join(' · ')}
+      badge={t.autoAccept && !t.archived ? { text: AUTO.badge, stopped: !!t.autoAccept.failed } : undefined}
       action={accept}
       // with ⌘ (Ctrl off a Mac), beside the focused pane in split view
       onOpen={(e) => !menu.held() && (splitClick(e) ? openSplit({ kind: 'task', id: t.id }) : openTask(t.id))}
@@ -161,14 +163,14 @@ function TaskRow({ t, ix, where }: { t: Task; ix: number; where?: string[] }) {
  *   Review or an automation's next run (`meta`).
  * A row with nothing under its title is one line. `tip`: more for its button's label only (an automation's error).
  */
-function Line({ flip, sel = false, kb = false, glyph, ref_, title, sub, left, leftQuiet, dim, meta, where, action, tip, onOpen, menu, children }: {
+function Line({ flip, sel = false, kb = false, glyph, ref_, title, sub, left, leftQuiet, dim, meta, where, badge, action, tip, onOpen, menu, children }: {
   flip?: string; sel?: boolean; kb?: boolean; glyph: ReactNode; ref_?: string; title: string; sub?: string; left?: string; leftQuiet?: boolean; dim?: boolean; meta?: string
-  where?: string; action?: ReactNode; tip?: string; onOpen?: (e: MouseEvent) => void; menu?: RowMenuState; children?: ReactNode
+  where?: string; badge?: { text: string; stopped?: boolean }; action?: ReactNode; tip?: string; onOpen?: (e: MouseEvent) => void; menu?: RowMenuState; children?: ReactNode
 }) {
   const said = sub ? capital(sub) : undefined
   const shown = said ? fit(said) : undefined
   // the rows under the title: REF · where (always, the same on every status), then the status line on its own line
-  const second = !!(ref_ || where)
+  const second = !!(ref_ || where || badge)
   const rows = 1 + (second ? 1 : 0) + (shown ? 1 : 0)
   const two = rows > 1
   const statusRow = second ? 'row-start-3' : 'row-start-2'
@@ -180,7 +182,7 @@ function Line({ flip, sel = false, kb = false, glyph, ref_, title, sub, left, le
         <button
           type="button"
           aria-current={sel || undefined}
-          aria-label={`${ref_ ? `${ref_} ` : ''}${title}${said ? `, ${said}` : ''}${left ? (leftQuiet ? `, in ${left}` : `, ${left} left`) : ''}${meta ? `, ${meta}` : ''}${tip ? `, ${tip}` : ''}`}
+          aria-label={`${ref_ ? `${ref_} ` : ''}${title}${badge ? `, ${badge.text}` : ''}${said ? `, ${said}` : ''}${left ? (leftQuiet ? `, in ${left}` : `, ${left} left`) : ''}${meta ? `, ${meta}` : ''}${tip ? `, ${tip}` : ''}`}
           onClick={onOpen}
           className="absolute inset-0 cursor-pointer rounded-[inherit] outline-none keys:focus-visible:shadow-[inset_0_0_0_1.5px_var(--focus)]"
         />
@@ -198,6 +200,10 @@ function Line({ flip, sel = false, kb = false, glyph, ref_, title, sub, left, le
         {second ? (
           <span aria-hidden={!!onOpen} className="col-start-2 row-start-2 flex h-5 min-w-0 items-center gap-1.5 phone:h-6 text-[0.75rem]/4 phone:h-6 phone:text-[0.8125rem]/5">
             {ref_ ? <span className="shrink-0 font-mono text-[0.6875rem] text-fg3 phone:text-[0.75rem]">{ref_}</span> : null}
+            {/* Accept when ready (SHEP-3) on: a small mark in Ready's green, in red once its try stopped (the status line says why) */}
+            {badge ? (
+              <span className={clsx('shrink-0 rounded-[4px] border px-1 text-[0.6875rem]/[14px] font-medium whitespace-nowrap phone:text-[0.75rem]/4', badge.stopped ? 'border-need-fg/60 text-need-fg' : 'border-ready-fg/60 text-ready-fg')}>{badge.text}</span>
+            ) : null}
             {ref_ && where ? <span aria-hidden className="shrink-0 text-fg3">·</span> : null}
             {/* where it is: its machine and space, whole as long as the row has room */}
             {where ? <span className="min-w-0 truncate text-fg3">{where}</span> : null}
@@ -215,7 +221,18 @@ function Line({ flip, sel = false, kb = false, glyph, ref_, title, sub, left, le
   )
 }
 
-type MenuEntry = { id?: string; label?: string; icon?: string; heading?: string; sep?: boolean; at?: string; in?: string; typed?: boolean }
+type MenuEntry = { id?: string; label?: string; icon?: string; heading?: string; sep?: boolean; at?: string; in?: string; typed?: boolean; check?: boolean; note?: string }
+const AUTO = MN.AUTO_ACCEPT as { label: string; note: string; badge: string }
+
+/** Accept when ready's mark (lucide's circle-check, as the window's) */
+function AutoAcceptIcon({ className }: { className?: string }) {
+  return (
+    <svg aria-hidden viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <circle cx="12" cy="12" r="10" />
+      <path d="m9 12 2 2 4-4" />
+    </svg>
+  )
+}
 const OTHER = MN.SCHEDULE_OTHER as { placeholder: string; label: string; button: string }
 
 /** A task's one menu, in its row's ⋯ and its chat's, as 3.0's (core/menus.js taskMenu): Pin or Unpin; a task not started
@@ -234,7 +251,16 @@ function TaskActions({ task: t, close }: { task: Task; close: () => void }) {
     if (r?.ok === false) setError(r.error ?? "Couldn't schedule it.")
     else close()
   }
-  const items = (MN.taskMenu as (o: object) => MenuEntry[])({ pinned: !!t.pinned, status: t.archived ? null : t.status })
+  const items = (MN.taskMenu as (o: object) => MenuEntry[])({ pinned: !!t.pinned, status: t.archived ? null : t.status, autoAccept: !!t.autoAccept })
+  // Accept when ready (SHEP-3): on or off at once; herdr-task's refusal shows under it, the menu kept open
+  const toggleAuto = async () => {
+    setBusy(true)
+    setError(null)
+    const r = await autoAcceptTask(t, !t.autoAccept).catch((e: Error) => ({ ok: false, error: e.message }))
+    setBusy(false)
+    if (r?.ok === false) setError(r.error ?? "Couldn't change it.")
+    else close()
+  }
   return (
     <>
       {items.map((it, i) => {
@@ -259,6 +285,15 @@ function TaskActions({ task: t, close }: { task: Task; close: () => void }) {
           )
         if (it.id === 'start-now') return <MenuItem key="now" disabled={busy} icon={<PlayIcon className={ic} />} onClick={() => void go({ now: true })}>{it.label}</MenuItem>
         if (it.id === 'unschedule') return <MenuItem key="off" disabled={busy} icon={<XIcon className={ic} />} onClick={() => void go({ off: true })}>{it.label}</MenuItem>
+        if (it.id === 'auto-accept')
+          return (
+            <div key="auto">
+              <MenuItem role="menuitemcheckbox" aria-checked={!!it.check} disabled={busy} icon={<AutoAcceptIcon className={ic} />}
+                hint={it.check ? <CheckIcon className={clsx(ic, 'text-fg')} /> : undefined} onClick={() => void toggleAuto()}>{it.label}</MenuItem>
+              {/* what it does, quiet, on the label's column, never widening the menu */}
+              <p className="w-0 min-w-full px-2 pb-1 pl-8 text-[0.75rem]/4 text-pretty text-fg3 phone:px-3 phone:pl-10 phone:text-[0.8125rem]/5">{it.note}</p>
+            </div>
+          )
         return (
           <MenuItem key={it.label} icon={t.pinned ? <UnpinIcon className={ic} /> : <PinTaskIcon className={ic} />} onClick={() => { close(); void pinTask(t, !t.pinned).catch(() => undefined) }}>
             {it.label}

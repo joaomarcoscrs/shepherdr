@@ -206,6 +206,24 @@ OUT_OF_ROUNDS = "Out of review rounds"
 MERGING, MERGES_ITSELF = "Merging", "Merges once its checks pass"
 
 
+# ---- auto-accept (SHEP-3) ----------------------------------------------------------------------
+# The person's own yes, given ahead for one task (herdr-task auto-accept, the Tasks panel's "Accept when ready"): once
+# it is Ready (the person's Accept the only thing left: task_status() would say "ready"), the tick accepts it as the
+# person's Accept would (auto_accept_pass()), with the same checks: never while it needs attention, its checks run, or
+# its agent is at work. One try per ready (auto_accept.tried: its ready_at): a try that didn't go through (failed)
+# leaves it Ready for the person, until its agent says ready again or the person turns it on again. As core/tasks.js
+# autoArmed().
+AUTO_ACCEPT_LINE = "Accepting by itself"
+
+
+def auto_armed(task):
+    """A Ready task with auto-accept on that it hasn't tried since it said ready, nor was it accepted since."""
+    aa = task.get("auto_accept")
+    if not isinstance(aa, dict) or task.get("state") != "ready":
+        return False
+    return aa.get("tried") != task.get("ready_at") and (task.get("accepted_at") or 0) < (task.get("ready_at") or 1)
+
+
 def ready_wait(task, live):
     """What a Ready task waits on that needs nobody, in a few words; None when it's the person's."""
     if task.get("merge_requested") and live:
@@ -215,7 +233,8 @@ def ready_wait(task, live):
     if task.get("auto_merge") and task.get("pr") and not task.get("merged"):
         # #743: waits calmly for a review GitHub requires
         return APPROVAL_LINE if task["pr"].get("needs_approval") else MERGES_ITSELF
-    return (task.get("pr") or {}).get("wait") or None
+    # SHEP-3: its Accept given ahead: Working a moment more while the tick accepts it (auto_accept_pass()).
+    return (task.get("pr") or {}).get("wait") or (AUTO_ACCEPT_LINE if auto_armed(task) else None)
 
 
 # ---- a short grace before Needs you (SHEP-133) ------------------------------------------------

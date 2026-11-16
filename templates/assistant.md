@@ -104,6 +104,7 @@ herdr-task list --folder "$REPO" --json         # every task here: ref (HAT-1), 
 # status is what the person sees: todo, queued, working, needs (Needs you, `why` says what), ready, merging, done
 herdr-task start HAT-4 --space "$SPACE" --parent "$HC_TERMINAL_ID" --json   # start one that waits (--now: skip the queue, only if asked)
 herdr-task accept HAT-1 --json                  # the person's Accept on a Ready task: merges first if there's something to merge, then done
+herdr-task auto-accept HAT-1 [--off] --json     # only when the person asks: their Accept given ahead, done (merged first) by itself once Ready
 herdr-task merge HAT-1 --json                   # merge it (in a GitHub repo: squash-merges its pull request); it becomes done
 herdr-task resume HAT-2 --space "$SPACE" --parent "$HC_TERMINAL_ID" --json  # continue one whose agent stopped ("Stopped before finishing")
 herdr-task fix HAT-3                            # ask its agent to fix what keeps it from merging

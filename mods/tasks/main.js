@@ -25,16 +25,17 @@ import { spaces, panes, agents, terminals, inRender } from "./live.js";
 import { items as needs, ASKS, toAgent, reasonOf, reqReason, REASONS, fit, tabOf } from "./inbox.js";
 import { words } from "./core/asks.js";
 import { taskDot, ownProgress } from "./dot.js";
-import { taskMenu } from "./core/menus.js";
+import { taskMenu, AUTO_ACCEPT } from "./core/menus.js";
 import { machinesInOrder, machineOrderOf, chatPane } from "./core/spaces.js";
 // The rules for a task's status, order and words: shared with the web app (core/tasks.js).
 import { RANK, STATUS, RANK_OF, ORDER, GROUP_BY, groupBy, groupNow, machineOf, machineName, refOf, taskKey, autoPrefix, place,
-  queueReason, reportOf as report, secondLine, leftOf, order, matches, day, ago, capital, short, autoWhere, fromLine, inSpace, holdingItems } from "./core/tasks.js";
+  queueReason, reportOf as report, secondLine, leftOf, order, matches, day, ago, capital, short, autoWhere, fromLine, inSpace, holdingItems,
+  autoAcceptOn, autoAcceptStopped } from "./core/tasks.js";
 import { READ_LISTS, taskLists } from "./core/tasklists.js";
 import { SH } from "./core/paths.js";
 import { settle } from "./core/pending.js";
 import { dirs } from "./dirs.js";
-import { TEXT, H, RADIUS, red, amber } from "./ui.js";
+import { TEXT, H, RADIUS, red, amber, green } from "./ui.js";
 
 const CLI = () => `${appHome()}/mods/tasks/bin/herdr-task`;
 const DONE_SHOWN = 5; // Done rows a group shows before "Show N more"
@@ -879,12 +880,16 @@ export default class Tasks extends View {
     const left = leftOf(p, w);
     // Pin / Unpin in its right-click menu (not an archived task's: archived ones drop out of Pinned).
     const key = taskKey(list, task);
+    // Accept when ready (SHEP-3) on: "Auto-accept" after its id, in Ready's green (in red once its try stopped: the
+    // second line says why); turned on and off from its menu.
+    const auto = autoAcceptOn(task) && !this.shelved(p);
     return this.line(`task-${key}`, {
       go: this.target(p), glyph: this.glyph(p, w), ref: refOf(list, task), title: task.title, sub, left, leftColor: section === "scheduled" ? t.dim : null,
       dim: section === "done", selected: focused, where: bare ? null : this.whereOf(list.machine, placeName(list)),
+      badge: auto ? { text: AUTO_ACCEPT.badge, color: autoAcceptStopped(task) ? red() : green() } : null,
       action: section === "ready" ? this.acceptButton(p, t) : null,
       pin: this.shelved(p) ? null : { key, on: this.pins().has(key), status: section, machine: list.machine ?? null, folder: list.folder,
-        ref: refOf(list, task), sub: section === "scheduled" ? sub : null },
+        ref: refOf(list, task), sub: section === "scheduled" ? sub : null, auto },
     }, t);
   }
 
@@ -910,16 +915,17 @@ export default class Tasks extends View {
   // A task not started yet also starts later (SHEP-38): a few times, and a scheduled one Start now and Unschedule
   // (core/menus.js taskMenu; the web's Other time… types any time, here the Assistant does).
   rowMenu(pin) {
-    const items = taskMenu({ pinned: pin.on, status: pin.status }).filter((x) => !x.typed);
-    // As tasks-menu draws it: a section per line or heading, 4 apart; a heading 28, a row 32.
+    const items = taskMenu({ pinned: pin.on, status: pin.status, autoAccept: pin.auto }).filter((x) => !x.typed);
+    // As tasks-menu draws it: a section per line or heading, 4 apart; a heading 28, a row 32 (and 18 more for a
+    // note under it: Accept when ready's).
     let height = 8, first = true;
     for (const x of items) {
       if ((x.sep || x.heading) && !first) height += 4;
-      height += x.sep ? 0 : x.heading ? 28 : 32;
+      height += x.sep ? 0 : x.heading ? 28 : 32 + (x.note ? 18 : 0);
       first = false;
     }
-    openOverlay({ mod: "tasks-menu", kind: "popup", at: "pointer", width: 220, height, props: { menu: "row", key: pin.key, on: pin.on,
-      status: pin.status, machine: pin.machine, folder: pin.folder, ref: pin.ref, sub: pin.sub } });
+    openOverlay({ mod: "tasks-menu", kind: "popup", at: "pointer", width: items.some((x) => x.note) ? 340 : 220, height, props: { menu: "row", key: pin.key, on: pin.on,
+      status: pin.status, machine: pin.machine, folder: pin.folder, ref: pin.ref, sub: pin.sub, auto: Boolean(pin.auto) } });
   }
 
   // Ready = "looks done, your call": Review (opens the Accept card) is the person's one action here, at the row's end. It merges first when there is something to merge (herdr-task accept follows the merge
@@ -956,12 +962,13 @@ export default class Tasks extends View {
   //   run (`meta`).
   // A row with nothing under its title is one line. Nothing shows on hover: no tooltips (SHEP-25).
   // `pin`: { key, on }: Pin / Unpin in the row's right-click menu.
-  line(id, { go, glyph, ref, title, sub, left, leftColor, dim, selected, meta, metaColor, where, action, pin }, t) {
+  // `badge`: { text, color }: a small mark after its id (Auto-accept, SHEP-3), never cut.
+  line(id, { go, glyph, ref, title, sub, left, leftColor, dim, selected, meta, metaColor, where, action, pin, badge }, t) {
     // Every second line is at most 40 characters (herdr-task cuts an agent's own; this catches the
     // derived ones: a long queue, a check's message).
     const said = sub ? capital(sub) : null;
     const shown = said ? fit(said) : null;
-    const two = Boolean(ref) || Boolean(shown) || Boolean(where);
+    const two = Boolean(ref) || Boolean(shown) || Boolean(where) || Boolean(badge);
     const end = action ?? (meta ? div().flex_none().whitespace_nowrap().text_size(TEXT.label).text_color(metaColor ?? t.dim).child(meta) : null);
     const row = h_flex().id(id).relative().flex_none().px(8).gap(12).items_center().rounded(RADIUS.card)
       .when(Boolean(selected), (el) => el.bg(t.selected))
@@ -973,6 +980,8 @@ export default class Tasks extends View {
     // The words keep their room: where it is takes only what is left after them, and gives way first.
     const second = h_flex().h(16).min_w(0).gap(6).items_center().text_size(TEXT.label)
       .when(Boolean(ref), (el) => el.child(div().flex_none().font_family(ID_FONT).text_size(ID_SIZE).text_color(t.dim).child(ref)))
+      .when(Boolean(badge), (el) => el.child(h_flex().flex_none().h(16).px(5).items_center().rounded(4).border_1().border_color(badge.color)
+        .text_size(ID_SIZE).font_medium().text_color(badge.color).whitespace_nowrap().child(badge.text)))
       .when(Boolean(shown), (el) => el.child(div().id(`${id}-sub`).flex_shrink_1().min_w(0).truncate().text_color(t.muted).child(shown)))
       .when(Boolean(where), (el) => el.child(div().flex_shrink(1000).min_w(0).truncate().text_color(t.dim)
         .child(ref || shown ? `· ${where}` : where)));

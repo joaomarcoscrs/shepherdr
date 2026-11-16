@@ -17,8 +17,8 @@ from .settings import (
     task_settings, worker_argv, worktrees_on,
 )
 from .agents import (
-    agent_log, agent_running, background_jobs, busy_again, detail, fit, LINE_MAX, live_agents, ready_turns, STATUSES, SUMMARY_MAX,
-    WORKING_AGAIN,
+    agent_log, agent_running, background_jobs, busy_again, detail, fit, LINE_MAX, live_agents, ready_turns, ready_wait, STATUSES,
+    SUMMARY_MAX, WORKING_AGAIN,
 )
 from .sessions import refresh_sessions
 from .github import (already_merged, checks_missing, github_unreachable, pr_for_branch, checks_since, drop_branch, expected_checks, finish, gh, github, merged_here, needs_approval, note_checks, own_work, pr_adopt, pr_open,
@@ -811,7 +811,10 @@ def cmd_state(args, state):
             # pull request merged and close it again at once) until its agent says ready.
             if t["state"] == "done" and t.get("merged"):
                 t["kept_open"] = True
-            for k in ("reviews", "review", "auto_merge", "merged", "nothing_to_merge", "accepted_at", "merge_queued"):
+            # SHEP-3: a Done task's auto-accept was used up: reopened, it waits for the person's Accept again.
+            if t["state"] == "done":
+                t.pop("auto_accept", None)
+            for k in ("reviews", "review", "auto_merge", "merged", "nothing_to_merge", "accepted_at", "accepted_by", "merge_queued"):
                 t.pop(k, None)
         if state == "done" and t.get("worktree") and merged_here(s, t):
             t["merged"] = True
@@ -1206,76 +1209,152 @@ def ff_merge(s, t):
     return git(main, "fetch", ".", f"{br}:{base}")[0]
 
 
+def accept_refusal(s, t):
+    """Why a Ready task can't be accepted right now, or None (the first half of the person's Accept,
+    and of auto-accept's: auto_accept_pass()). Its agent at work again since it said ready: Working
+    again (saved by the caller), never accepted half done. A pull request its agent opened itself is
+    adopted. A problem it needs looked at first (attention) refuses it."""
+    if t["state"] != "ready":
+        return f"{s.ref(t)} isn't ready ({t['state']}); only a Ready task can be accepted."
+    live = [detail(k) for k in live_agents(s.key(t))]
+    # SHEP-3: accepted by itself a moment ago (its auto-accept) and merging now: never a second merge.
+    if t.get("accepted_by") == "auto" and (t.get("accepted_at") or 0) >= (t.get("ready_at") or 1) \
+            and ready_wait(t, [k for k in live if agent_running(k)]):
+        return f"{s.ref(t)} was just accepted by itself (auto-accept): {ready_wait(t, [k for k in live if agent_running(k)])}."
+    if busy_again(t, live):
+        back_to_work(s, t, "its agent is at work again", auto=True)
+        return f"{s.ref(t)} is working again: its agent took up more work after it said ready. Accept it once it says ready again."
+    # One its agent opened itself, which ready couldn't open again ("already exists"): adopted.
+    if (not t.get("pr") and "already exists" in (t.get("attention") or "")
+            and (repo := github(s)) and pr_adopt(t, repo)):
+        t.pop("attention", None)
+        s.dirty = True
+    # A pull request's problems are read fresh (merge_now()): one fixed since, or a merge that
+    # failed once, doesn't stand in the way. Without one, only a failed try doesn't.
+    elif t.get("attention") and not t.get("pr") and not t["attention"].startswith(("Couldn't ask for the merge", MERGE_FAILED)):
+        return f"{s.ref(t)} needs attention first: {t['attention']}"
+    return None
+
+
+def accept_merge(s, t, args):
+    """The second half of an Accept (the person's, or auto-accept's): Done at once when there is
+    nothing to merge, else merged first as the merge settings say. Returns (how, error, sent,
+    started); the store is the caller's, open and locked, with t Ready (accept_refusal())."""
+    error, how, sent, started = None, "done", None, False
+    for k in ("attention", "accepted_by"):
+        t.pop(k, None)
+    wt = t.get("worktree") if t.get("mode") == "worktree" else None
+    t["accepted_at"] = now()
+    s.dirty = True
+    if not wt:
+        # Worked in the folder itself: nothing to merge.
+        finish(s, t)
+    elif t.get("pr") or own_open_pr(s, t):
+        how = "github"
+        error = merge_now(s, t)
+        if error == IN_QUEUE:
+            how, error = "queue", None
+        elif error in (CHECKS_RUNNING, WAITS_APPROVAL):
+            # Accepted: it merges by itself once they pass, or once it's approved (Merging).
+            t["auto_merge"], how, error = "checks", "checks" if error == CHECKS_RUNNING else "approval", None
+    elif merged_here(s, t) or in_base(s, t):
+        # Its own work already in the base branch, or none of its own: nothing to merge.
+        t["merged"] = merged_here(s, t)
+        if not t["merged"]:
+            t["nothing_to_merge"] = True
+        finish(s, t, even_if_busy=True)
+    elif ff_merge(s, t):
+        how = "merged"
+        t["merged"] = True
+        finish(s, t, even_if_busy=True)
+    else:
+        how = "agent"
+        sent, started = tell(s, t, local_merge_msg(s, t), args)
+        t["merge_requested"] = now()  # once asked: an ask that failed leaves nothing merging
+    return how, error, sent, started
+
+
 def cmd_accept(args):
     """The person's Accept on a Ready task (the one thing they do in the Tasks panel): Done at
     once when there is nothing to merge, else merged first, as the merge settings say how: a pull
     request is squash-merged on GitHub (or merges once its checks pass); a local branch is
     fast-forwarded when it can be, else its agent merges it (rebase, checks) and marks it done."""
-    error, how, sent, started, back = None, "done", None, False, False
     with open_store(args) as s:
         t = s.find(args.id)
-        if t["state"] != "ready":
-            raise Fail(f"{s.ref(t)} isn't ready ({t['state']}); only a Ready task can be accepted.")
-        # Its agent at work again since it said ready: never accepted half done. Working again
-        # (saved), and refused after the store is.
-        if busy_again(t, [detail(k) for k in live_agents(s.key(t))]):
-            back = back_to_work(s, t, "its agent is at work again", auto=True)
-        # One its agent opened itself, which ready couldn't open again ("already exists"): adopted.
-        elif (not t.get("pr") and "already exists" in (t.get("attention") or "")
-              and (repo := github(s)) and pr_adopt(t, repo)):
-            t.pop("attention", None)
-            s.dirty = True
-        # A pull request's problems are read fresh (merge_now()): one fixed since, or a merge that
-        # failed once, doesn't stand in the way. Without one, only a failed try doesn't.
-        elif t.get("attention") and not t.get("pr") and not t["attention"].startswith(("Couldn't ask for the merge", MERGE_FAILED)):
-            raise Fail(f"{s.ref(t)} needs attention first: {t['attention']}")
-    if back:
-        raise Fail(f"{s.ref(t)} is working again: its agent took up more work after it said ready. Accept it once it says ready again.")
+        refused = accept_refusal(s, t)
+    if refused:
+        raise Fail(refused)
     with open_store(args) as s:
         t = s.find(args.id)
-        if t["state"] != "ready":
-            raise Fail(f"{s.ref(t)} isn't ready ({t['state']}); only a Ready task can be accepted.")
-        t.pop("attention", None)
-        wt = t.get("worktree") if t.get("mode") == "worktree" else None
-        t["accepted_at"] = now()
-        s.dirty = True
-        if not wt:
-            # Worked in the folder itself: nothing to merge.
-            finish(s, t)
-        elif t.get("pr") or own_open_pr(s, t):
-            how = "github"
-            error = merge_now(s, t)
-            if error == IN_QUEUE:
-                how, error = "queue", None
-            elif error in (CHECKS_RUNNING, WAITS_APPROVAL):
-                # Accepted: it merges by itself once they pass, or once it's approved (Merging).
-                t["auto_merge"], how, error = "checks", "checks" if error == CHECKS_RUNNING else "approval", None
-        elif merged_here(s, t) or in_base(s, t):
-            # Its own work already in the base branch, or none of its own: nothing to merge.
-            t["merged"] = merged_here(s, t)
-            if not t["merged"]:
-                t["nothing_to_merge"] = True
-            finish(s, t, even_if_busy=True)
-        elif ff_merge(s, t):
-            how = "merged"
-            t["merged"] = True
-            finish(s, t, even_if_busy=True)
-        else:
-            how = "agent"
-            t["merge_requested"] = now()
-            sent, started = tell(s, t, local_merge_msg(s, t), args)
+        # Accepted by itself (auto-accept) since the check above: refused, never merged twice.
+        refused = accept_refusal(s, t) if t["state"] != "ready" or t.get("accepted_by") == "auto" else None
+        if refused:
+            raise Fail(refused)
+        how, error, sent, started = accept_merge(s, t, args)
         v = view(s, t)
     if error:
         say(args, {**v, "error": error}, None) if args.json else print(f"herdr-task: {error}", file=sys.stderr)
         sys.exit(1)
-    text = {"done": f"{s.ref(t)} accepted: done.",
+    say(args, {**v, "accepted": how, "terminal": sent, "new_agent": started}, accepted_words(s, t, how, sent, started))
+
+
+def own_agent(s, t):
+    """This command runs in one of the task's own agents (its worker, a reviewer or helper it started: they carry
+    its HERDR_BROWSER_TASK), not the person's window, web app or an Assistant."""
+    me = os.environ.get("HC_TERMINAL_ID")
+    return os.environ.get("HERDR_BROWSER_TASK") == s.key(t) or bool(me and any(a.get("address") == me for a in t.get("agents") or []))
+
+
+def cmd_auto_accept(args):
+    """SHEP-3: the person's Accept given ahead, for this one task ("Accept when ready" in its Tasks panel menu): once
+    it is Ready, the tick accepts it as their Accept would (auto_accept_pass(): the same checks; a failing check, a
+    conflict, an approval GitHub needs or its agent at work again still stop it). --off takes it back, any time before
+    it is accepted. Never from the task's own agents: only the person (or their Assistant, asked) gives it."""
+    with open_store(args) as s:
+        t = s.find(args.id)
+        if own_agent(s, t):
+            raise Fail(f"Only the person turns auto-accept on or off for {s.ref(t)} (Accept when ready, in its Tasks panel menu).")
+        was = t.get("auto_accept")
+        if args.off:
+            if was is not None:
+                t.pop("auto_accept")
+                s.dirty = True
+            msg = (f"{s.ref(t)}: auto-accept is off; it waits for the person's Accept." if was is not None
+                   else f"{s.ref(t)}: auto-accept wasn't on.")
+            if t["state"] == "ready" and t.get("accepted_by") == "auto":
+                if t.get("auto_merge") and not t.get("merge_queued"):
+                    # Accepted by itself and waiting on its checks or an approval (Herdr's own wait, not GitHub's): taken
+                    # back, Ready for the person's Accept again.
+                    for k in ("auto_merge", "accepted_at", "accepted_by"):
+                        t.pop(k, None)
+                    s.dirty = True
+                    msg = f"{s.ref(t)}: auto-accept is off and it won't merge by itself; it waits for the person's Accept."
+                else:
+                    msg = (f"{s.ref(t)}: auto-accept is off, but it was already accepted: "
+                           + ("GitHub's merge queue has it." if t.get("merge_queued") else "its agent is merging it."))
+        else:
+            if t["state"] == "done":
+                raise Fail(f"{s.ref(t)} is already done.")
+            if t["state"] == "ready" and (t.get("accepted_at") or 0) >= (t.get("ready_at") or 1):
+                raise Fail(f"{s.ref(t)} is already accepted: it merges by itself.")
+            # On again re-arms it: a try that didn't go through is tried again at the next tick, if it is Ready.
+            t["auto_accept"] = {"at": now()}
+            s.dirty = True
+            msg = (f"{s.ref(t)}: auto-accept is on. Once it is Ready (checks passed, nothing waiting on the person), Herdr "
+                   f"accepts it as the person's Accept would" + (", merging it first" if t.get("mode") == "worktree" else "") +
+                   ". Turn it off any time before then.")
+        v = view(s, t)
+    say(args, v, msg)
+
+
+def accepted_words(s, t, how, sent=None, started=False):
+    return {"done": f"{s.ref(t)} accepted: done.",
             "merged": f"{s.ref(t)} accepted: merged into {t.get('base') or 'main'}; done.",
             "github": f"{s.ref(t)} accepted: pull request #{(t.get('pr') or {}).get('number')} merged; done.",
             "checks": f"{s.ref(t)} accepted: it merges once its checks pass.",
             "approval": f"{s.ref(t)} accepted: it merges once it's approved.",
             "queue": f"{s.ref(t)} accepted: pull request #{(t.get('pr') or {}).get('number')} is in GitHub's merge queue; done once GitHub merges it.",
             "agent": f"{s.ref(t)} accepted: merge asked of {sent}" + (" (a new agent)" if started else "")}[how]
-    say(args, {**v, "accepted": how, "terminal": sent, "new_agent": started}, text)
 
 
 def cmd_fix(args):

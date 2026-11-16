@@ -103,6 +103,10 @@ def evidence(s, t):
     merges its branch first: an open pull request or commits past its base; the button says so), and for a Roboflow
     task only, pr {number, url} and ephemeral (ephemeral.py)}."""
     main, out = s.loc["folder"], {"summary": t.get("summary"), "details": t.get("details"), "proof": t.get("proof") or find_proof(s, t)}
+    # SHEP-3: auto-accept on for it (and, when its try didn't go through, why): the card says so.
+    aa = t.get("auto_accept")
+    if isinstance(aa, dict):
+        out["auto_accept"] = {"on": True, **({"failed": aa["failed"]} if aa.get("failed") else {})}
     out["artifacts"] = task_artifacts(s, t, out["proof"])
     if applies(t):
         # SHEP-4: a Roboflow task's pull request and its ephemeral environment, to try it by hand (other tasks: unchanged)

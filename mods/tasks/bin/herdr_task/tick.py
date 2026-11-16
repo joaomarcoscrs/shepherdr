@@ -11,7 +11,7 @@ import time
 from .base import Fail, git, guard, hc_json, now, PR_EVERY, run, SHELLS, STORE, stop_note
 from .settings import machine_name, worker_argv
 from .agents import (
-    agent_log, agent_running, busy_again, detail, held_ask, last_question, live_agents, mid_turn_agents, own_work, ready_turns,
+    agent_log, agent_running, auto_armed, busy_again, detail, held_ask, last_question, live_agents, mid_turn_agents, own_work, ready_turns,
     status_word,
     task_status,
 )
@@ -25,7 +25,7 @@ from .queues import machine_hold, refresh_ext, running_count, set_hold, waiting_
 from .archive import archive_pass
 from .browsers import browser_pass
 from .output import progress_clock, say
-from .commands import back_to_work, begin, merge_now, MERGE_FAILED
+from .commands import accept_merge, accept_refusal, back_to_work, begin, merge_now, MERGE_FAILED
 from .news import news_pass, typing
 from .takeover import cant_go_on, takeover
 from .ghnews import main_pass, pr_deliver, pr_news
@@ -254,6 +254,44 @@ def settle_back(s, t, report):
     return True
 
 
+def auto_accept_pass(s, t, report):
+    """SHEP-3: a task the person said to accept by itself (herdr-task auto-accept) is accepted once it is Ready (the
+    person's Accept the only thing left: task_status() without its auto-accept says "ready"), as their Accept would:
+    the same refusals (accept_refusal()) and the same merge (accept_merge(): GitHub's checks, approvals, merge queue
+    and conflicts still decide). Once per ready (tried: its ready_at): a try that didn't go through leaves it Ready for
+    the person, saying why (failed), and never merges twice. Inside the store's lock, as the person's Accept is."""
+    if not auto_armed(t) or t.get("attention"):
+        return
+    live = [k for k in map(detail, live_agents(s.key(t))) if agent_running(k)]
+    if task_status({**t, "auto_accept": None}, live)[0] != "ready":
+        return
+    aa, how = t["auto_accept"], None
+    try:
+        error = accept_refusal(s, t)
+    except Fail as e:
+        error = str(e)
+    if t["state"] != "ready":
+        return  # its agent at work again (Working again): tried at its next ready
+    aa["tried"], aa["tried_at"] = t.get("ready_at"), now()
+    aa.pop("failed", None)
+    s.dirty = True
+    try:
+        if not error:
+            how, error, _, _ = accept_merge(s, t, None)
+    except Fail as e:
+        error = str(e)
+    if error:
+        # Not accepted after all: Ready for the person's own Accept (attention, when it found a problem, says what).
+        t.pop("accepted_at", None)
+        aa["failed"] = error
+        report.setdefault("auto_accept_failed", []).append({"ref": s.ref(t), "why": error})
+        return
+    t["accepted_by"] = "auto"
+    report.setdefault("auto_accepted", []).append({"ref": s.ref(t), "how": how})
+    if t["state"] == "done":
+        report["done"].append(t["id"])
+
+
 def due_pass(s, report):
     """Scheduled tasks whose time has come (SHEP-38), a time passed while the machine was off too, join
     the queue in the order they were due: the queue below starts them (after their --after tasks,
@@ -285,6 +323,8 @@ def tick_store(s, report):
                 if not merge_now(s, t):
                     report["done"].append(t["id"])
             t.pop("_pr_fresh", None)
+        if t["state"] == "ready" and t.get("auto_accept"):
+            auto_accept_pass(s, t, report)
     due_pass(s, report)
     queued = sorted((t for t in s.data["tasks"] if t["state"] == "queued"), key=lambda t: t.get("queued_at") or 0)
     n = running_count(s) if queued else 0

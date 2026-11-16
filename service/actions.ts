@@ -616,7 +616,7 @@ export async function act(hub: Hub, b: any, compat: Compat): Promise<unknown> {
     if (!r || !b.job.startsWith("b:") || !(await r.stopJob(b.job.slice(2)))) throw new Error("It isn't running any more.");
     return { ok: true };
   }
-  else if ((b?.type === "close" || b?.type === "delete" || b?.type === "archive" || b?.type === "reopen" || b?.type === "task-resume" || b?.type === "schedule") && typeof b.chat === "string") {
+  else if ((b?.type === "close" || b?.type === "delete" || b?.type === "archive" || b?.type === "reopen" || b?.type === "task-resume" || b?.type === "schedule" || b?.type === "auto-accept") && typeof b.chat === "string") {
     // a task's row menu: its chat key is "<task>/worker" (or 2.1's "/Agent")
     const t = compat.taskOf(b.chat.split("/")[0]);
     if (!t) throw new Error("That task isn't here any more.");
@@ -704,6 +704,15 @@ export async function act(hub: Hub, b: any, compat: Compat): Promise<unknown> {
       try { out = JSON.parse(r.stdout); } catch {}
       if (r.code !== 0 || out?.error) return { ok: false, error: out?.error || r.stderr.trim().split("\n").pop() || "herdr-task refused it." };
       return { ok: true, why: out?.why ?? null };
+    }
+    // Accept when ready (SHEP-3): the person's Accept given ahead for this task, or taken back; herdr-task's refusal comes back
+    case "auto-accept": {
+      const { ref, folder, machine } = taskOf(b);
+      const r = await task(["auto-accept", ref, ...(b.on === false ? ["--off"] : [])], folder, machine);
+      let out: any = null;
+      try { out = JSON.parse(r.stdout); } catch {}
+      if (r.code !== 0 || out?.error) return { ok: false, error: out?.error || r.stderr.trim().split("\n").pop() || "herdr-task refused it." };
+      return { ok: true };
     }
     // the person's own calls on a task, as herdr-task makes them: done, removed, or back from the archive
     case "close": case "delete": case "archive": case "reopen": {

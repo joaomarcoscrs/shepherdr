@@ -72,14 +72,18 @@ def news_line(s, t, v, event, words=None):
     attr = lambda x: str(x).replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
     note = " ".join(str(t.get("agents_md") or "").split())
     said = " ".join(str(t.get("summary") or "").split())
-    text = {"ready": f"{ref} is ready: {title}" + (f" · {said}" if said else "") + (f" · For AGENTS.md: {note}" if note else ""),
+    # SHEP-3: an auto-accept that didn't go through says why (it waits for the person's Accept now).
+    stopped = ((t.get("auto_accept") or {}).get("failed") or "") if isinstance(t.get("auto_accept"), dict) else ""
+    text = {"ready": f"{ref} is ready: {title}" + (f" · {said}" if said else "") + (f" · For AGENTS.md: {note}" if note else "")
+                     + (f" · Auto-accept stopped: {' '.join(stopped.split())}" if stopped else ""),
             "needs-you": f"{ref} needs you: {v.get('why') or 'Needs you'} ({title})",
             "failed": f"{ref} failed: {v.get('why') or 'Agent stopped'} ({title})",
             "stalled": f"{ref} {words} ({title})",
             "working-again": f"{ref} is working again: {(t.get('back') or {}).get('why') or 'its agent is at work again'} ({title})",
             "backup": f"{ref} backup: {words} ({title})",
             "done": f"{ref} is done" + (": merged" if t.get("merged") else ": nothing to merge" if t.get("nothing_to_merge")
-                                        else ": accepted" if t.get("accepted_at") else "") + f" ({title})"}[event]
+                                        else ": accepted" if t.get("accepted_at") else "")
+                    + (" (auto-accept)" if t.get("accepted_by") == "auto" else "") + f" ({title})"}[event]
     return f'<herdr-news task="{attr(ref)}" event="{event}">{text.replace("<", "‹").replace(">", "›")}</herdr-news>'
 
 
