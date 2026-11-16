@@ -17,7 +17,7 @@ import { appHome, closeOverlay, exec, notify, openOverlay, props, shared, setSha
 import { note } from "./usage.js";
 import { dialogFooter, green, red, amber, H, RADIUS, TEXT } from "./ui.js";
 // The card's words, the summary cut and the details as bullets: core/accept.js, shared with the web app's card.
-import { ACCEPT, acceptLabel, words, readable, commitsLine, filesLine, moreLine, proofTitle, whereNow } from "./core/accept.js";
+import { ACCEPT, acceptLabel, autoNote, words, readable, commitsLine, filesLine, moreLine, proofTitle, whereNow } from "./core/accept.js";
 import { settle } from "./core/pending.js";
 
 export { words, readable };
@@ -300,6 +300,7 @@ export default class AcceptCard extends View {
     const body = !x
       ? div().text_color(this.error ? red() : t.dim).child(this.error ?? ACCEPT.reading)
       : v_flex().w_full().gap(16).pb(4)
+        .when(Boolean(autoNote(e)), (el) => el.child(div().max_w(560).text_size(TEXT.body).line_height("20px").text_color(red()).child(autoNote(e))))
         .child(div().max_w(560).text_size(TEXT.body).line_height("20px").text_color(w.summary ? t.foreground : t.muted)
           .child(w.summary || ACCEPT.noSummary))
         .child(this.section(t, ACCEPT.changes, this.changes(t, e)))

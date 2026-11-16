@@ -8,8 +8,9 @@
 //   "row"     a task row's right-click: Pin or Unpin (props().on) the task props().key, in shared
 //             "tasks.pinned" (mods/tasks keeps the same list). A task not started yet (props().status
 //             todo, queued or scheduled) also starts later (SHEP-38): herdr-task edit --in / --at on
-//             props().machine, folder and ref; a scheduled one Start now and Unschedule. What herdr-task
-//             refuses shows as a toast.
+//             props().machine, folder and ref; a scheduled one Start now and Unschedule. Until it is done,
+//             Accept when ready (SHEP-3: herdr-task auto-accept, props().auto says whether it is on: a check), a
+//             quiet note under it saying what it does. What herdr-task refuses shows as a toast.
 // ↑/↓ move, Enter picks, Esc closes.
 
 import { View, div } from "gpui-kit";
@@ -18,6 +19,9 @@ import { props, closeOverlay, theme, shared, setShared, exec, appHome } from "he
 import { menuRow, heading, toast, TEXT } from "./ui.js";
 import { taskMenu } from "./core/menus.js";
 import { settle } from "./core/pending.js";
+
+// A menu item's note under it (mods/tasks rowMenu counts it in the popup's height).
+const NOTE_H = 18;
 
 // Shepherdr's GROUP_WORDS (core/tasks.js GROUP_BY).
 const GROUPS = [{ key: "you", label: "For you" }, { key: "space", label: "Space" }, { key: "status", label: "Status" }];
@@ -37,12 +41,13 @@ function sections() {
 function rowSections(p) {
   const out = [];
   let cur = null;
-  for (const it of taskMenu({ pinned: p.on, status: p.status ?? null })) {
+  for (const it of taskMenu({ pinned: p.on, status: p.status ?? null, autoAccept: Boolean(p.auto) })) {
     if (it.typed) continue;
     if (it.sep || it.heading || !cur) out.push(cur = { title: it.heading ? (p.status === "scheduled" && p.sub ? `${it.heading} · ${p.sub}` : it.heading) : null,
       checks: false, current: null, items: [], pick: (key) => rowPick(p, key) });
     if (it.sep || it.heading) continue;
     cur.items.push({ key: `${it.id}:${cur.items.length}`, label: it.label, at: it.at, in: it.in, id: it.id,
+      ...(it.check !== undefined ? { check: it.check } : {}), ...(it.note ? { note: it.note } : {}),
       icon: it.icon === "play" ? "mods/tasks/play.svg" : `mods/workspace-chrome/${it.icon}.svg` });
   }
   return out.filter((s) => s.items.length);
@@ -57,8 +62,12 @@ function rowPick(p, key) {
     setShared("tasks.pinned", p.on ? rest : [...rest, p.key]);
     return;
   }
-  const args = it.id === "start-now" ? ["start", p.ref, "--now"] : it.id === "unschedule" ? ["edit", p.ref, "--at", ""]
+  // Accept when ready (SHEP-3): on, or off when it was on.
+  const auto = it.id === "auto-accept";
+  const args = auto ? ["auto-accept", p.ref, ...(p.auto ? ["--off"] : [])]
+    : it.id === "start-now" ? ["start", p.ref, "--now"] : it.id === "unschedule" ? ["edit", p.ref, "--at", ""]
     : ["edit", p.ref, ...(it.in ? ["--in", it.in] : ["--at", it.at])];
+  const failed = auto ? `Couldn't turn auto-accept ${p.auto ? "off" : "on"} for ${p.ref}` : `Couldn't schedule ${p.ref}`;
   // herdr-task, here or (--on) on the folder's machine; the list shows the change on its next read.
   const cli = (a) => exec(`${appHome()}/mods/tasks/bin/herdr-task`, a);
   cli([...(p.machine ? ["--on", p.machine] : []), ...args, "--json", "--folder", p.folder])
@@ -66,9 +75,9 @@ function rowPick(p, key) {
     .then((r) => {
       let out = null;
       try { out = JSON.parse(r.stdout || "null"); } catch {}
-      if (r.code !== 0 || !out || out.error) toast({ level: "error", title: `Couldn't schedule ${p.ref}`, body: out?.error || r.stderr?.trim() || "herdr-task refused it." });
+      if (r.code !== 0 || !out || out.error) toast({ level: "error", title: failed, body: out?.error || r.stderr?.trim() || "herdr-task refused it." });
     })
-    .catch((e) => toast({ level: "error", title: `Couldn't schedule ${p.ref}`, body: String(e?.message ?? e) }));
+    .catch((e) => toast({ level: "error", title: failed, body: String(e?.message ?? e) }));
 }
 
 // Every item in order, with its section: ↑/↓ run through all of them.
@@ -115,11 +124,15 @@ export default class TasksMenu extends View {
   }
 
   // A 32 row (ui.js menuRow): its icon, the label, its count as the hint, a check on the current
-  // pick (none in an action menu: checks false).
+  // pick (none in an action menu: checks false, but for an item that is a setting of its own: x.check).
+  // A note (Accept when ready's) sits under it, quiet, on the label's column: NOTE_H tall.
   item(x, s, i, t) {
-    return menuRow(`tm-${x.key}`, x.label, { icon: x.icon ?? null, hint: x.count > 0 ? String(x.count) : null,
-      check: s.checks === false ? null : x.key === s.current,
+    const row = menuRow(`tm-${x.key}`, x.label, { icon: x.icon ?? null, hint: x.count > 0 ? String(x.count) : null,
+      check: s.checks === false ? (x.check ?? null) : x.key === s.current,
       onClick: () => this.choose(i) })
       .when(this.keyed && i === this.at, (el) => el.bg(t.hover));
+    if (!x.note) return row;
+    return v_flex().flex_none().child(row)
+      .child(div().h(NOTE_H).pl(32).pr(8).flex_none().text_size(TEXT.label).text_color(t.dim).truncate().child(x.note));
   }
 }

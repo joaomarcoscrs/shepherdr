@@ -6152,3 +6152,235 @@ class LinkActions(unittest.TestCase):
         r = self.link.again("vmb", ["list"], lambda: subprocess.CompletedProcess([], *answers.pop(0)))
         self.assertEqual((r.returncode, r.stdout), (0, "[]"))
         self.assertFalse(self.link.lost(subprocess.CompletedProcess([], 1, "", "herdr-task: no such task")))
+
+
+class AutoAccept(unittest.TestCase):
+    """SHEP-3: the person's Accept given ahead for one task ("Accept when ready" in its Tasks panel menu, herdr-task
+    auto-accept). Scheduled's real task list on disk (read fresh each tick, as after a restart) and a real throwaway
+    git repo with real worktrees: Accept's own merge (a fast-forward here) runs for real. hc, gh and agents are faked."""
+    run_cmd, add, task = Scheduled.run_cmd, Scheduled.add, Scheduled.task
+
+    def setUp(self):
+        Scheduled.setUp(self)
+        from unittest import mock
+        import herdr_task.agents as agents
+        import herdr_task.github as github
+        import herdr_task.news as news
+        self.news = news
+        self.live = []  # the task's agents now (hc records)
+        self.told = []
+        self.tell_fails = None
+
+        def tell(s, t, msg, args):
+            if self.tell_fails:
+                raise self.Fail(self.tell_fails)
+            self.told.append((s.ref(t), msg))
+            return "t9", False
+        for mod, name, value in ((self.tick, "live_agents", lambda key: self.live), (self.tick, "detail", lambda k: k),
+                                 (self.commands, "live_agents", lambda key: self.live), (self.commands, "detail", lambda k: k),
+                                 (github, "live_agents", lambda key: self.live), (github, "live_helpers", lambda key: []),
+                                 (agents, "live_agents", lambda key: self.live),
+                                 (self.commands, "github", lambda s: None), (self.commands, "github_unreachable", lambda s: None),
+                                 (github, "github", lambda s: None), (self.commands, "tell", tell)):
+            p = mock.patch.object(mod, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.now = int(__import__("time").time() * 1000)
+
+    def git(self, cwd, *args):
+        return subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True, check=True).stdout.strip()
+
+    def worktree_task(self, title, n, commits=1):
+        """A task in its own worktree with commits of its own, Working."""
+        self.add(title, here=True)
+        wt = os.path.join(self.tmp, f"wt{n}")
+        self.git(self.folder, "worktree", "add", "-q", "-b", f"task/{n}", wt, "main")
+        start = self.git(wt, "rev-parse", "HEAD")
+        for i in range(commits):
+            with open(os.path.join(wt, f"task{n}-{i}.txt"), "w") as f:
+                f.write(f"{title} {i}\n")
+            self.git(wt, "add", "-A")
+            self.git(wt, "-c", "user.name=T", "-c", "user.email=t@example.com", "commit", "-q", "-m", f"{title} {i}")
+        with self.store_mod.Store(self.store_mod.locate(self.folder)) as s:
+            s.find(n).update(state="running", started=1, mode="worktree", worktree=wt, branch=f"task/{n}", base="main", start=start)
+            s.dirty = True
+        return wt
+
+    def say_ready(self, n, at):
+        """Its agent's ready, as cmd_ready leaves a local task (no GitHub): Ready, its head kept."""
+        with self.store_mod.Store(self.store_mod.locate(self.folder)) as s:
+            t = s.find(n)
+            t.update(state="ready", ready_at=at, ready_turns={}, head=self.git(t["worktree"], "rev-parse", "HEAD"))
+            s.dirty = True
+
+    def tick_at(self, ms):
+        self.clock = ms
+        report = {"started": [], "done": [], "attention": [], "fired": []}
+        with self.store_mod.Store(self.store_mod.locate(self.folder)) as s:
+            self.tick.tick_store(s, report)
+        return report
+
+    def status(self, n):
+        with self.store_mod.Store(self.store_mod.locate(self.folder), write=False) as s:
+            v = self.commands.view(s, s.find(n), self.live)
+        return v["status"], v["why"]
+
+    def auto(self, n, off=False):
+        return self.run_cmd(self.commands.cmd_auto_accept, id=str(n), off=off)
+
+    def on_main(self):
+        return self.git(self.folder, "log", "--format=%s", "main")
+
+    def test_accepted_once_when_ready_and_merged_once(self):
+        wt = self.worktree_task("Bigger card", 1)
+        self.auto(1)
+        self.assertEqual(self.task(1)["auto_accept"]["at"] > 0, True)
+        # Working: nothing happens, however many ticks (and restarts: the list is read fresh each time)
+        for i in range(3):
+            self.assertNotIn("auto_accepted", self.tick_at(self.now + i))
+        self.assertEqual(self.task(1)["state"], "running")
+        self.assertNotIn("Bigger card 0", self.on_main())
+        # Ready: until the tick takes it, it reads Working "Accepting by itself" (no Review, no Ready news)
+        self.say_ready(1, self.now + 10)
+        self.assertEqual(self.status(1), ("working", "Accepting by itself"))
+        report = self.tick_at(self.now + 20)
+        self.assertEqual(report["auto_accepted"], [{"ref": "APP-1", "how": "merged"}])
+        t = self.task(1)
+        self.assertEqual((t["state"], t.get("merged"), t.get("accepted_by")), ("done", True, "auto"))
+        self.assertEqual(self.on_main().count("Bigger card 0"), 1)
+        self.assertFalse(os.path.isdir(wt))  # Accept's own clean-up ran
+        # Never twice: later ticks do nothing, and the person's own Accept now finds it done
+        self.assertNotIn("auto_accepted", self.tick_at(self.now + 30))
+        with self.assertRaises(self.Fail) as e:
+            self.run_cmd(self.commands.cmd_accept, id="1")
+        self.assertIn("isn't ready (done)", str(e.exception))
+        self.assertEqual(self.on_main().count("Bigger card 0"), 1)
+
+    def test_only_the_task_it_was_turned_on_for(self):
+        self.worktree_task("Mine", 1)
+        self.worktree_task("Other", 2)
+        self.auto(1)
+        self.say_ready(1, self.now)
+        self.say_ready(2, self.now)
+        self.tick_at(self.now + 1)
+        self.assertEqual((self.task(1)["state"], self.task(2)["state"]), ("done", "ready"))
+        self.assertEqual(self.status(2), ("ready", None))  # the default: waits for the person's Accept
+        self.assertNotIn("Other 0", self.on_main())
+
+    def test_never_while_it_isnt_the_persons_call_yet(self):
+        """Its checks still running, a problem it needs looked at, a question, its agent at work again: not accepted."""
+        self.worktree_task("Careful", 1)
+        self.auto(1)
+        self.say_ready(1, self.now)
+        cases = [({"pr": {"number": 4, "url": "u", "repo": "o/r", "wait": "Checks are still running.", "checked": self.now + 10 ** 9}}, None),
+                 ({"attention": "Checks failing: test", "attention_at": 1}, None),
+                 ({}, [{"address": "t1", "status": {"state": "blocked"}, "labels": {}, "foreground": {"name": "claude"}}]),
+                 ({}, [{"address": "t1", "status": {"state": "working"}, "labels": {}, "turn": 3, "foreground": {"name": "claude"}}])]
+        for extra, live in cases:
+            with self.store_mod.Store(self.store_mod.locate(self.folder)) as s:
+                t = s.find(1)
+                for k in ("pr", "attention", "attention_at"):
+                    t.pop(k, None)
+                t.update(state="ready", **extra)
+                s.dirty = True
+            self.live = live or []
+            self.tick_at(self.now + 1)
+            t = self.task(1)
+            self.assertNotEqual(t["state"], "done", extra or live)
+            self.assertNotIn("tried", t["auto_accept"], extra or live)
+        self.assertNotIn("Careful 0", self.on_main())
+
+    def test_turned_off_before_ready_it_waits_for_the_person(self):
+        self.worktree_task("Changed my mind", 1)
+        self.auto(1)
+        out = self.auto(1, off=True)
+        self.assertNotIn("auto_accept", out)
+        self.say_ready(1, self.now)
+        self.tick_at(self.now + 1)
+        self.assertEqual(self.status(1), ("ready", None))
+        self.assertNotIn("Changed my mind 0", self.on_main())
+
+    def test_a_try_that_fails_is_said_and_not_repeated(self):
+        """One try per ready: it stays Ready for the person, saying why; its next ready (or turning it on again) tries again."""
+        wt = self.worktree_task("Diverged", 1)
+        # main moved on: no fast-forward, so Accept asks its agent to merge (here that ask fails)
+        with open(os.path.join(self.folder, "other.txt"), "w") as f:
+            f.write("other work\n")
+        self.git(self.folder, "add", "-A")
+        self.git(self.folder, "-c", "user.name=T", "-c", "user.email=t@example.com", "commit", "-q", "-m", "other work")
+        self.auto(1)
+        self.say_ready(1, self.now)
+        self.tell_fails = "hc send to t9 failed"
+        report = self.tick_at(self.now + 1)
+        self.assertEqual(report["auto_accept_failed"], [{"ref": "APP-1", "why": "hc send to t9 failed"}])
+        t = self.task(1)
+        self.assertEqual((t["state"], t["auto_accept"]["failed"], t["auto_accept"]["tried"]), ("ready", "hc send to t9 failed", self.now))
+        self.assertEqual(self.status(1), ("ready", None))  # the person's Review now
+        with self.store_mod.Store(self.store_mod.locate(self.folder), write=False) as s:
+            line = self.news.news_line(s, s.find(1), {}, "ready")
+        self.assertIn("Auto-accept stopped: hc send to t9 failed", line)
+        self.tell_fails = None
+        self.assertNotIn("auto_accept_failed", self.tick_at(self.now + 2))  # not again for this ready
+        self.assertEqual(self.told, [])
+        # turned on again (the menu, after the person looked): tried again
+        self.auto(1)
+        self.assertEqual(self.tick_at(self.now + 3)["auto_accepted"], [{"ref": "APP-1", "how": "agent"}])
+        self.assertEqual(len(self.told), 1)
+        self.assertIn("Merge task APP-1", self.told[0][1])
+        # its agent merging (merge_requested): never asked twice
+        self.live = [{"address": "t9", "status": {"state": "idle"}, "labels": {}, "turn": 1, "foreground": {"name": "claude"}}]
+        self.tick_at(self.now + 4)
+        self.assertEqual(len(self.told), 1)
+        self.assertTrue(os.path.isdir(wt))
+
+    def test_waits_for_an_approval_and_can_be_taken_back(self):
+        """A pull request GitHub says needs an approving review: accepted, it merges once approved (never bypassed);
+        turned off before then, it is the person's Accept again."""
+        from unittest import mock
+        self.worktree_task("Reviewed", 1)
+        with self.store_mod.Store(self.store_mod.locate(self.folder)) as s:
+            s.find(1)["pr"] = {"number": 7, "url": "https://example.com/pr/7", "repo": "o/r", "checked": self.now + 10 ** 9}
+            s.dirty = True
+        self.auto(1)
+        self.say_ready(1, self.now)
+        with mock.patch.object(self.commands, "merge_now", lambda s, t: self.commands.WAITS_APPROVAL):
+            self.assertEqual(self.tick_at(self.now + 1)["auto_accepted"], [{"ref": "APP-1", "how": "approval"}])
+        t = self.task(1)
+        self.assertEqual((t["state"], t["auto_merge"], t["accepted_by"]), ("ready", "checks", "auto"))
+        out = self.auto(1, off=True)
+        self.assertNotIn("auto_merge", out)
+        self.assertNotIn("accepted_at", out)
+        self.assertEqual(self.status(1), ("ready", None))
+
+    def test_refused_from_the_tasks_own_agents(self):
+        from unittest import mock
+        self.worktree_task("Self merge", 1)
+        with self.store_mod.Store(self.store_mod.locate(self.folder), write=False) as s:
+            key = s.key(s.find(1))
+        with mock.patch.dict(os.environ, {"HERDR_BROWSER_TASK": key}):
+            with self.assertRaises(self.Fail) as e:
+                self.auto(1)
+        self.assertIn("Only the person", str(e.exception))
+        self.assertNotIn("auto_accept", self.task(1))
+
+    def test_refused_when_done_and_used_up_when_reopened(self):
+        self.worktree_task("Again", 1)
+        self.auto(1)
+        self.say_ready(1, self.now)
+        self.tick_at(self.now + 1)
+        self.assertEqual(self.task(1)["state"], "done")
+        with self.assertRaises(self.Fail):
+            self.auto(1)
+        self.run_cmd(lambda a: self.commands.cmd_state(a, "reopen"), id="1")
+        t = self.task(1)
+        self.assertNotIn("auto_accept", t)
+        self.assertNotIn("accepted_by", t)
+
+    def test_the_accept_card_says_so(self):
+        from unittest import mock
+        import herdr_task.proof as proof
+        self.worktree_task("Card", 1)
+        self.auto(1)
+        with mock.patch.object(proof, "artifacts_of", lambda folder: []), mock.patch.object(proof, "checks_of", lambda t: {"state": "none", "text": ""}):
+            with self.store_mod.Store(self.store_mod.locate(self.folder), write=False) as s:
+                self.assertEqual(proof.evidence(s, s.find(1))["auto_accept"], {"on": True})

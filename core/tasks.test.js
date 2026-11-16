@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { place, queueReason, reportOf, estimated, order, ago, autoPrefix, refOf, taskKey, matches, busyAgain, secondLine, leftOf, ORDER, STATUS, WORKING_AGAIN, GRACE_MS, fromLine, autoWhere, inSpace, holdingItems } from "./tasks.js";
+import { place, queueReason, reportOf, estimated, order, ago, autoPrefix, refOf, taskKey, matches, busyAgain, secondLine, leftOf, ORDER, STATUS, WORKING_AGAIN, GRACE_MS, fromLine, autoWhere, inSpace, holdingItems, AUTO_ACCEPTING, autoArmed, autoAcceptOn, autoAcceptStopped } from "./tasks.js";
 import { REASONS, fit } from "./needs.js";
 
 const NOW = 1_800_000_000_000;
@@ -240,5 +240,35 @@ describe("Needs-you items the task's own status has moved past (SHEP-195)", () =
     const done = at({ id: 3, state: "done" });
     const items = [item("check", { ref: "X-9" }), item("blocked", { terminal: "t1" }), item("provider")];
     expect(holdingItems(items, truthOf(done))).toHaveLength(3);
+  });
+});
+
+describe("auto-accept (SHEP-3), as herdr-task's auto_armed()", () => {
+  const ready = { id: 1, state: "ready", ready_at: NOW - 60_000, auto_accept: { at: NOW - 3_600_000 } };
+  test("on and Ready: Working, accepting by itself, until the tick takes it (never Ready, no Review)", () => {
+    expect(at(ready)).toMatchObject({ section: "working", why: AUTO_ACCEPTING });
+    expect(autoArmed(ready)).toBe(true);
+    // its checks still running say so first: it isn't the person's call yet either way
+    expect(at({ ...ready, pr: { number: 3, wait: "Checks running" } }).why).toBe("Checks running");
+    // a question or a problem still needs the person
+    expect(at({ ...ready, attention: "Checks failing: test", attention_at: NOW - 600_000 }).section).toBe("needs");
+    expect(at(ready, [{ address: "t1", status: "blocked" }]).section).toBe("needs");
+  });
+  test("tried for this ready, or accepted since: no longer armed", () => {
+    const failed = { ...ready, auto_accept: { at: 1, tried: ready.ready_at, failed: "hc send to t9 failed" } };
+    expect(autoArmed(failed)).toBe(false);
+    expect(at(failed).section).toBe("ready"); // the person's Review now
+    expect(autoAcceptStopped(failed)).toBe("hc send to t9 failed");
+    expect(secondLine(at(failed), null, null, NOW)).toBe("Auto-accept stopped: hc send to t9 failed");
+    expect(autoArmed({ ...ready, accepted_at: NOW })).toBe(false);
+    // said ready again since: armed again
+    expect(autoArmed({ ...failed, ready_at: NOW })).toBe(true);
+  });
+  test("off, or not Ready: everything as before", () => {
+    expect(at({ ...ready, auto_accept: undefined }).section).toBe("ready");
+    expect(autoArmed({ ...ready, state: "running" })).toBe(false);
+    expect(autoAcceptOn({ ...ready, state: "running" })).toBe(true);
+    expect(autoAcceptOn({ ...ready, state: "done" })).toBe(false);
+    expect(autoAcceptOn({ id: 1, state: "running" })).toBe(false);
   });
 });

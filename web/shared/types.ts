@@ -307,6 +307,9 @@ export interface Task {
   startsAt?: number
   /** Ready, its accept under way from the window's Accept card: its row and header say "Accepting…" */
   accepting?: boolean
+  /** SHEP-3: Accept when ready is on (herdr-task auto-accept): accepted by itself once it is Ready; failed: why its try
+   *  stopped (it waits for the person's Accept then) */
+  autoAccept?: { on: true; failed?: string }
   /** still Working, its turn over: what Shepherdr itself knows it waits for */
   waitsFor?: 'review'
   age: string
@@ -1295,6 +1298,8 @@ export type Action =
   /** SHEP-38: start a task that hasn't started by itself later (herdr-task edit --at / --in, the words as typed), take that
    *  back (off: back to To do) or start a scheduled one now */
   | { type: 'schedule'; chat: string; at?: string; in?: string; off?: boolean; now?: boolean }
+  /** SHEP-3: Accept when ready on (true) or off for this task (herdr-task auto-accept) */
+  | { type: 'auto-accept'; chat: string; on: boolean }
   /** delete a task: its agent, herdr space, worktree, branch, chat and record; refused while it holds work, unless force */
   | { type: 'delete'; chat: string; force?: boolean }
   /** forget a space (shepherdr space remove): its folder and code stay on disk, its coordinator closes, and its open

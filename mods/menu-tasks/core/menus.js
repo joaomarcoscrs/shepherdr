@@ -44,21 +44,36 @@ export const sectionMenu = () => [
   { id: "delete", label: "Delete", icon: "trash-2" },
 ];
 
-// A task row's menu (the Tasks panel): its pin; a task not started yet (status: todo, queued or scheduled, SHEP-38) also
+// A task row's menu (the Tasks panel): its pin; Accept when ready (below) until it is done; a task not started yet (status: todo, queued or scheduled, SHEP-38) also
 // starts by itself later: a few times to pick (herdr-task edit's --in or --at words), Other time… (typed: the web's), and
 // a scheduled one Start now and Unschedule. A heading item has no id.
 export const SCHEDULE_PICKS = [
   { label: "In 1 hour", in: "1h" }, { label: "In 3 hours", in: "3h" },
   { label: "Tomorrow 9:00", at: "tomorrow 9:00" }, { label: "Monday 9:00", at: "mon 9:00" },
 ];
-export const taskMenu = ({ pinned = false, status = null } = {}) => {
+// Accept when ready (SHEP-3): the person's Accept given ahead for this one task (herdr-task auto-accept). On (a check
+// beside it), the task is accepted by itself once it is Ready, as their Accept would: merged first, GitHub's checks,
+// approvals and conflicts still deciding. Offered until it is done; on a Ready task (Review is right there) only to turn
+// it off. A pick turns it on or off; its note says what it does. AUTO_ACCEPT: its words, here and on the task's row.
+export const AUTO_ACCEPT = {
+  label: "Accept when ready",
+  note: "Merges it by itself once it's Ready. Checks still apply.",
+  badge: "Auto-accept",
+  stopped: "Auto-accept stopped",
+  on: "Auto-accept is on",
+  off: "Auto-accept is off",
+};
+export const autoAcceptOffered = (status, on = false) => ["todo", "queued", "scheduled", "working", "needs"].includes(status) || (status === "ready" && on);
+export const taskMenu = ({ pinned = false, status = null, autoAccept = false } = {}) => {
   const later = ["todo", "queued", "scheduled"].includes(status);
+  const auto = autoAcceptOffered(status, autoAccept);
   return [
     ...(later ? [{ heading: status === "scheduled" ? "Reschedule" : "Start later" },
       ...SCHEDULE_PICKS.map((p) => ({ id: "schedule", icon: "clock", ...p })),
       { id: "schedule-other", label: "Other time…", icon: "clock", typed: true }] : []),
     ...(status === "scheduled" ? [sep, { id: "start-now", label: "Start now", icon: "play" }, { id: "unschedule", label: "Unschedule", icon: "x" }] : []),
     ...(later ? [sep] : []),
+    ...(auto ? [{ id: "auto-accept", label: AUTO_ACCEPT.label, icon: "circle-check", check: !!autoAccept, note: AUTO_ACCEPT.note }, sep] : []),
     pinned ? { id: "unpin", label: "Unpin", icon: "pin-off" } : { id: "pin", label: "Pin", icon: "pin" },
   ];
 };

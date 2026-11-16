@@ -553,6 +553,38 @@
       ]
     },
     {
+      "id": "auto-accept",
+      "addon": "tasks",
+      "title": "Accept when ready",
+      "core": [
+        "menus",
+        "tasks",
+        "accept"
+      ],
+      "herdr": {
+        "mods": [
+          "tasks",
+          "tasks-menu",
+          "accept-card"
+        ]
+      },
+      "web": {
+        "files": [
+          "plugins/tasks/client.tsx",
+          "src/screens/Accept.tsx"
+        ]
+      },
+      "forms": {
+        "herdr": "Row menu: Accept when ready (a check, a note); Auto-accept mark on the row; herdr-task auto-accept",
+        "desktop": "Row or task ⋯ menu: Accept when ready; mark on the row",
+        "tablet": "Long-press: the same item",
+        "phone": "Long-press sheet: the same item"
+      },
+      "service": [
+        "actions.ts"
+      ]
+    },
+    {
       "id": "assistant",
       "addon": "assistants",
       "title": "Assistant per space",

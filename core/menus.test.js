@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { spaceMenu, addMenu, machineMenu, sectionMenu, taskMenu, machineLabel, tabMenu, appMenu, assistantRow, agentChoices, agentHint, tabName, endAgent, NEW_MENU, SWITCH_AGENT } from "./menus.js";
+import { spaceMenu, addMenu, machineMenu, sectionMenu, taskMenu, AUTO_ACCEPT, autoAcceptOffered, machineLabel, tabMenu, appMenu, assistantRow, agentChoices, agentHint, tabName, endAgent, NEW_MENU, SWITCH_AGENT } from "./menus.js";
 
 const words = (list) => list.map((x) => (x.sep ? "—" : x.label));
 
@@ -21,9 +21,9 @@ test("the sidebar's other menus and a task row's", () => {
   expect(words(taskMenu({ pinned: true }))).toEqual(["Unpin"]);
   // SHEP-38: a task not started yet starts later; a scheduled one is rescheduled, started now or unscheduled
   const later = (m) => m.map((x) => x.sep ? "—" : x.heading ? `# ${x.heading}` : x.label);
-  expect(later(taskMenu({ status: "todo" }))).toEqual(["# Start later", "In 1 hour", "In 3 hours", "Tomorrow 9:00", "Monday 9:00", "Other time…", "—", "Pin"]);
-  expect(later(taskMenu({ status: "scheduled", pinned: true }))).toEqual(["# Reschedule", "In 1 hour", "In 3 hours", "Tomorrow 9:00", "Monday 9:00", "Other time…", "—", "Start now", "Unschedule", "—", "Unpin"]);
-  expect(later(taskMenu({ status: "working" }))).toEqual(["Pin"]);
+  expect(later(taskMenu({ status: "todo" }))).toEqual(["# Start later", "In 1 hour", "In 3 hours", "Tomorrow 9:00", "Monday 9:00", "Other time…", "—", "Accept when ready", "—", "Pin"]);
+  expect(later(taskMenu({ status: "scheduled", pinned: true }))).toEqual(["# Reschedule", "In 1 hour", "In 3 hours", "Tomorrow 9:00", "Monday 9:00", "Other time…", "—", "Start now", "Unschedule", "—", "Accept when ready", "—", "Unpin"]);
+  expect(later(taskMenu({ status: "working" }))).toEqual(["Accept when ready", "—", "Pin"]);
   expect(machineLabel(null)).toBe("This computer");
   expect(machineLabel("vm", "Build box")).toBe("Build box");
 });
@@ -52,4 +52,20 @@ test("the + menu's words: the Assistant's row, the agents it offers, and a tab's
 
 test("the app menu: New space, Keybinds, then the window's themes", () => {
   expect(words(appMenu())).toEqual(["New space", "—", "Keybinds", "—", "Theme: Graphite", "Theme: Ink", "Theme: Moss", "Theme: Atom One Dark"]);
+});
+
+test("SHEP-3: Accept when ready, until a task is done; on a Ready one only to turn it off", () => {
+  const auto = (o) => taskMenu(o).find((x) => x.id === "auto-accept") ?? null;
+  for (const status of ["todo", "queued", "scheduled", "working", "needs"]) {
+    expect(auto({ status })).toMatchObject({ label: "Accept when ready", check: false, note: AUTO_ACCEPT.note });
+    expect(auto({ status, autoAccept: true }).check).toBe(true);
+  }
+  // Ready: Review is right there (its Accept card shows what you approve); a Ready task with it on can turn it off
+  expect(auto({ status: "ready" })).toBe(null);
+  expect(auto({ status: "ready", autoAccept: true }).check).toBe(true);
+  expect(auto({ status: "done" })).toBe(null);
+  expect(auto({ status: null })).toBe(null); // an archived task's menu
+  expect(autoAcceptOffered("working")).toBe(true);
+  // its note says what it does, in plain words
+  expect(AUTO_ACCEPT.note).toBe("Merges it by itself once it's Ready. Checks still apply.");
 });

@@ -15,7 +15,7 @@ from .agents import LINE_MAX, SUMMARY_MAX
 from .launch import cmd_allow, name_tabs
 from .shared import cmd_shared_read
 from .commands import (
-    cmd_accept, cmd_add, cmd_alert, cmd_config, cmd_edit, cmd_fix, cmd_list, cmd_merge, cmd_ready,
+    cmd_accept, cmd_add, cmd_alert, cmd_auto_accept, cmd_config, cmd_edit, cmd_fix, cmd_list, cmd_merge, cmd_ready,
     cmd_resume, cmd_review, cmd_review_more, cmd_reviewed, cmd_rm, cmd_show, cmd_start, cmd_state, cmd_status,
     cmd_switch, cmd_unarchive, cmd_where,
 )
@@ -282,6 +282,9 @@ def main():
     c = cmd("accept", cmd_accept, "the person's Accept on a Ready task: merges first when there is something to merge, then done")
     agent_opts(c)
     c.add_argument("--space")
+    c = cmd("auto-accept", cmd_auto_accept, "the person's Accept given ahead for one task: accepted (merged first) by "
+            "itself once it is Ready, with Accept's own checks; --off takes it back (never from the task's own agents)")
+    c.add_argument("--off", action="store_true", help="take it back: the task waits for the person's Accept again")
     cmd("reopen", lambda a: cmd_state(a, "reopen"), "undo done or ready; a queued or scheduled task goes back to to do")
     cmd("unarchive", cmd_unarchive, "bring an archived task back into its list (only when the person asks; writing to it does too)")
     c = cmd("edit", cmd_edit, "change a task")

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { ACCEPT, acceptLabel, words, readable, whereNow, commitsLine, filesLine, moreLine, proofTitle } from "./accept.js";
+import { ACCEPT, acceptLabel, autoNote, words, readable, whereNow, commitsLine, filesLine, moreLine, proofTitle } from "./accept.js";
 
 const root = join(import.meta.dir, "..");
 const read = (p) => readFileSync(join(root, p), "utf8");
@@ -46,4 +46,11 @@ test("the window's card and the web's read their words from here, not their own"
     expect(mod).not.toContain(w);
     expect(web).not.toContain(w);
   }
+});
+
+test("SHEP-3: a stopped auto-accept says why over the summary; on and fine says nothing", () => {
+  expect(autoNote({ auto_accept: { on: true, failed: "hc send to t9 failed" } })).toBe("Auto-accept stopped: hc send to t9 failed. It waits for your Accept.");
+  expect(autoNote({ auto_accept: { on: true, failed: "Checks failing: test." } })).toBe("Auto-accept stopped: Checks failing: test. It waits for your Accept.");
+  expect(autoNote({ auto_accept: { on: true } })).toBe(null);
+  expect(autoNote({})).toBe(null);
 });
