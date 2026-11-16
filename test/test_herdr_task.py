@@ -4450,7 +4450,8 @@ class AssistantSettings(unittest.TestCase):
         # nothing differs from Herdr's default: no line says who set it
         self.assertNotIn("; set for", note)
         self.assertNotIn("; your setting", note)
-        self.assertEqual(len(note.split("\n")), 15)  # head, 13 lines (Suggested next message, Accept when ready), the Reactions guide
+        self.assertEqual(len(note.split("\n")), 16)  # head, 14 lines (Suggested next message, Accept when ready, Delivery), the Reactions guide
+        self.assertIn("- Delivery: merge (a Ready task is merged as Merge says)\n", note)
         self.assertIn("- Suggested next message: on (end each reply", note)
 
     def test_the_block_for_a_space_with_its_own(self):
@@ -4478,7 +4479,7 @@ class AssistantSettings(unittest.TestCase):
         labels = self.terminals["t5"]["labels"]
         self.assertEqual(labels["herdr.reactions"], "off")
         self.assertEqual(sorted(self.aset.parse(labels["herdr.settings"])),
-                         sorted(["review", "merge", "auto_accept", "proof", "agent", "base", "worktrees", "max_running", "notes", "autopilot", "reactions", "suggestions", "feedback"]))
+                         sorted(["review", "merge", "auto_accept", "delivery", "proof", "agent", "base", "worktrees", "max_running", "notes", "autopilot", "reactions", "suggestions", "feedback"]))
         # another space inherits Everywhere's, with its own merge
         self.assistant("t6", "sp2")
         other = self.aset.session_note("t6")
@@ -4579,6 +4580,24 @@ class AssistantSettings(unittest.TestCase):
         self.aset.settings_pass({}, {})
         self.assertEqual(len(self.sent), 1)
         self.assertIn('name="merge" value="auto"', self.sent[0][1])
+
+    def test_delivery_line_new_since_is_no_change_until_a_space_sets_it(self):
+        """SHEP-7: an Assistant told its settings before Delivery existed isn't sent a notice for the new line while it says
+        Herdr's default (Merge); a space setting Open PR tells it once, in its own words."""
+        self.assistant()
+        self.aset.session_note("t5")
+        labels = self.terminals["t5"]["labels"]
+        labels["herdr.settings"] = ",".join(x for x in labels["herdr.settings"].split(",") if not x.startswith("delivery:"))
+        self.write({})
+        self.aset.settings_pass({}, {})
+        self.assertEqual(self.sent, [])
+        self.assertIn("delivery:", self.terminals["t5"]["labels"]["herdr.settings"])  # noted, quietly
+        self.write({"spaces": {"sp1": {"tasks": {"delivery": "open_pr", "pr_assign": "joao", "pr_review": "jarbas-local"}}}})
+        self.aset.settings_pass({}, {})
+        self.assertEqual(len(self.sent), 1)
+        self.assertRegex(self.sent[0][1], r'^<herdr-setting name="delivery" value="open_pr" scope="space">Delivery is now open PR \(each '
+                                          r"task's ready opens its pull request, assigns it to @joao, waits for Jarbas Local's approval of "
+                                          r"its exact head and hands it to the person, never merged")
 
     def test_chat_tags_hide_the_message(self):
         """Every line is one <herdr-…> tag: the chat shows nothing of it (core/chat-log.js strips Herdr's tags)."""

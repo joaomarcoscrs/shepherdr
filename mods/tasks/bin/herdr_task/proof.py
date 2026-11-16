@@ -111,7 +111,7 @@ def evidence(s, t):
     out["artifacts"] = task_artifacts(s, t, out["proof"])
     # SHEP-7: an Open PR task's hand-off: its pull request, who it's assigned to, its approval for the exact head
     # (read again: still the pull request's head?), or why it was handed off blocked. Accept takes it, never merging.
-    handoff = open_pr(t) and t.get("mode") == "worktree"
+    handoff = open_pr(t) and t.get("mode") == "worktree" and bool(t.get("handoff"))
     if handoff:
         from .delivery import status
         out["delivery"] = "open_pr"

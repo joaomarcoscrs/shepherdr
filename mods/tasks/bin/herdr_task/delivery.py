@@ -125,6 +125,8 @@ def handoff_gate(s, t, dv, wt, summary, blocked=None):
     from .github import github, github_unreachable, pr_open
     h = dict(t.get("handoff") or {})
     h.update(review=dv["review"], at=now())
+    for k in ("verdict", "comment", "assigned"):
+        h.pop(k, None)  # read again for this head: an older head's verdict never stands for it
     if blocked:
         h["blocked"] = " ".join(str(blocked).split())[:300]
     else:
@@ -169,7 +171,10 @@ def handoff_gate(s, t, dv, wt, summary, blocked=None):
     if v is None:
         return None if blocked else "Couldn't read its review on GitHub just now. Run ready again in a moment."
     h["verdict"], h["comment"] = v.get("verdict"), v.get("url")
-    if h["verdict"] == "APPROVED" or blocked:
+    if h["verdict"] == "APPROVED":
+        h.pop("blocked", None)  # approved after all: handed off as approved
+        return None
+    if blocked:
         return None
     name, url = GATE_NAMES.get(dv["review"], dv["review"]), pr.get("url") or f"#{pr['number']}"
     if h["verdict"]:
