@@ -2780,7 +2780,9 @@ export default class Chat extends View {
         openOverlay({ mod: "chat-models", kind: "popup", frame: "none", width: W, height: H,
           at: at ? { x: Math.max(8, at.x - W + 90), y: Math.max(8, at.y - H - 10) } : "pointer",
           props: { pane: this.pickKey(), offline, width: W, height: H, select: name ? findModel(menus, name) : null,
-            current: { agent: c.agent, model: currentRow, effort: c.effort ?? null, fast: c.fast, perm: c.perm ?? null },
+            // chat: Cursor runs behind its chat bridge here (herdr-task cursor-chat): its model can switch in place (/model)
+            current: { agent: c.agent, model: currentRow, effort: c.effort ?? null, fast: c.fast, perm: c.perm ?? null,
+              ...(c.agent === "cursor" && agent.isCursorChat(this.argv) ? { chat: true } : {}) },
             menus, icons, permDefault: { claude: dflts.claude?.mode ?? "manual", codex: "auto", cursor: "manual" } } });
       } finally {
         this.picking = false;
