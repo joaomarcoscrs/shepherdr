@@ -27,6 +27,11 @@ export const ACCEPT = {
   acceptMerge: "Accept and merge",
   accepting: "Accepting…",
   noTask: "No task to accept.",
+  tryIt: "Try it",
+  pullRequest: (n) => `Pull request #${n}`,
+  github: "GitHub",
+  environment: "Ephemeral environment",
+  onGitHub: "On GitHub",
 };
 
 // The Accept button's words (SHEP-225, #1046): what pressing it will do. herdr-task's evidence says `merges` when its
@@ -105,4 +110,30 @@ export function readable(text) {
     else items.push(x);
   }
   return items.length < 2 ? codify(s) : items.map((x) => `- ${codify(x)}`).join("\n");
+}
+
+// SHEP-4: a Roboflow task's ephemeral environment (herdr-task's evidence.ephemeral, read from featur's check on its
+// pull request: mods/tasks/bin/herdr_task/ephemeral.py), in words: { text, tone }. Only "ready" comes with a link to
+// open; tone colors its dot: ready (green), work (amber), need (red), muted (no dot).
+const left = (ms) => {
+  const h = ms / 3600000;
+  return h >= 48 ? plural(Math.floor(h / 24), "more day") : h >= 2 ? plural(Math.floor(h), "more hour") : plural(Math.max(1, Math.floor(ms / 60000)), "more minute");
+};
+export function ephemeralWords(e, now = Date.now()) {
+  const phase = String(e?.phase ?? "").trim();
+  switch (e?.state) {
+    case "ready": return { text: e.expires ? `Ready for ${left(e.expires - now)}` : "Ready", tone: "ready" };
+    // featur's phase: "Building", "HealthChecking" -> "health checking"
+    case "starting": return { text: phase ? `Not ready yet (${phase.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase()})` : "Asked for, not started yet", tone: "work" };
+    // its title says only "Environment failed": the check on GitHub says why
+    case "failed": return { text: "Failed to start", tone: "need" };
+    case "gone": return {
+      text: e.why === "closed" ? "Torn down, as its pull request is closed"
+        : e.why === "unlabelled" ? "Being torn down, as its label was taken off"
+        : e.why === "expired" ? "Torn down, as its time ran out" : "Torn down",
+      tone: "muted",
+    };
+    case "none": return { text: "None for this pull request", tone: "muted" };
+    default: return { text: e?.why === "link" ? "Its link isn't this pull request's, so it isn't shown" : "Couldn't ask GitHub about it", tone: "need" };
+  }
 }

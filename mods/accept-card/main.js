@@ -5,7 +5,8 @@
 // short summary first, then small sections: Changes (commits, files), Checks, Proof (opens its
 // proof artifact in a modal of a fitting size over this card: the artifact viewer's toolbar,
 // mods/chat-image's bar, over the artifact's mod) and a folded Details with the agent's long
-// text, as short markdown bullets.
+// text, as short markdown bullets. A Roboflow task's card starts with Try it (SHEP-4): its pull request and its
+// ephemeral environment, linked only once featur's check says it is Ready, else where it stands.
 // Accept runs `herdr-task accept` (merges first when there is something to merge); Cancel, the X
 // and Esc close it. A task that isn't Ready (accepted from elsewhere a moment ago, say) says so
 // calmly, with only Close.
@@ -17,7 +18,7 @@ import { appHome, closeOverlay, exec, notify, openOverlay, props, shared, setSha
 import { note } from "./usage.js";
 import { dialogFooter, green, red, amber, H, RADIUS, TEXT } from "./ui.js";
 // The card's words, the summary cut and the details as bullets: core/accept.js, shared with the web app's card.
-import { ACCEPT, acceptLabel, words, readable, commitsLine, filesLine, moreLine, proofTitle, whereNow } from "./core/accept.js";
+import { ACCEPT, acceptLabel, words, readable, commitsLine, filesLine, moreLine, proofTitle, whereNow, ephemeralWords } from "./core/accept.js";
 import { settle } from "./core/pending.js";
 
 export { words, readable };
@@ -260,6 +261,37 @@ export default class AcceptCard extends View {
       .child(svg("mods/chat-image/external-link.svg").size(13).flex_none().text_color(t.muted));
   }
 
+  // Try it (SHEP-4, a Roboflow task): its pull request, then its ephemeral environment: a link only once featur's check
+  // says Ready on its head (herdr-task's evidence), else where it stands, with its check on GitHub when there is one.
+  tryIt(t, e) {
+    const env = e.ephemeral, w = ephemeralWords(env);
+    const dot = { ready: green(), work: amber(), need: red() }[w.tone];
+    const status = h_flex().gap(8).items_center().flex_wrap().min_w(0)
+      .when(Boolean(dot), (el) => el.child(div().size(7).flex_none().rounded(4).bg(dot)))
+      .child(div().text_color(t.muted).child(ACCEPT.environment))
+      .child(div().text_color(t.dim).child("·"))
+      .child(div().text_color(w.tone === "muted" ? t.muted : t.foreground).child(w.text))
+      .when(env.state !== "ready" && Boolean(env.check_url), (el) => el.child(h_flex().id("eph-check").gap(4).items_center()
+        .text_size(TEXT.label).text_color(t.muted).cursor_pointer().hover((s) => s.text_color(t.foreground))
+        .on_click((_e, cx) => { cx.stop_propagation(); cx.open_url(env.check_url); })
+        .child(div().child(ACCEPT.onGitHub))
+        .child(svg("mods/chat-image/external-link.svg").size(12).flex_none())));
+    return v_flex().w_full().gap(6)
+      .when(Boolean(e.pr?.url), (el) => el.child(this.linkRow(t, "open-pr", ACCEPT.pullRequest(e.pr.number), ACCEPT.github, e.pr.url)))
+      .when(env.state === "ready" && Boolean(env.url), (el) => el.child(this.linkRow(t, "open-eph", env.host ?? env.url, ACCEPT.open, env.url)))
+      .child(status);
+  }
+
+  // A link out (its pull request, its environment), as an artifact's row: opens in the browser.
+  linkRow(t, id, label, action, url) {
+    return h_flex().id(id).w_full().h(32).px(10).gap(8).items_center().rounded(RADIUS.card)
+      .border_1().border_color(t.border).bg(t.surface).cursor_pointer().hover((s) => s.bg(t.hover))
+      .on_click((_e, cx) => { cx.stop_propagation(); cx.open_url(url); })
+      .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(label))
+      .child(div().flex_none().text_size(TEXT.label).text_color(t.muted).child(action))
+      .child(svg("mods/chat-image/external-link.svg").size(13).flex_none().text_color(t.muted));
+  }
+
   // Details: folded; its header is the toggle, the long text below it selectable.
   detailsSection(t, text) {
     const open = this.details;
@@ -302,6 +334,7 @@ export default class AcceptCard extends View {
       : v_flex().w_full().gap(16).pb(4)
         .child(div().max_w(560).text_size(TEXT.body).line_height("20px").text_color(w.summary ? t.foreground : t.muted)
           .child(w.summary || ACCEPT.noSummary))
+        .when(Boolean(e.ephemeral), (el) => el.child(this.section(t, ACCEPT.tryIt, this.tryIt(t, e))))
         .child(this.section(t, ACCEPT.changes, this.changes(t, e)))
         .child(this.section(t, ACCEPT.checks, this.checks(t, e)))
         .child(this.section(t, ACCEPT.proof, this.proof(t, e)))

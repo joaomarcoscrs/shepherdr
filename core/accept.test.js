@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { ACCEPT, acceptLabel, words, readable, whereNow, commitsLine, filesLine, moreLine, proofTitle } from "./accept.js";
+import { ACCEPT, acceptLabel, words, readable, whereNow, commitsLine, filesLine, moreLine, proofTitle, ephemeralWords } from "./accept.js";
 
 const root = join(import.meta.dir, "..");
 const read = (p) => readFileSync(join(root, p), "utf8");
@@ -46,4 +46,25 @@ test("the window's card and the web's read their words from here, not their own"
     expect(mod).not.toContain(w);
     expect(web).not.toContain(w);
   }
+});
+
+test("SHEP-4: a Roboflow task's environment in words; only Ready reads as ready", () => {
+  const now = Date.UTC(2026, 10, 16, 18);
+  expect(ephemeralWords({ state: "ready", url: "https://pr-1.eph.roboflow.one", expires: now + 71 * 3600000 }, now)).toEqual({ text: "Ready for 2 more days", tone: "ready" });
+  expect(ephemeralWords({ state: "ready", expires: now + 5 * 3600000 }, now).text).toBe("Ready for 5 more hours");
+  expect(ephemeralWords({ state: "ready", expires: now + 20 * 60000 }, now).text).toBe("Ready for 20 more minutes");
+  expect(ephemeralWords({ state: "ready" }, now).text).toBe("Ready");
+  expect(ephemeralWords({ state: "starting", phase: "Building" })).toEqual({ text: "Not ready yet (building)", tone: "work" });
+  expect(ephemeralWords({ state: "starting", phase: null }).text).toBe("Asked for, not started yet");
+  expect(ephemeralWords({ state: "starting", phase: "HealthChecking" }).text).toBe("Not ready yet (health checking)");
+  // a real failed check's title (roboflow/roboflow#19466)
+  expect(ephemeralWords({ state: "failed", phase: "Environment failed" })).toEqual({ text: "Failed to start", tone: "need" });
+  expect(ephemeralWords({ state: "gone", why: "closed" }).text).toBe("Torn down, as its pull request is closed");
+  expect(ephemeralWords({ state: "gone", why: "unlabelled" }).text).toBe("Being torn down, as its label was taken off");
+  expect(ephemeralWords({ state: "gone", why: "expired" }).text).toBe("Torn down, as its time ran out");
+  expect(ephemeralWords({ state: "gone", phase: "Environment destroyed" })).toEqual({ text: "Torn down", tone: "muted" });
+  expect(ephemeralWords({ state: "none" })).toEqual({ text: "None for this pull request", tone: "muted" });
+  expect(ephemeralWords({ state: "unknown" })).toEqual({ text: "Couldn't ask GitHub about it", tone: "need" });
+  expect(ephemeralWords({ state: "unknown", why: "link" }).tone).toBe("need");
+  for (const s of ["starting", "failed", "gone", "none", "unknown"]) expect(ephemeralWords({ state: s }).tone).not.toBe("ready");
 });

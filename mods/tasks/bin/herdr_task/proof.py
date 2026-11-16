@@ -8,6 +8,7 @@ import os
 import re
 
 from .base import Fail, HOME, git, WHERE
+from .ephemeral import applies, ephemeral_of
 from .github import BAD, CANT_READ_CHECKS, PENDING, pr_view
 
 ARTIFACTS = WHERE.path("artifacts")
@@ -99,9 +100,14 @@ def checks_of(t):
 def evidence(s, t):
     """What an Accept card shows: {summary, details, commits: {count, list}, diff: {files, added, removed,
     list} or None, git (False: not a git folder), scope, checks, proof, artifacts (its others), merges (Accept
-    merges its branch first: an open pull request or commits past its base; the button says so)}."""
+    merges its branch first: an open pull request or commits past its base; the button says so), and for a Roboflow
+    task only, pr {number, url} and ephemeral (ephemeral.py)}."""
     main, out = s.loc["folder"], {"summary": t.get("summary"), "details": t.get("details"), "proof": t.get("proof") or find_proof(s, t)}
     out["artifacts"] = task_artifacts(s, t, out["proof"])
+    if applies(t):
+        # SHEP-4: a Roboflow task's pull request and its ephemeral environment, to try it by hand (other tasks: unchanged)
+        out["pr"] = {"number": t["pr"]["number"], "url": t["pr"].get("url")}
+        out["ephemeral"] = ephemeral_of(t)
     commits, files = [], {}
     fmt = "--format=%h%x09%s"
     if s.loc["kind"] != "repo":

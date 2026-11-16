@@ -1,5 +1,6 @@
 // The Accept card (Shepherdr 3's mods/accept-card), in 2.1's dialog: what the person approves before a Ready task
-// merges. Its summary, then Changes (commits and files), Checks, Proof and folded Details, all from
+// merges. Its summary, then Try it (a Roboflow task's pull request and ephemeral environment, SHEP-4), Changes (commits
+// and files), Checks, Proof and folded Details, all from
 // `herdr-task show --evidence`; Accept runs `herdr-task accept`, which merges first when there is something to merge.
 // A task no longer Ready says where it is now, with only Close. On a phone it slides up as a sheet.
 // With a proof (SHEP-138) the card grows large and the proof shows right in it, drawn as the artifact viewer draws it
@@ -28,6 +29,9 @@ type Evidence = {
   checks?: { state: 'passed' | 'failed' | 'running' | 'none' | 'unknown'; text: string }
   /** Accept merges its branch first (it has work to merge): the button says "Accept and merge" */
   merges?: boolean
+  /** SHEP-4, a Roboflow task only: its pull request and its ephemeral environment (url only once featur says Ready) */
+  pr?: { number: number; url?: string }
+  ephemeral?: { state: string; phase?: string | null; url?: string; host?: string; expires?: number; check_url?: string; why?: string }
 }
 type Shown = { ref: string; title: string; state: string; status_text?: string; accepted_at?: number; evidence?: Evidence }
 
@@ -44,6 +48,7 @@ const setAccepting = (task: string, on: boolean) => { if (on) accepting.add(task
 export const useAccepting = (task: string) => useSyncExternalStore((f) => { listeners.add(f); return () => listeners.delete(f) }, () => accepting.has(task))
 
 const CHECK = { passed: 'bg-ready', failed: 'bg-need', running: 'bg-work', unknown: 'bg-need', none: '' } as const
+const TONE: Record<string, string> = { ready: 'bg-ready', work: 'bg-work', need: 'bg-need' }
 
 function Section({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -125,6 +130,42 @@ function ArtifactRow({ a }: { a: { id: string; title: string } }) {
   )
 }
 
+// A link out (its pull request, its environment), as an artifact's row: opens in a new tab
+function LinkRow({ href, label, action }: { href: string; label: string; action: string }) {
+  return (
+    <a href={href} target="_blank" rel="noreferrer noopener" className="press-dim flex h-9 w-full items-center gap-2 rounded-[var(--row-radius)] bg-well px-2.5 text-left shadow-soft hover:bg-hover phone:h-11">
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      <span className="shrink-0 text-xs text-fg3">{action}</span>
+      <OpenIcon className="size-3.5 shrink-0 text-fg3" />
+    </a>
+  )
+}
+
+// SHEP-4: Try it, for a Roboflow task: its pull request, then its ephemeral environment: a link only once featur's
+// check says Ready on its head, else where it stands (and its check on GitHub, when there is one)
+function TryIt({ e }: { e: Evidence }) {
+  const env = e.ephemeral!
+  const w = A.ephemeralWords(env) as { text: string; tone: string }
+  return (
+    <div className="flex min-w-0 flex-col gap-1.5">
+      {e.pr?.url ? <LinkRow href={e.pr.url} label={A.ACCEPT.pullRequest(e.pr.number)} action={A.ACCEPT.github} /> : null}
+      {env.state === 'ready' && env.url ? <LinkRow href={env.url} label={env.host ?? env.url} action={A.ACCEPT.open} /> : null}
+      <p className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
+        {TONE[w.tone] ? <span className={clsx('size-[7px] shrink-0 rounded-full', TONE[w.tone])} /> : null}
+        <span className="text-fg3">{A.ACCEPT.environment}</span>
+        <span className="text-fg3">·</span>
+        <span className={clsx(w.tone === 'muted' && 'text-fg3')}>{w.text}</span>
+        {env.state !== 'ready' && env.check_url ? (
+          <a href={env.check_url} target="_blank" rel="noreferrer noopener" className="flex items-center gap-1 text-xs text-fg3 hover:text-fg phone:text-[0.8125rem]">
+            {A.ACCEPT.onGitHub}
+            <OpenIcon className="size-3 shrink-0" />
+          </a>
+        ) : null}
+      </p>
+    </div>
+  )
+}
+
 export function AcceptCard() {
   const task = useOpen()
   const named = useStore((s) => (task && s.snap ? taskOf(s.snap, task)?.name : undefined))
@@ -175,6 +216,7 @@ export function AcceptCard() {
   // what follows the summary (and the proof, when it shows in the card)
   const rest = (
     <>
+      {e.ephemeral ? <Section label={A.ACCEPT.tryIt}><TryIt e={e} /></Section> : null}
       <Section label={A.ACCEPT.changes}><Changes e={e} /></Section>
       <Section label={A.ACCEPT.checks}>
         <p className="flex items-center gap-2">
