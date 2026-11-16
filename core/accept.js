@@ -30,7 +30,7 @@ export const ACCEPT = {
   tryIt: "Try it",
   pullRequest: (n) => `Pull request #${n}`,
   github: "GitHub",
-  environment: "Ephemeral environment",
+  environment: "Ephemeral",
   onGitHub: "On GitHub",
 };
 
