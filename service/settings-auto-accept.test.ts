@@ -7,7 +7,7 @@ import { built, byId, dispatch, element, fakeGpuiBase, fakeGpuiKit } from "./fak
 
 mock.module("gpui-kit", () => fakeGpuiKit());
 mock.module("gpui-base", () => fakeGpuiBase());
-mock.module("herdr", () => fakeHerdr({ theme: () => new Proxy({}, { get: () => "#000" }), home: () => "/home/me", machines: () => [],
+mock.module("herdr", () => fakeHerdr({ theme: () => new Proxy({}, { get: () => "#000" }), home: () => "/srv/me", machines: () => [],
   spaces: () => [], props: () => ({}), shared: () => undefined, exec: async () => ({ code: 1, stdout: "", stderr: "" }),
   readTextFile: async () => null }));
 const { default: ShepherdrSettings } = await import("../mods/shepherdr-settings/main.js");
@@ -41,7 +41,7 @@ test("Everywhere: off by default, says which spaces set their own", () => {
 });
 
 test("joão HQ's own: on, set for this space with a Reset; another space inherits Everywhere's off", () => {
-  const cfg = { everywhere: {}, spaces: { [HQ]: { folder: "/home/me", tasks: { auto_accept: true } }, spB: { folder: "/home/me" } } };
+  const cfg = { everywhere: {}, spaces: { [HQ]: { folder: "/srv/me", tasks: { auto_accept: true } }, spB: { folder: "/srv/me" } } };
   const hq = page(cfg, HQ);
   expect(on("auto-accept")).toBe(true);
   expect(hq.row.sc).toMatchObject({ mine: true, from: "Inherited from Everywhere" });

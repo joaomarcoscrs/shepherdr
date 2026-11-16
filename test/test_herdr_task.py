@@ -6512,7 +6512,7 @@ class SpaceAutoAccept(unittest.TestCase):
     def hq_on(self, everywhere=None):
         """The person's choice: on for joão HQ only (its own layer by its id; its folder is the home folder, not this repo)."""
         self.settings({"everywhere": everywhere or {}, "spaces": {
-            self.HQ: {"folder": "/Users/someone", "name": "Home", "tasks": {"auto_accept": True}},
+            self.HQ: {"folder": "/srv/hq", "name": "Home", "tasks": {"auto_accept": True}},
             "spOther": {"folder": self.folder, "name": "app", "tasks": {"merge": "ask"}}}})
 
     def add(self, title, **kw):
@@ -6535,10 +6535,10 @@ class SpaceAutoAccept(unittest.TestCase):
     def test_inheritance_space_own_by_id_then_everywhere_then_off(self):
         from herdr_task.settings import auto_accept_default as dflt
         self.assertEqual(dflt(self.HQ, {}), (False, None))  # Herdr's default: off
-        hq = {self.HQ: {"folder": "/home", "tasks": {"auto_accept": True}}}
+        hq = {self.HQ: {"folder": "/srv/hq", "tasks": {"auto_accept": True}}}
         self.assertEqual(dflt(self.HQ, {"spaces": hq}), (True, "space"))
         # another space, even one in the same folder, keeps Everywhere's (never matched by folder)
-        same = {**hq, "spB": {"folder": "/home"}}
+        same = {**hq, "spB": {"folder": "/srv/hq"}}
         self.assertEqual(dflt("spB", {"spaces": same}), (False, None))
         self.assertEqual(dflt(None, {"spaces": hq}), (False, None))
         # Everywhere's on: every space gets it, unless it turns it off itself
