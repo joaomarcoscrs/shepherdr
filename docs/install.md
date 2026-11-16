@@ -44,6 +44,13 @@ What goes where:
 | agent-browser (the task browser) | one already on the PATH when it's 0.41.1 up to 0.41.x, else Shepherdr's own copy in `~/.local/share/shepherdr/agent-browser/<version>/` and Chrome for Testing (`agent-browser install`, into `~/.agent-browser`). See [The task browser's agent-browser](#the-task-browsers-agent-browser) |
 | The guard (`--guard`, opt-in) | `~/.local/bin/herdr-app`: refuses to open a window with another HOME, `HERDR_APP_HOME` or core session (it can overwrite every machine's spaces); subcommands pass through |
 
+The PermissionRequest hooks (the chat's and each task worker's `herdr-task _allow`) never ask before Claude Code reads
+a picture you shared in a chat, as when a task's brief names your screenshot: one the chat handed an agent on this
+machine (listed in `~/.config/herdr-app/data/chat-shared.tsv`, kept 30 days), one you pasted or uploaded
+(`data/chat-attach/`), or a copy it sent to another machine. A picture in your own messages of a conversation the chat
+shows (one sent before this list was kept, say) goes on the list too, with its message's time. Only image files, only
+Read; anything else asks as before.
+
 What it records: `~/.config/herdr-app/data/shepherdr/installed.json`, a sha256 per file it put there. Running it
 again changes only what changed; a file you edited since is kept (the new copy goes beside it as `.new`), except a
 mod file Shepherdr changed too: that one is replaced and yours goes to the backup folder.

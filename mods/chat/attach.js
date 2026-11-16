@@ -88,10 +88,32 @@ export async function pick(title = "Attach files", os = window()?.platform) {
 // Dropped or pasted file paths as attachments.
 export const paths = (list) => list.filter(Boolean).map((p) => ({ path: p, name: base(p), image: isImage(p), temp: false }));
 
+// The pictures the person shared, by path, so an agent here reads them without asking (SHEP-1: a screenshot a task's
+// brief names is read with Claude Code's Read; herdr-task's shared.py allows it). "<ms>\t<path>" lines in
+// data/chat-shared.tsv; a path with a tab or a line break isn't written (it asks as before), nor a file a script
+// relayed through data/chat-sendreq.json.
+// A line already there (the same time and path: one message seen again) isn't written twice.
+export const SHARED = 'f="$1"; at="$2"; shift 2; mkdir -p "${f%/*}" || exit 0; for p; do l=$(printf "%s\\t%s" "$at" "$p"); '
+  + 'grep -qxF -- "$l" "$f" 2>/dev/null || printf "%s\\n" "$l" >> "$f"; done; true';
+export const sharedFile = () => `${appHome()}/data/chat-shared.tsv`;
+const listable = (p) => typeof p === "string" && p.startsWith("/") && isImage(p) && !/[\t\n\r]/.test(p);
+export const shareable = (files) => files.filter((f) => f.image && !f.relayed && listable(f.path)).map((f) => f.path);
+export async function shareAt(list, at) {
+  if (list.length) await exec("sh", ["-c", SHARED, "share", sharedFile(), String(Math.round(at)), ...list]).catch(() => null);
+}
+const share = (files) => shareAt(shareable(files), Date.now());
+// The pictures a message of the person's in an agent's log carries: the ones Claude Code read from files ([Image:
+// source: …] lines, core/chat-log.js) and each line of its words that is a picture's whole path, as the chat sends one
+// (deliver: a path a line; Codex keeps it as words). So a picture sent before this list was kept, or one the log
+// alone has, is listed too, with its message's time (main.js needShared).
+export const sentPictures = (text, paths = []) =>
+  [...new Set([...(paths ?? []), ...String(text ?? "").split("\n").map((l) => l.trim())])].filter(listable);
+
 // The message's file lines: each file's path where the agent is. For another machine, a copy
-// lands beside the agent's terminal.
+// lands beside the agent's terminal (where herdr-task knows it as shared by where it is).
 export async function deliver(files, addr, machine) {
   const out = [];
+  if (!machine) await share(files);
   for (const f of files) {
     if (!machine) { out.push(f.path); continue; }
     const r = await hc(["put", addr, f.path, "--json"]);
@@ -108,8 +130,11 @@ export async function deliver(files, addr, machine) {
 export function drop(f) {
   if (f.temp && f.path.startsWith(`${appHome()}/data/chat-attach/`)) exec("rm", ["-f", f.path]);
 }
+// The shared pictures' list keeps 30 days (shared.py SHARED_DAYS).
+export const PRUNE = 'find "$1" -name "pasted-*" -mmin +1440 -delete 2>/dev/null; '
+  + '[ -f "$2" ] && awk -F "\\t" -v c="$3" \'$1 + 0 >= c\' "$2" > "$2.tmp" && mv "$2.tmp" "$2"; true';
 export function prune() {
-  exec("sh", ["-c", 'find "$1" -name "pasted-*" -mmin +1440 -delete 2>/dev/null; true', "x", `${appHome()}/data/chat-attach`]);
+  exec("sh", ["-c", PRUNE, "x", `${appHome()}/data/chat-attach`, sharedFile(), String(Date.now() - 30 * 86400_000)]);
 }
 
 // Images shown in the chat (thumbnails, the viewer): `image()` loads from the app's folder, so

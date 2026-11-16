@@ -21,6 +21,7 @@ from .templates import instructions
 from .agents import detail, LINE_MAX, live_agents, SUMMARY_MAX
 from .github import finish, remote_of
 from .browsers import browser_line, browser_path
+from .shared import ALLOW as SHARED_ALLOW, allows as shared_read
 
 
 # ---- an agent's own herdr-task commands never ask -------------------------------------------
@@ -302,8 +303,9 @@ def ask_card(raw):
 
 def cmd_allow(args):
     """The PermissionRequest hook of a task worker (Claude Code and Codex, own_argv): allows this
-    launch's own herdr-task commands; anything else goes to the chat's card (ask_card), and without
-    one's answer the agent asks the person in its terminal as usual."""
+    launch's own herdr-task commands and Claude's Read of a picture the person shared in a chat (shared);
+    anything else goes to the chat's card (ask_card), and without one's answer the agent asks the person
+    in its terminal as usual."""
     raw = sys.stdin.buffer.read(1 << 20)
     try:
         data = json.loads(raw or b"{}")
@@ -312,6 +314,10 @@ def cmd_allow(args):
     if os.environ.get("HERDR_TASK_HOOK_LOG"):
         with open(os.environ["HERDR_TASK_HOOK_LOG"], "a") as f:
             f.write(json.dumps(data) + "\n")
+    # SHEP-1: a picture the person shared in a chat (a screenshot its brief names) is read without asking
+    if shared_read(data):
+        print(json.dumps(SHARED_ALLOW))
+        return
     cmd = (data.get("tool_input") or {}).get("command") if isinstance(data.get("tool_input"), dict) else None
     if isinstance(cmd, list):
         # ["bash", "-lc", "<command>"] as some tools pass it.
