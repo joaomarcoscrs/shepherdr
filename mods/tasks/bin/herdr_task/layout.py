@@ -74,8 +74,9 @@ KINDS = {
     "secret-served": (".herdr/secret-served", "state", "secret-served", "dir", False),
     "cli-check": (".herdr/cli-check.json", "state", "cli-check.json", "file", False),
     "machine-hold": (".herdr/machine-hold.json", "state", "machine-hold.json", "file", False),
+    "cursor-chats": (".herdr/cursor-chats", "data", "cursor-chats", "dir", False),
 }
-PRIVATE = {"vault", "secret-remote", "secret-drop", "secret-served", "service", "browser"}  # 0700 folders
+PRIVATE = {"vault", "secret-remote", "secret-drop", "secret-served", "service", "browser", "cursor-chats"}  # 0700 folders
 LEGACY_WORKTREES = ".herdr/worktrees"
 
 

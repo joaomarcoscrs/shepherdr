@@ -1,0 +1,786 @@
+"""`herdr-task cursor-chat`: Cursor Agent as a chat agent (an Assistant), in its terminal (SHEP-6).
+
+Cursor's own terminal UI keeps no log Shepherdr can read and reports no status, so an Assistant on Cursor runs this
+instead: it starts one `cursor-agent acp` (Cursor's Agent Client Protocol server: JSON-RPC over stdio) and is the
+client a person or the chat types into, as they would into Claude Code:
+
+- What is typed (or pasted by `hc send`, the chat's way in) goes to Cursor as a prompt; a message sent mid-turn
+  waits its turn (queued, as Claude Code's queue). Esc or Ctrl+C stops the turn (session/cancel).
+- What Cursor says and does is shown here and kept in a transcript (CHATS/<chat id>.jsonl, held open while it runs:
+  the chat finds it by this process, core/chat-log.js FIND) that the window's chat and the web app read.
+- Its status goes to Herdr as OSC 7501 (app=cursor): idle, working, blocked (a permission), error.
+- A permission Cursor asks for (session/request_permission: what its allowlist lacks) is shown here as a menu, and
+  goes to the chat as a card, the same files Claude Code's PermissionRequest hook leaves (mods/chat/ask-hook.sh:
+  data/chat-asks/req/<id>.json, answered in ans/<id>.json). Whichever answers first wins; nothing is allowed unread.
+- `--resume <chat id>` loads that chat again (session/load: the conversation goes on); `--model` picks a model and
+  `/model <id>` switches it in place; `--force` is Full access (Cursor's own: its deny list still applies).
+
+Usage: herdr-task cursor-chat [--model <id>] [--force] [--resume <chat id>] [first message...]
+"""
+
+import base64
+import json
+import os
+import queue
+import re
+import select
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+from . import layout
+
+NAME = "cursor"           # what its status reports as its app (core/chat-reader.js KINDS)
+CLIP = 4000               # a tool's input or output kept in the transcript, at most this many characters
+ASK_WAIT = 1800           # a permission waits this long for an answer (as the hook's 30 minutes)
+
+
+def chats_dir():
+    return os.environ.get("HERDR_CURSOR_CHATS") or layout.Where().path("cursor-chats")
+
+
+def cursor_bin():
+    """Cursor Agent's CLI: $HERDR_CURSOR_BIN, else cursor-agent or agent on PATH."""
+    own = os.environ.get("HERDR_CURSOR_BIN")
+    if own:
+        return own
+    return shutil.which("cursor-agent") or shutil.which("agent")
+
+
+def asks_dir():
+    return os.path.join(os.environ.get("HERDR_APP_HOME") or os.path.join(os.path.expanduser("~"), ".config", "herdr-app"),
+                        "data", "chat-asks")
+
+
+def now_iso():
+    t = time.time()
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t)) + ".%03dZ" % int((t % 1) * 1000)
+
+
+def clip(s, n=CLIP):
+    s = "" if s is None else str(s)
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def clipped(v, n=CLIP):
+    """A JSON value with every string cut to n characters (a transcript line stays small)."""
+    if isinstance(v, str):
+        return clip(v, n)
+    if isinstance(v, list):
+        return [clipped(x, n) for x in v[:50]]
+    if isinstance(v, dict):
+        return {str(k): clipped(x, n) for k, x in list(v.items())[:50]}
+    return v
+
+
+def osc(state, msg=None, kind=None):
+    """Herdr's status report (OSC 7501), as Claude Code writes it: key=value pairs, words base64."""
+    parts = [f"state={state}", f"app={NAME}"]
+    if state == "blocked" and kind:
+        parts.append(f"kind={kind}")
+    if msg:
+        parts.append("msg=" + base64.b64encode(msg[:2048].encode()).decode())
+    return "\x1b]7501;" + ":".join(parts) + "\x07"
+
+
+# ---- what Cursor's tool calls are, in the words the chat's cards and rows use --------------------------------------
+
+def tool_path(inp, locations=None):
+    for k in ("path", "file_path", "filePath", "target_file", "targetFile", "file"):
+        if isinstance(inp, dict) and isinstance(inp.get(k), str):
+            return inp[k]
+    for loc in locations or []:
+        if isinstance(loc, dict) and isinstance(loc.get("path"), str):
+            return loc["path"]
+    return None
+
+
+def strip_ticks(title):
+    t = str(title or "").strip()
+    return t[1:-1] if len(t) > 1 and t.startswith("`") and t.endswith("`") else t
+
+
+def hook_request(tool, cwd, session):
+    """A permission as Claude Code's PermissionRequest hook gives it (core/asks.js words() reads it): the chat's card
+    shows and answers it as any other agent's."""
+    kind = tool.get("kind") or "other"
+    inp = tool.get("rawInput") if isinstance(tool.get("rawInput"), dict) else {}
+    title = strip_ticks(tool.get("title"))
+    why = " ".join(c.get("content", {}).get("text", "") for c in tool.get("content") or []
+                   if isinstance(c, dict) and isinstance(c.get("content"), dict)).strip()
+    diff = next((c for c in tool.get("content") or [] if isinstance(c, dict) and c.get("type") == "diff"), None)
+    path = tool_path(inp, tool.get("locations"))
+    if kind == "execute":
+        name, ti = "Bash", {"command": inp.get("command") or title, **({"description": why} if why else {})}
+    elif kind in ("edit", "delete", "move") and (diff or path):
+        if diff and diff.get("oldText"):
+            name, ti = "Edit", {"file_path": diff.get("path") or path, "old_string": diff.get("oldText") or "", "new_string": diff.get("newText") or ""}
+        else:
+            name, ti = "Write", {"file_path": (diff or {}).get("path") or path, "content": (diff or {}).get("newText") or inp.get("content") or ""}
+    elif kind == "read" and path:
+        name, ti = "Read", {"file_path": path}
+    elif kind == "fetch" and (inp.get("url") or title.startswith("http")):
+        name, ti = "WebFetch", {"url": inp.get("url") or title}
+    elif kind == "search" and (inp.get("pattern") or inp.get("query")):
+        name, ti = "Grep", {"pattern": inp.get("pattern") or inp.get("query"), **({"path": path} if path else {})}
+    else:
+        name, ti = title or "a tool", {**inp, **({"why": why} if why else {})}
+    return {"session_id": session, "cwd": cwd, "hook_event_name": "PermissionRequest", "tool_name": name,
+            "tool_input": clipped(ti, 20000), "herdr_agent": NAME}
+
+
+def report_msg(req):
+    """What it waits on, as Claude Code reports it ("approve Bash: npm test": core/needs.js reportReason)."""
+    v = req.get("tool_input") or {}
+    what = v.get("command") or v.get("file_path") or v.get("url") or v.get("pattern") or ""
+    return clip(f"approve {req['tool_name']}: {str(what).splitlines()[0] if what else ''}".strip(), 300)
+
+
+def option_for(options, kinds):
+    """The option of the first of `kinds` Cursor offers (allow_once, allow_always, reject_once, reject_always)."""
+    for k in kinds:
+        for o in options or []:
+            if o.get("kind") == k:
+                return o
+    return None
+
+
+# ---- the transcript ------------------------------------------------------------------------------------------------
+
+class Transcript:
+    """CHATS/<chat id>.jsonl: one JSON record a line, each starting {"herdr":"cursor",...} (core/chat-log.js LOG keeps
+    them). Held open while this runs, so the chat finds it by this process (FIND)."""
+
+    def __init__(self, folder, chat):
+        os.makedirs(folder, mode=0o700, exist_ok=True)
+        self.path = os.path.join(folder, f"{chat}.jsonl")
+        fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        self.f = os.fdopen(fd, "a", encoding="utf-8")
+
+    def write(self, typ, **fields):
+        rec = {"herdr": NAME, "type": typ, "at": now_iso(), **fields}
+        self.f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        self.f.flush()
+
+    def close(self):
+        try:
+            self.f.close()
+        except OSError:
+            pass
+
+
+# ---- the bridge ----------------------------------------------------------------------------------------------------
+
+class Bridge:
+    def __init__(self, argv, out=None, inp=None, env=None):
+        self.env = os.environ if env is None else env
+        self.out = out or sys.stdout
+        self.inp = inp if inp is not None else sys.stdin
+        self.model = None
+        self.force = False
+        self.resume = None
+        words = []
+        it = iter(argv)
+        for a in it:
+            if a == "--model":
+                self.model = next(it, None)
+            elif a.startswith("--model="):
+                self.model = a.split("=", 1)[1]
+            elif a in ("--force", "-f", "--yolo"):
+                self.force = True
+            elif a == "--resume":
+                self.resume = next(it, None)
+            elif a.startswith("--resume="):
+                self.resume = a.split("=", 1)[1]
+            else:
+                words.append(a)
+        self.first = " ".join(words).strip() or None
+        self.cwd = os.getcwd()
+        self.events = queue.Queue()
+        self.proc = None
+        self.next_id = 0
+        self.waiting = {}        # request id -> what its answer is for
+        self.session = None
+        self.models = []         # [{id, name}] as Cursor lists them for this account
+        self.model_id = None     # the model value Cursor runs now
+        self.transcript = None
+        self.busy = False        # a prompt is running
+        self.queue = []          # messages typed while busy
+        self.text = ""           # Cursor's words since the last flush
+        self.ask = None          # the permission waiting now: {rpc, options, req_id, files}
+        self.buffer = ""         # what is typed in the box
+        self.pasting = False
+        self.ctrl_c = 0
+        self.loading = False     # session/load replays the chat: not written again
+        self.err_tail = []
+        self.done = False
+        self.code = 0
+        self.tty = hasattr(self.inp, "isatty") and self.inp.isatty()
+        self.eof = False
+        self.lost = None
+        self.setting = False     # a model change waits for Cursor's answer
+
+    # ---- output ----
+
+    def emit(self, s):
+        try:
+            self.out.write(s)
+            self.out.flush()
+        except (OSError, ValueError):
+            pass
+
+    def status(self, state, msg=None, kind=None):
+        self.emit(osc(state, msg, kind))
+
+    def say(self, s):
+        """A line on the screen, above the box."""
+        self.emit("\r\x1b[K" + s.replace("\n", "\r\n" if self.tty else "\n") + ("\r\n" if self.tty else "\n"))
+        self.box()
+
+    def box(self):
+        if self.tty and not self.ask:
+            self.emit("\r\x1b[K\x1b[2m›\x1b[0m " + self.buffer.replace("\n", " ⏎ "))
+
+    # ---- Cursor's process ----
+
+    def send(self, msg):
+        try:
+            self.proc.stdin.write(json.dumps(msg) + "\n")
+            self.proc.stdin.flush()
+        except (OSError, ValueError, AttributeError):
+            pass
+
+    def call(self, method, params, why):
+        self.next_id += 1
+        self.waiting[self.next_id] = why
+        self.send({"jsonrpc": "2.0", "id": self.next_id, "method": method, "params": params})
+        return self.next_id
+
+    def start_agent(self):
+        exe = cursor_bin()
+        if not exe:
+            self.fail("Cursor Agent isn't installed here (no cursor-agent or agent on PATH).")
+            return False
+        cmd = [exe] + (["--force"] if self.force else []) + ["acp"]
+        try:
+            self.proc = subprocess.Popen(cmd, cwd=self.cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                         text=True, bufsize=1, env=dict(self.env))
+        except OSError as e:
+            self.fail(f"Cursor Agent didn't start: {e}")
+            return False
+        threading.Thread(target=self.read_agent, daemon=True).start()
+        threading.Thread(target=self.read_errors, daemon=True).start()
+        self.call("initialize", {"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False},
+                                                                             "terminal": False}}, "init")
+        return True
+
+    def read_agent(self):
+        for line in self.proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                self.events.put(("acp", json.loads(line)))
+            except ValueError:
+                continue
+        self.events.put(("exit", self.proc.wait()))
+
+    def read_errors(self):
+        for line in self.proc.stderr:
+            line = line.strip()
+            if line:
+                self.err_tail = (self.err_tail + [clip(line, 300)])[-5:]
+
+    # ---- the session ----
+
+    def on_response(self, m):
+        why = self.waiting.pop(m.get("id"), None)
+        err = m.get("error")
+        res = m.get("result") or {}
+        if why == "init":
+            if err:
+                return self.fail(f"Cursor didn't start its session: {err.get('message', err)}")
+            if self.resume:
+                self.loading = True
+                self.call("session/load", {"sessionId": self.resume, "cwd": self.cwd, "mcpServers": []}, "load")
+            else:
+                self.call("session/new", {"cwd": self.cwd, "mcpServers": []}, "new")
+        elif why in ("new", "load"):
+            self.loading = False
+            if err:
+                msg = str(err.get("message") or err)
+                if re.search(r"auth|log ?in|sign", msg, re.I):
+                    self.status("blocked", "Cursor is signed out: run cursor-agent login", "auth")
+                    return self.fail("Cursor is signed out here. Sign in with `cursor-agent login` in a terminal, then start this again.")
+                if why == "load":
+                    # its chat is gone: a new one, said so in the chat and here (the old transcript stays on disk)
+                    old = self.resume
+                    self.resume = None
+                    self.call("session/new", {"cwd": self.cwd, "mcpServers": []}, "new")
+                    self.lost = f"Cursor couldn't load chat {old} ({clip(msg, 200)}): this is a new chat. The old one's words are in {os.path.join(chats_dir(), old + '.jsonl')}."
+                    return
+                return self.fail(f"Cursor didn't start its session: {clip(msg, 300)}")
+            self.ready(res, resumed=why == "load")
+        elif why and why.startswith("model:"):
+            want = why.split(":", 1)[1]
+            self.setting = False
+            if err:
+                self.note(f"Model not changed: {clip(err.get('message') or err, 200)}")
+            else:
+                self.model_id = want
+                self.transcript.write("model", model=want, name=self.model_name(want))
+                self.say(f"\x1b[2mModel set to {self.model_name(want)}\x1b[0m")
+                self.save_models()
+            if not self.busy:
+                self.idle()
+        elif why == "prompt":
+            self.flush()
+            reason = res.get("stopReason") if not err else "error"
+            if err:
+                text = clip(err.get("message") or err, 500)
+                self.transcript.write("error", text=f"Cursor: {text}")
+                self.say(f"\x1b[31m{text}\x1b[0m")
+            self.transcript.write("turn_end", reason=reason)
+            if reason == "cancelled":
+                self.say("\x1b[2mStopped.\x1b[0m")
+            self.busy = False
+            self.idle()
+
+    def ready(self, res, resumed):
+        self.session = self.session or res.get("sessionId") or self.resume
+        models = (res.get("models") or {}).get("availableModels") or []
+        opts = next((o for o in res.get("configOptions") or [] if o.get("id") == "model"), None)
+        if opts:
+            models = [{"modelId": o.get("value"), "name": o.get("name")} for o in opts.get("options") or []] or models
+        self.models = [{"id": m.get("modelId"), "name": m.get("name") or m.get("modelId")} for m in models if m.get("modelId")]
+        self.model_id = (res.get("models") or {}).get("currentModelId") or (opts or {}).get("currentValue")
+        self.transcript = Transcript(chats_dir(), self.session)
+        lost = self.lost
+        if lost:
+            self.transcript.write("error", text=lost)
+        self.transcript.write("session", session=self.session, resumed=resumed, model=self.model_id, name=self.model_name(self.model_id),
+                              perm="full" if self.force else "manual", cwd=self.cwd)
+        self.save_models()
+        perm = "Full access" if self.force else "Ask"
+        self.say(f"\x1b[1mCursor\x1b[0m · {self.model_name(self.model_id) or 'its default model'} · {perm} · chat {self.session}"
+                 + (" (resumed)" if resumed else ""))
+        if lost:
+            self.say(f"\x1b[33m{lost}\x1b[0m")
+        if self.first:
+            self.queue.insert(0, (self.first, False))
+        if self.model:
+            self.set_model(self.model)   # its first turn waits for the model (idle() once it's set)
+        else:
+            self.idle()
+
+    def model_value(self, want):
+        """Cursor's model value for an id or name as typed: itself, or the one it names ("claude-opus-5-5" is
+        "claude-opus-5-5[context=300k,...]")."""
+        w = str(want or "").strip()
+        for m in self.models:
+            if m["id"] == w:
+                return m["id"]
+        for m in self.models:
+            if m["id"].split("[", 1)[0] == w or (m["name"] or "").lower() == w.lower():
+                return m["id"]
+        return w
+
+    def model_name(self, value):
+        if not value:
+            return None
+        m = next((x for x in self.models if x["id"] == value), None)
+        return (m or {}).get("name") or str(value).split("[", 1)[0]
+
+    def set_model(self, want):
+        value = self.model_value(want)
+        if not value:
+            return
+        self.setting = True
+        self.call("session/set_config_option", {"sessionId": self.session, "configId": "model", "value": value}, f"model:{value}")
+
+    def save_models(self):
+        """Its models for this account, for the model menus (core/agents.js DEFAULTS reads them)."""
+        if not self.models:
+            return
+        p = os.path.join(chats_dir(), "models.json")
+        try:
+            with open(p + ".tmp", "w") as f:
+                json.dump({"models": self.models, "current": self.model_id, "at": int(time.time())}, f)
+            os.replace(p + ".tmp", p)
+        except OSError:
+            pass
+
+    # ---- turns ----
+
+    def idle(self):
+        if self.setting:
+            return
+        if self.queue and not self.busy and self.session:
+            text, logged = self.queue.pop(0)
+            if logged:
+                self.transcript.write("queue", op="dequeue", text=text)
+            return self.submit(text)
+        self.status("idle")
+        self.box()
+
+    def submit(self, text):
+        text = text.strip("\n")
+        if not text.strip():
+            return
+        if text.strip() in ("/exit", "/quit"):
+            return self.stop()
+        if self.busy or not self.session or self.setting:
+            # in its turn after the one running (or once Cursor's session is up), as Claude Code queues it
+            logged = bool(self.transcript)
+            self.queue.append((text, logged))
+            if logged:
+                self.transcript.write("queue", op="enqueue", text=text)
+            self.say(f"\x1b[2m(queued) {clip(text.splitlines()[0], 120)}\x1b[0m")
+            return
+        m = re.match(r"^/model(?:\s+(\S+))?\s*$", text.strip())
+        if m:
+            if not m.group(1):
+                self.say("Models: " + ", ".join(x["id"].split("[", 1)[0] for x in self.models) if self.models else "No model list from Cursor.")
+                return self.idle()
+            return self.set_model(m.group(1))   # the queue goes on once it is set
+        self.busy = True
+        self.transcript.write("user", text=text)
+        self.say(f"\x1b[1;36m›\x1b[0m {text}")
+        self.status("working", "Thinking")
+        self.call("session/prompt", {"sessionId": self.session, "prompt": [{"type": "text", "text": text}]}, "prompt")
+
+    def flush(self):
+        if self.text.strip() and self.transcript:
+            self.transcript.write("agent", text=self.text.strip())
+        if self.text and self.tty:
+            self.emit("\r\n")
+        self.text = ""
+
+    def note(self, s):
+        if self.transcript:
+            self.transcript.write("error", text=s)
+        self.say(f"\x1b[33m{s}\x1b[0m")
+
+    def on_update(self, u):
+        if self.loading:
+            return   # the chat replayed as it loads: in the transcript already
+        kind = u.get("sessionUpdate")
+        if kind == "agent_message_chunk":
+            t = (u.get("content") or {}).get("text") or ""
+            if t:
+                if not self.text and self.tty:
+                    self.emit("\r\x1b[K")
+                self.text += t
+                self.emit(t.replace("\n", "\r\n") if self.tty else t)
+        elif kind == "agent_thought_chunk":
+            self.status("working", "Thinking")
+        elif kind == "tool_call":
+            self.flush()
+            tid = str(u.get("toolCallId"))
+            inp = u.get("rawInput") if isinstance(u.get("rawInput"), dict) else {}
+            title = strip_ticks(u.get("title")) or u.get("kind") or "a tool"
+            self.transcript.write("tool", id=tid, kind=u.get("kind") or "other", title=clip(title, 300), input=clipped(inp),
+                                  path=tool_path(inp, u.get("locations")))
+            self.say(f"\x1b[2m• {clip(title, 200)}\x1b[0m")
+            self.status("working", clip(title, 200))
+        elif kind == "tool_call_update" and u.get("status") in ("completed", "failed"):
+            out = u.get("rawOutput")
+            if out is None:
+                out = "\n".join(((c.get("content") or {}).get("text") or "") for c in u.get("content") or [] if isinstance(c, dict))
+            if isinstance(out, dict):
+                o = out.get("stdout") or out.get("output") or out.get("content") or ""
+                e = out.get("stderr") or ""
+                out = (str(o) + ("\n" + str(e) if e else "")) if (o or e) else json.dumps(out)[:CLIP]
+            self.transcript.write("tool_done", id=str(u.get("toolCallId")), status=u.get("status"), output=clip(out))
+            if u.get("status") == "failed":
+                self.say("\x1b[2m  (failed)\x1b[0m")
+        elif kind == "plan":
+            steps = [e.get("content") for e in u.get("entries") or [] if isinstance(e, dict)]
+            if steps:
+                self.flush()
+                self.transcript.write("plan", steps=[clip(s, 300) for s in steps[:30]])
+        elif kind == "current_mode_update":
+            self.transcript.write("mode", mode=u.get("currentModeId"))
+
+    # ---- permissions ----
+
+    def on_request(self, m):
+        method = m.get("method")
+        if method != "session/request_permission":
+            self.send({"jsonrpc": "2.0", "id": m.get("id"), "error": {"code": -32601, "message": f"{method} isn't offered by this client"}})
+            return
+        p = m.get("params") or {}
+        tool = p.get("toolCall") or {}
+        self.flush()
+        req = hook_request(tool, self.cwd, self.session)
+        self.ask = {"rpc": m.get("id"), "options": p.get("options") or [], "req": req, "at": time.time(), "id": None}
+        title = strip_ticks(tool.get("title")) or req["tool_name"]
+        why = req["tool_input"].get("description") or req["tool_input"].get("why") or ""
+        self.transcript.write("permission", id=str(tool.get("toolCallId") or ""), title=clip(title, 300), detail=clip(why, 300))
+        self.status("blocked", report_msg(req), "permission")
+        lines = [f"\x1b[1;33mCursor asks:\x1b[0m {clip(title, 300)}"] + ([f"  {why}"] if why else [])
+        for i, o in enumerate(self.ask["options"], 1):
+            lines.append(f"{'❯' if i == 1 else ' '} {i}. {o.get('name') or o.get('optionId')}")
+        lines.append("\x1b[2m  Press a number, or Esc to reject. The chat's card answers it too.\x1b[0m")
+        self.emit("\r\x1b[K" + ("\r\n" if self.tty else "\n").join(lines) + ("\r\n" if self.tty else "\n"))
+        self.leave_ask(req)
+
+    def leave_ask(self, req):
+        """The request where the chat's cards find it (ask-hook.sh's files), only in a Herdr terminal."""
+        t = self.env.get("HC_TERMINAL_ID") or ""
+        if not t or "/" in t or ".." in t:
+            return
+        d = asks_dir()
+        aid = f"{t}.{int(time.time())}.{os.getpid()}"
+        try:
+            for sub in ("req", "ans", "end"):
+                os.makedirs(os.path.join(d, sub), exist_ok=True)
+            p = os.path.join(d, "req", aid + ".json")
+            with open(p + ".tmp", "w") as f:
+                json.dump(req, f)
+            os.replace(p + ".tmp", p)
+            self.ask["id"] = aid
+        except OSError:
+            pass
+
+    def check_ask(self):
+        """The chat's answer to the permission waiting now, if one came."""
+        a = self.ask
+        if not a:
+            return
+        if a["id"]:
+            p = os.path.join(asks_dir(), "ans", a["id"] + ".json")
+            try:
+                with open(p) as f:
+                    text = f.read().strip()
+            except OSError:
+                text = None
+            if text is not None:
+                if not text:
+                    return self.forget_ask()   # no decision: it waits for the terminal
+                try:
+                    d = json.loads(text)["hookSpecificOutput"]["decision"]
+                except (ValueError, KeyError, TypeError):
+                    d = None
+                if d and d.get("behavior") == "allow":
+                    return self.answer(["allow_once"], None)
+                if d:
+                    return self.answer(["reject_once", "reject_always"], None, message=d.get("message"))
+        if time.time() - a["at"] > ASK_WAIT:
+            self.answer(["reject_once", "reject_always"], "No answer in 30 minutes: rejected")
+
+    def forget_ask(self):
+        if self.ask and self.ask.get("id"):
+            for sub in ("req", "ans"):
+                try:
+                    os.remove(os.path.join(asks_dir(), sub, self.ask["id"] + ".json"))
+                except OSError:
+                    pass
+            self.ask["id"] = None
+
+    def answer(self, kinds, end, message=None):
+        """Answers the waiting permission with Cursor's option of the first of kinds; `end`: how it went, for the
+        chat's card when it was answered here (None: the card answered it, and says so itself)."""
+        a = self.ask
+        if not a:
+            return
+        o = option_for(a["options"], kinds)
+        outcome = {"outcome": "selected", "optionId": o["optionId"]} if o else {"outcome": "cancelled"}
+        self.send({"jsonrpc": "2.0", "id": a["rpc"], "result": {"outcome": outcome}})
+        allowed = bool(o) and str(o.get("kind", "")).startswith("allow")
+        if a.get("id") and end:
+            try:
+                p = os.path.join(asks_dir(), "end", a["id"])
+                with open(p + ".tmp", "w") as f:
+                    f.write(end + "\n")
+                os.replace(p + ".tmp", p)
+            except OSError:
+                pass
+        self.forget_ask()
+        by = "terminal" if end else "chat"
+        self.transcript.write("permission_done", outcome="allowed" if allowed else "declined", by=by, option=(o or {}).get("optionId"))
+        self.ask = None
+        self.say(f"\x1b[2m{'Allowed' if allowed else 'Rejected'}{' in the chat' if by == 'chat' else ''}.\x1b[0m")
+        self.status("working", "Working")
+
+    # ---- typing ----
+
+    def on_key(self, data):
+        if self.ask:
+            for ch in data:
+                if ch.isdigit() and 1 <= int(ch) <= len(self.ask["options"]):
+                    o = self.ask["options"][int(ch) - 1]
+                    allowed = str(o.get("kind", "")).startswith("allow")
+                    return self.answer([o.get("kind")], "Answered in the terminal" if allowed else "Declined or interrupted in the terminal")
+                if ch in ("\r", "\n"):
+                    return self.answer([self.ask["options"][0].get("kind")] if self.ask["options"] else [], "Answered in the terminal")
+                if ch in ("\x1b", "\x03"):
+                    return self.answer(["reject_once", "reject_always"], "Declined or interrupted in the terminal")
+            return
+        i = 0
+        while i < len(data):
+            if data.startswith("\x1b[200~", i):
+                self.pasting = True
+                i += 6
+                continue
+            if data.startswith("\x1b[201~", i):
+                self.pasting = False
+                i += 6
+                continue
+            ch = data[i]
+            i += 1
+            if self.pasting:
+                self.buffer += "\n" if ch == "\r" else ch
+                continue
+            if ch in ("\r", "\n"):
+                text, self.buffer = self.buffer, ""
+                self.emit("\r\x1b[K")
+                self.submit(text)
+            elif ch in ("\x7f", "\x08"):
+                self.buffer = self.buffer[:-1]
+            elif ch == "\x03":
+                if self.busy:
+                    self.cancel()
+                elif self.buffer:
+                    self.buffer = ""
+                else:
+                    self.ctrl_c += 1
+                    if self.ctrl_c >= 2:
+                        return self.stop()
+                    self.say("\x1b[2mPress Ctrl+C again to exit.\x1b[0m")
+                    continue
+            elif ch == "\x04" and not self.buffer and not self.busy:
+                return self.stop()
+            elif ch == "\x1b":
+                # Esc alone stops a turn; an arrow's or other key's sequence is skipped
+                if i < len(data) and data[i] in "[O":
+                    i += 1
+                    while i < len(data) and not data[i].isalpha() and data[i] != "~":
+                        i += 1
+                    i += 1
+                elif self.busy:
+                    self.cancel()
+            elif ch == "\x15":
+                self.buffer = ""
+            elif ch >= " " or ch == "\t":
+                self.buffer += ch
+            self.ctrl_c = 0 if ch != "\x03" else self.ctrl_c
+        self.box()
+
+    def cancel(self):
+        if self.busy and self.session:
+            self.send({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": self.session}})
+
+    # ---- the end ----
+
+    def fail(self, why):
+        self.code = 1
+        if self.transcript:
+            self.transcript.write("error", text=why)
+        self.say(f"\x1b[31m{why}\x1b[0m")
+        self.status("error", why)
+        self.done = True
+
+    def stop(self):
+        self.done = True
+
+    def close(self):
+        if self.ask:
+            self.answer(["reject_once", "reject_always"], "Agent stopped")
+        if self.proc and self.proc.poll() is None:
+            try:
+                self.proc.stdin.close()
+            except OSError:
+                pass
+            try:
+                self.proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.proc.terminate()
+                try:
+                    self.proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    self.proc.kill()
+        if self.transcript:
+            self.transcript.close()
+        self.emit("\x1b]7501;state=clear\x07")
+        if self.tty:
+            self.emit("\x1b[?2004l\r\n")
+
+    # ---- the loop ----
+
+    def read_input(self):
+        fd = self.inp.fileno()
+        while not self.done:
+            try:
+                r, _, _ = select.select([fd], [], [], 0.5)
+                if not r:
+                    continue
+                data = os.read(fd, 65536)
+            except (OSError, ValueError):
+                break
+            if not data:
+                self.events.put(("eof", None))
+                break
+            self.events.put(("key", data.decode("utf-8", "replace")))
+
+    def handle(self, ev, val):
+        if ev == "acp":
+            if "id" in val and ("result" in val or "error" in val) and "method" not in val:
+                self.on_response(val)
+            elif val.get("method") == "session/update":
+                self.on_update((val.get("params") or {}).get("update") or {})
+            elif "id" in val and "method" in val:
+                self.on_request(val)
+        elif ev == "key":
+            self.on_key(val)
+        elif ev == "eof":
+            # no more typing (a test's or a pipe's input): it ends once what was asked is answered
+            self.eof = True
+        elif ev == "exit":
+            if not self.done:
+                self.flush()
+                tail = self.err_tail[-1] if self.err_tail else ""
+                self.fail(f"Cursor Agent stopped (exit {val})" + (f": {tail}" if tail else "") + ".")
+
+    def run(self):
+        old = None
+        if self.tty:
+            import termios
+            import tty
+            old = termios.tcgetattr(self.inp.fileno())
+            tty.setraw(self.inp.fileno())
+            self.emit("\x1b[?2004h")
+        try:
+            self.say("\x1b[2mStarting Cursor Agent…\x1b[0m")
+            self.status("working", "Starting Cursor")
+            if not self.start_agent():
+                return self.code
+            threading.Thread(target=self.read_input, daemon=True).start()
+            while not self.done:
+                try:
+                    ev, val = self.events.get(timeout=0.3)
+                except queue.Empty:
+                    ev, val = None, None
+                if ev:
+                    self.handle(ev, val)
+                self.check_ask()
+                if self.eof and not self.busy and not self.queue and not self.ask and self.session:
+                    self.done = True
+            return self.code
+        finally:
+            self.close()
+            if old is not None:
+                import termios
+                termios.tcsetattr(self.inp.fileno(), termios.TCSADRAIN, old)
+
+
+def run(argv):
+    def end(*_):
+        raise SystemExit(1)
+    # hc kill or a closed terminal: Cursor's process ends with it (close()), never left running
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, end)
+    return Bridge(argv).run()
