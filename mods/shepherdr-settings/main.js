@@ -552,6 +552,11 @@ export default class ShepherdrSettings extends View {
       .child(this.title(t, page("tasks")))
       .child(this.row(t, rowTitle("tasks.merge"), ABOUT["tasks.merge"],
         segmented("merge", MERGE, k.merge, (v, _e, cx) => this.set("tasks", "merge", v, cx)), this.scoped("tasks", "merge")))
+      // SHEP-5: the person's Accept given ahead for every new task here (herdr-task's auto_accept_default: a space's own
+      // by its id, else Everywhere's); each task keeps it, and its menu's Accept when ready turns it off for that one
+      .child(this.row(t, rowTitle("tasks.auto_accept"), ABOUT["tasks.auto_accept"],
+        toggleSwitch("auto-accept", k.auto_accept === true, (next, _e, cx) => this.set("tasks", "auto_accept", next, cx)),
+        this.scoped("tasks", "auto_accept")))
       .child(this.row(t, rowTitle("tasks.review_rounds"), ABOUT["tasks.review_rounds"],
         segmented("rounds", withValue(ROUNDS, rounds, roundsWord), rounds, (v, _e, cx) => this.set("tasks", "review_rounds", v, cx)),
         this.scoped("tasks", "review_rounds")))

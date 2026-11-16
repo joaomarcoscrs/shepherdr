@@ -109,6 +109,12 @@ def rows(space, d=None, auto=None):
             ("review", "Review", review, "on" if rounds > 0 else "off",
              [("tasks", "review_rounds"), ("tasks", "must_fix"), ("reviewer", None)]),
             ("merge", "Merge", MERGE_SHORT[merge], merge, [("tasks", "merge")]),
+            # SHEP-5: Accept when ready, for the space's new tasks (settings.py auto_accept_default(): its own by its id)
+            ("auto_accept", "Accept when ready", "on (each task you add here is accepted, merged first, by itself once Ready, "
+             "with Accept's own checks; `herdr-task auto-accept <id> --off`, or add --no-auto-accept, keeps one for the "
+             "person's Accept, only when they ask)" if t.get("auto_accept") is True
+             else "off (each Ready task waits for the person's Accept)", "on" if t.get("auto_accept") is True else "off",
+             [("tasks", "auto_accept")]),
             ("proof", "Proof", "on" if t.get("proof") is not False else "off (tasks show no proof artifact)",
              "off" if t.get("proof") is False else "on", [("tasks", "proof")]),
             ("agent", "Task agent", pick_words(cfg.get("worker"), "claude, its own default model and effort"),

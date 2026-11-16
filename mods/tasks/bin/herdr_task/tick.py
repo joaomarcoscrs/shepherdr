@@ -25,7 +25,7 @@ from .queues import machine_hold, refresh_ext, running_count, set_hold, waiting_
 from .archive import archive_pass
 from .browsers import browser_pass
 from .output import progress_clock, say
-from .commands import accept_merge, accept_refusal, back_to_work, begin, merge_now, MERGE_FAILED
+from .commands import accept_merge, accept_refusal, back_to_work, begin, merge_now, MERGE_FAILED, space_accept
 from .news import news_pass, typing
 from .takeover import cant_go_on, takeover
 from .ghnews import main_pass, pr_deliver, pr_news
@@ -350,6 +350,7 @@ def tick_store(s, report):
         q = t.get("queue") or {}
         try:
             sp = q.get("space") or t.get("space") or default_space()
+            space_accept(t, sp)  # SHEP-5: one still without its space's Accept when ready (start decides it first)
             a = begin(s, t, q.get("argv") or worker_argv(s, t, sp), sp, q.get("parent"))
         except Fail as e:
             t["attention"] = f"Couldn't start: {e}"

@@ -190,6 +190,8 @@ export function chooseModel(menus, permDefault, sel, agent, id) {
 // One line under each row's title (by its key, section.field).
 export const ABOUT = {
   "tasks.merge": "Who merges a task once it's Ready: you, by accepting it, or Herdr.",
+  // SHEP-5: the Accept given ahead for every new task (herdr-task's auto_accept_default; a task's menu turns it off)
+  "tasks.auto_accept": "New tasks are accepted for you once Ready, merged first. Checks still apply; a task's menu turns it off.",
   "tasks.review_rounds": "A task's agent has its work reviewed and fixes what's found.",
   "tasks.must_fix": "What the agent fixes before it says ready. It lists the rest.",
   "tasks.proof": "Each task shows real proof of its work in one artifact, linked from Accept.",
@@ -290,7 +292,7 @@ export const MACHINES = {
 };
 // What the old machine scope could hold, as the person knows it.
 export const OLD_NAMES = { coordinator: "Assistant", worker: "Workers", reviewer: "Reviewer", backup: "Backup agent",
-  automations: "Run automations", merge: "Merge", review_rounds: "Review", must_fix: "Must fix", proof: "Proof",
+  automations: "Run automations", merge: "Merge", auto_accept: "Accept when ready", review_rounds: "Review", must_fix: "Must fix", proof: "Proof",
   max_running: "Tasks at once", archive_after: "Archive Done after", worktrees: "Worktrees",
   start_notes: "When a task starts", finish_notes: "When a task finishes", base: "Base branch", branch: "Branch names", agents: "Reactions" };
 // Home Assistant's line: on or off, and what herdr-task's home round last found there (~/.local/share/shepherdr/tasks/.home.json).
@@ -355,12 +357,13 @@ export const ROUNDS = [[0, "Off"], [1, "1 round"], [2, "2 rounds"], [3, "3 round
 export const ARCHIVE = [[0, "Off"], [1, "1 day"], [3, "3 days"], [7, "1 week"], [30, "1 month"]];
 export const ONOFF = [[true, "On"], [false, "Off"]];
 
-export const DEFAULTS = { tasks: { merge: "ask", review_rounds: 0, must_fix: "major", max_running: 10, worktrees: true, archive_after: 7, proof: true }, automations: { enabled: true },
+export const DEFAULTS = { tasks: { merge: "ask", auto_accept: false, review_rounds: 0, must_fix: "major", max_running: 10, worktrees: true, archive_after: 7, proof: true }, automations: { enabled: true },
   agents: { reactions: true, suggestions: true, feedback: true, feedback_repo: "" } };
 
 // [section, field, label, choices | { min, max }]
 export const TASK_ROWS = [
   ["tasks", "merge", "Merge", MERGE],
+  ["tasks", "auto_accept", "Accept when ready", ONOFF],
   ["tasks", "review_rounds", "Review", ROUNDS],
   ["tasks", "must_fix", "Must fix", MUST_FIX],
   ["tasks", "proof", "Proof", ONOFF],

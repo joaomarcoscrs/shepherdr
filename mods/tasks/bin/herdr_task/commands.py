@@ -13,7 +13,7 @@ import time
 from . import sandbox
 from .base import Fail, git, guard, now, run, STORE, stop_note, VERSION
 from .settings import (
-    agent_argv, agent_key, bare, merge_policy, review_limits, set_opts, settings_block, settings_for, space_base,
+    agent_argv, agent_key, auto_accept_default, bare, merge_policy, review_limits, set_opts, settings_block, settings_for, space_base,
     task_settings, worker_argv, worktrees_on,
 )
 from .agents import (
@@ -118,10 +118,47 @@ def cmd_add(args):
         if at:
             # Started later by the scheduler, with no caller to ask: its space is kept now.
             schedule(s, t, at, {"space": space or default_space()})
+        # SHEP-5: its space's Accept when ready, unless this one waits for the person's Accept (--no-auto-accept)
+        if getattr(args, "no_auto_accept", False):
+            t["accept_default"] = OWN_CHOICE
+        space_accept(t, space or (t.get("queue") or {}).get("space"), new=True)
         v = view(s, t)
     if at:
         ensure_scheduler_quietly()
     say(args, v, s.ref(t) + (f": {v['why']}" if at else ""))
+
+
+# ---- a space's Accept when ready (SHEP-5) ------------------------------------------------------
+# Settings › Tasks › Accept when ready (auto_accept_default(): a space's own, found by its id and never by its folder,
+# else Everywhere's; off by default) is the person's Accept given ahead for every new task of that space. It is decided
+# once per task, when its space is first known (added with --space or from a space's agents; else when it is started,
+# queued or scheduled), and kept on the task (accept_default: the space it was decided by), so a later change of the
+# setting, a restart, or a start in another space never changes it. On, the task gets SHEP-3's own auto_accept (by:
+# "space"): the tick accepts it once Ready with Accept's own checks (tick.py's auto_accept_pass()), and the person turns it
+# off for that one task as any other (Accept when ready in its menu, herdr-task auto-accept --off). A task added before
+# this (no accept_default) is never touched.
+PENDING_SPACE = "pending"   # added with no space known yet: decided when it starts
+OWN_CHOICE = "task"         # the task's own choice (add --no-auto-accept): the space's never applies
+
+
+def space_accept(t, space, new=False):
+    """Applies its space's Accept when ready to a task (new: one being added now; else only one added with its space
+    still to be known). Returns True when the task changed."""
+    st = t.get("accept_default")
+    if (st is not None) if new else (st != PENDING_SPACE):
+        return False
+    if t.get("state") == "done":
+        return False
+    if not space:
+        if st == PENDING_SPACE:
+            return False
+        t["accept_default"] = PENDING_SPACE
+        return True
+    on, _ = auto_accept_default(space)
+    t["accept_default"] = bare(space)
+    if on and not isinstance(t.get("auto_accept"), dict):
+        t["auto_accept"] = {"at": now(), "by": "space"}
+    return True
 
 
 # ---- scheduled (SHEP-38) -----------------------------------------------------------------------
@@ -310,6 +347,8 @@ def cmd_start(args):
             (q.get("argv") or worker_argv(s, t, space))
         parent = args.parent or q.get("parent")
         plan = {"argv": argv, "space": space, "parent": parent, **({"custom": True} if args.argv else {})}
+        if space_accept(t, space):  # SHEP-5: added with no space known, its space's Accept when ready now
+            s.dirty = True
         at = scheduled_at(args)
         if at:
             # start --at / --in: it starts by itself then, as this start would now.

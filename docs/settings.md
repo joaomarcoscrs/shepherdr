@@ -26,6 +26,7 @@ drops the space's own, and it inherits again. A few settings are one for every s
 | Agents | Reactions (every agent reacts with an emoji; on) | Everywhere, space | A space may want a plainer chat |
 | Agents | Instructions (assistant.md, worker.md, reviewer.md) | Everywhere only | Repo rules belong in the repo's AGENTS.md or CLAUDE.md, which every agent there reads |
 | Tasks | Merge, Review, Must fix, Proof | Everywhere, space | How much care a repo needs differs |
+| Tasks | Accept when ready (new tasks are accepted, merged first, once Ready; off) | Everywhere, space | The person trusts one space's work to land by itself |
 | Tasks | Tasks at once | Everywhere, space | It counts per folder already |
 | Tasks | Archive Done after | Everywhere, space | Some repos keep done work in view longer |
 | Tasks | Worktrees | Everywhere, space | A folder that isn't a repo, or one that can't take worktrees |
@@ -57,6 +58,12 @@ task values a machine set before (the old machine scope) still apply there until
   ids there), and when the web app is served from another machine its service keeps the file in step with that host
   (`service/sync.ts`). So a space on any machine, and the web on the Mac mini, see the same values. On a machine
   still on an older Shepherdr the file is `~/.herdr/shepherdr.json`; pushes and syncs find it there.
+- `tasks.auto_accept` (Accept when ready, SHEP-5): read by the task's own space id (`spaces[<id>]`), never by its folder,
+  since a space's tasks can work in other folders and two spaces can share one; else Everywhere's; off by default. It is
+  decided once per task when its space is first known (added from or for a space, else when it starts, queues or is
+  scheduled) and kept on the task (`accept_default`), so changing the setting only touches tasks added after. On, the
+  task gets the same per-task Accept when ready as its menu's (SHEP-3), which its menu or `herdr-task auto-accept <id>
+  --off` turns off for that one task; `herdr-task add --no-auto-accept` adds one without it.
 - `tasks.worktree_root` (in `everywhere`, a machine's or a space's `tasks`; no row in the window yet): the folder new
   task worktrees go in, e.g. a bigger disk (`~` allowed). Unset: `~/.local/share/shepherdr/worktrees`. A task keeps
   the worktree it has.
