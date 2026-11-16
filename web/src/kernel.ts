@@ -1096,6 +1096,11 @@ export function scheduleTask(t: Task, when: { at?: string; in?: string; off?: bo
   return act({ type: 'schedule', chat: t.agent?.chat ?? `${t.id}/Agent`, ...when })
 }
 
+/** SHEP-3: Accept when ready, on or off for this one task (herdr-task auto-accept); error: herdr-task's refusal */
+export function autoAcceptTask(t: Task, on: boolean): Promise<{ ok?: boolean; error?: string }> {
+  return act({ type: 'auto-accept', chat: t.agent?.chat ?? `${t.id}/Agent`, on })
+}
+
 /** pause a working task: its agent is interrupted and the task is To do until written to */
 export function pauseTask(t: Task) {
   return act({ type: 'pause', chat: t.agent?.chat ?? `${t.id}/Agent` })

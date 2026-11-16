@@ -101,6 +101,10 @@ def evidence(s, t):
     list} or None, git (False: not a git folder), scope, checks, proof, artifacts (its others), merges (Accept
     merges its branch first: an open pull request or commits past its base; the button says so)}."""
     main, out = s.loc["folder"], {"summary": t.get("summary"), "details": t.get("details"), "proof": t.get("proof") or find_proof(s, t)}
+    # SHEP-3: auto-accept on for it (and, when its try didn't go through, why): the card says so.
+    aa = t.get("auto_accept")
+    if isinstance(aa, dict):
+        out["auto_accept"] = {"on": True, **({"failed": aa["failed"]} if aa.get("failed") else {})}
     out["artifacts"] = task_artifacts(s, t, out["proof"])
     commits, files = [], {}
     fmt = "--format=%h%x09%s"

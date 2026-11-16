@@ -29,6 +29,13 @@ export const ACCEPT = {
   noTask: "No task to accept.",
 };
 
+// Auto-accept (SHEP-3) on for it, its try stopped (e.auto_accept.failed: why, from herdr-task's tick): the card says so
+// over the summary, so the person knows why it waits for them after all. null when there's nothing to say.
+export function autoNote(e) {
+  const why = String(e?.auto_accept?.failed ?? "").replace(/\s+/g, " ").trim();
+  return why ? `Auto-accept stopped: ${/[.!?]$/.test(why) ? why : `${why}.`} It waits for your Accept.` : null;
+}
+
 // The Accept button's words (SHEP-225, #1046): what pressing it will do. herdr-task's evidence says `merges` when its
 // branch has work to merge (whatever the Merge setting, Accept merges that first); plain Accept when it only marks the
 // task done (it worked in the folder itself, or nothing is left to merge), and while the card is still being read.

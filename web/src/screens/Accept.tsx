@@ -170,6 +170,8 @@ export function AcceptCard() {
   const ref = t?.ref ?? task
   const settled = !!t && !ready
   const w = A.words(e) as { summary: string; details: string }
+  // SHEP-3: its auto-accept stopped: why it waits for the person after all, over the summary
+  const auto = ready ? (A.autoNote(e) as string | null) : null
   // Escape over the proof (the viewer sits over this card) closes the proof, back to the card as it was
   const cancel = () => (getState().ui.viewer ? closeArtifact() : close())
   // what follows the summary (and the proof, when it shows in the card)
@@ -224,7 +226,10 @@ export function AcceptCard() {
         <div className="@container flex min-h-0 flex-1 flex-col pt-2 text-fg">
           <div className="min-h-0 flex-1 overflow-y-auto @3xl:overflow-hidden">
             <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-4 pb-1 @3xl:h-full @3xl:grid-cols-[minmax(0,1fr)_320px] @3xl:grid-rows-[auto_minmax(0,1fr)] @3xl:gap-x-6 @3xl:pb-0">
-              <p className={clsx('text-pretty @3xl:col-start-2 @3xl:row-start-1', !w.summary && 'text-fg3')}>{w.summary || A.ACCEPT.noSummary}</p>
+              <div className="flex flex-col gap-2 @3xl:col-start-2 @3xl:row-start-1">
+                {auto ? <p role="status" className="text-pretty text-need-fg">{auto}</p> : null}
+                <p className={clsx('text-pretty', !w.summary && 'text-fg3')}>{w.summary || A.ACCEPT.noSummary}</p>
+              </div>
               <div className="@3xl:col-start-1 @3xl:row-start-1 @3xl:row-span-2 @3xl:flex @3xl:min-h-0 @3xl:flex-col"><InlineProof art={proofArt} /></div>
               <div className="flex min-w-0 flex-col gap-4 @3xl:col-start-2 @3xl:row-start-2 @3xl:min-h-0 @3xl:overflow-y-auto @3xl:pb-1">{rest}</div>
             </div>
@@ -232,6 +237,7 @@ export function AcceptCard() {
         </div>
       ) : (
         <div className="flex max-h-[60dvh] min-w-0 flex-col gap-4 overflow-y-auto pt-2 pb-1 text-fg">
+          {auto ? <p role="status" className="max-w-[560px] text-pretty text-need-fg">{auto}</p> : null}
           <p className={clsx('max-w-[560px] text-pretty', !w.summary && 'text-fg3')}>{w.summary || A.ACCEPT.noSummary}</p>
           {rest}
         </div>

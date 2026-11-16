@@ -119,12 +119,26 @@ export function retryLine(r, now = Date.now()) {
 // news and alerts) only once the person's Accept is what's left. Not while its pull request's checks still run or
 // GitHub works out whether it can merge (task.pr.wait, kept by herdr-task's tick), nor while it merges by itself:
 // then it is Working, with what it waits for in a few words. Null when it's the person's.
+// Auto-accept (SHEP-3), as herdr-task's auto_armed(): on for a Ready task that it hasn't tried since it said ready, nor
+// was it accepted since. Its tick accepts it as the person's Accept would; till then it reads Working, "Accepting by
+// itself", never Ready (no Review, no Ready news for a moment). A try that didn't go through (auto_accept.failed) leaves
+// it Ready, saying so.
+export const AUTO_ACCEPTING = "Accepting by itself";
+export function autoArmed(task) {
+  const aa = task.auto_accept;
+  if (!aa || typeof aa !== "object" || task.state !== "ready") return false;
+  return aa.tried !== task.ready_at && (task.accepted_at ?? 0) < (task.ready_at ?? 1);
+}
+// Its row's mark: on and not done yet ("Auto-accept"), or its try stopped (the second line says why).
+export const autoAcceptOn = (task) => !!task.auto_accept && typeof task.auto_accept === "object" && task.state !== "done";
+export const autoAcceptStopped = (task) => (autoAcceptOn(task) && task.state === "ready" && task.auto_accept.failed) || null;
+
 export function readyWait(task, live = []) {
   if (task.merge_requested && live.length) return "Merging";
   if (task.merge_queued && task.pr) return "In GitHub's merge queue";
   // #743: waits calmly for a review GitHub requires.
   if (task.auto_merge && task.pr && !task.merged) return task.pr.needs_approval ? "Merges once it's approved" : "Merges once its checks pass";
-  return task.pr?.wait || null;
+  return task.pr?.wait || (autoArmed(task) ? AUTO_ACCEPTING : null);
 }
 
 // A task's status (its section), why it needs the person, and its live agents. live: its agents now
@@ -297,7 +311,8 @@ export function secondLine(p, w, queued = null, now = Date.now()) {
   return section === "needs" || section === "merging" ? p.why : section === "working" ? p.why ?? w?.text ?? null
     : section === "queued" ? queued
     : section === "scheduled" ? startsLine(p.task.scheduled_for, now)
-    : section === "ready" ? (p.task.ready_at ? `Ready ${ago(p.task.ready_at, true, now)}` : "Ready to accept") : null;
+    : section === "ready" ? (autoAcceptStopped(p.task) ? `Auto-accept stopped: ${autoAcceptStopped(p.task)}`
+      : p.task.ready_at ? `Ready ${ago(p.task.ready_at, true, now)}` : "Ready to accept") : null;
 }
 
 // The minutes left under a working row's dot ("6m"), once its agent gave them; a scheduled one's time until it starts
