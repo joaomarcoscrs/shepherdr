@@ -1340,7 +1340,7 @@ def cmd_auto_accept(args):
             # On again re-arms it: a try that didn't go through is tried again at the next tick, if it is Ready.
             t["auto_accept"] = {"at": now()}
             s.dirty = True
-            msg = (f"{s.ref(t)}: auto-accept is on. Once it is Ready (checks passed, nothing waiting on you), Herdr "
+            msg = (f"{s.ref(t)}: auto-accept is on. Once it is Ready (checks passed, nothing waiting on the person), Herdr "
                    f"accepts it as the person's Accept would" + (", merging it first" if t.get("mode") == "worktree" else "") +
                    ". Turn it off any time before then.")
         v = view(s, t)
