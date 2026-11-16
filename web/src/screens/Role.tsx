@@ -101,14 +101,19 @@ function ModelMenu({ role, start, up, onClose, save }: { role: string; start: Ag
             onPick={(x) => { if (x.agent === sel.agent && x.id === sel.model) return; const menus = withTyped(data.menus, x); if (menus !== data.menus) setData({ ...data, menus }); change(chooseModel(menus, data.permDefault, sel, x.agent, x.id)) }}
             onPin={(agent, id) => void act({ type: 'model-pin', agent, model: id } as never).then((r: any) => r?.picks && setPicks(r.picks), () => undefined)} />
           <MenuSeparator />
-          <MenuLabel>{MODEL_MENU.reasoning}</MenuLabel>
-          <div className="px-2 pb-1 phone:px-3">
-            <Tabs label={MODEL_MENU.reasoning} className="flex! w-full">
-              {(model?.efforts ?? []).map((e) => (
-                <Tab key={e} fill on={level === e} onClick={() => level !== e && change({ ...sel, effort: e })}>{levelName(e)}</Tab>
-              ))}
-            </Tabs>
-          </div>
+          {/* a model with no levels to pick (Cursor's) has no Reasoning, as the window's menu */}
+          {model?.efforts?.length ? (
+            <>
+              <MenuLabel>{MODEL_MENU.reasoning}</MenuLabel>
+              <div className="px-2 pb-1 phone:px-3">
+                <Tabs label={MODEL_MENU.reasoning} className="flex! w-full">
+                  {model.efforts.map((e) => (
+                    <Tab key={e} fill on={level === e} onClick={() => level !== e && change({ ...sel, effort: e })}>{levelName(e)}</Tab>
+                  ))}
+                </Tabs>
+              </div>
+            </>
+          ) : null}
           {fast ? <MenuSwitch name={MODEL_MENU.fast} icon={<SpeedIcon className={ic} />} on={!!sel.fast} onClick={() => change({ ...sel, fast: !sel.fast })} /> : null}
           {menu?.perms.length ? (
             <>

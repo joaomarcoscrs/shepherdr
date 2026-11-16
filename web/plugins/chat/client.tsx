@@ -2888,7 +2888,7 @@ function placeholderOf(chatKey: string, chat: Chat | undefined, fallback: string
   if (chatKey.startsWith('p:')) return 'Message the Assistant'
   const task = taskChatId(chatKey)
   if (task) return `Message ${task}`
-  return chatKey.startsWith('t:') ? `Message ${({ claude: 'Claude Code', codex: 'Codex' } as Record<string, string>)[chat?.cli ?? ''] ?? 'the agent'}` : fallback
+  return chatKey.startsWith('t:') ? `Message ${({ claude: 'Claude Code', codex: 'Codex', cursor: 'Cursor' } as Record<string, string>)[chat?.cli ?? ''] ?? 'the agent'}` : fallback
 }
 
 /** a task whose agent has ended: the window's line and its Resume, in place of the message box */
