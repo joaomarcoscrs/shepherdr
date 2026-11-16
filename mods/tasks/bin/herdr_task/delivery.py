@@ -187,8 +187,9 @@ def handoff_gate(s, t, dv, wt, summary, blocked=None):
                 f"as blocked, `herdr-task ready {ref} --blocked \"<why>\"`.")
     from .settings import GATE_WORDS
     return (f"Pull request {url} is open" + (f" and assigned to {', '.join('@' + x for x in h['assignees'])}" if h.get("assignees") else "")
-            + f". It waits for {name}'s approval of its exact head {head[:7]}: run {GATE_WORDS.get(dv['review'], dv['review'])} "
-            f"on it, then run ready again (it reads the verdict on GitHub). Try {h['tries']} of {MAX_TRIES}.")
+            + f". It waits for {name}'s approval of its exact head {head[:7]}: run "
+            f"{GATE_WORDS.get(dv['review'], dv['review']).replace('<its pull request' + chr(39) + 's link>', url)}, then run ready "
+            f"again (it reads the verdict on GitHub). Try {h['tries']} of {MAX_TRIES}.")
 
 
 def accept_check(s, t):

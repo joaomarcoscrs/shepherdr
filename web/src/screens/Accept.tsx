@@ -177,8 +177,8 @@ function Handoff({ e }: { e: Evidence }) {
     <div className="flex min-w-0 flex-col gap-1.5">
       {e.handoff?.url ? <LinkRow href={e.handoff.url} label={A.ACCEPT.pullRequest(e.handoff.pr)} action={A.ACCEPT.github} /> : null}
       {lines.map((w, i) => (
-        <p key={i} className="flex min-w-0 items-center gap-2">
-          {TONE[w.tone] ? <span className={clsx('size-[7px] shrink-0 rounded-full', TONE[w.tone])} /> : null}
+        <p key={i} className="flex min-w-0 items-start gap-2">
+          {TONE[w.tone] ? <span className={clsx('mt-[0.5lh] size-[7px] shrink-0 -translate-y-1/2 rounded-full', TONE[w.tone])} /> : null}
           <span className={clsx('min-w-0', w.tone === 'muted' && 'text-fg3')}>{w.text}</span>
           {i === 1 && e.handoff?.comment ? (
             <a href={e.handoff.comment} target="_blank" rel="noreferrer noopener" className="flex shrink-0 items-center gap-1 text-xs text-fg3 hover:text-fg phone:text-[0.8125rem]">
