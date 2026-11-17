@@ -14,6 +14,7 @@ import * as SC from "../core/screens.js";
 import * as CV from "../core/chat-view.js";
 import * as AG from "../core/agents.js";
 import { layoutScript } from "./layout-scripts.ts";
+import { historyLines } from "../core/mouse-leak.js";
 
 const { ScreenWatch, starting, cliOf, readScreen, screenText, pressKeys, SCREEN } = SC as any;
 const { LOST, lostMessage, shellWord, WORDS, sessionStarted, sessionFailed } = CV as any;
@@ -87,7 +88,7 @@ export class AgentWatch {
     const fresh = kind ? freshArgv(kind, t?.argv) : null;
     if (!fresh || !t) return;
     if (t.state !== "live" && (t.exit_code ?? 1) === 0) return;
-    const screen = (await this.hc(["read", addr, "--lines", "40"]).catch(() => null))?.stdout ?? "";
+    const screen = (await this.hc(["read", addr, "--lines", String(historyLines(t, 40))]).catch(() => null))?.stdout ?? "";
     if (!LOST.test(screen.split("\n").slice(-30).join("\n"))) return;
     // the window's chat starts it when it watches this agent: give it the time, then only if it hasn't
     const done = () => Date.now() - (this.o.windowLost()?.[addr] ?? 0) < 120_000;

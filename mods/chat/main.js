@@ -39,6 +39,7 @@ import { WORDS, clock, bgGroups, subagentsOf, subagentWord, senderName, briefLab
 import { refusal, taskTag, messageBody, replyInstead, steerNow, reactionLine, mentionedIn, sendTyped, SETTLE } from "./core/send.js";
 // hc whose send goes as the person, with no caller: never "Another agent" on another machine (SHEP-3, core/person.js).
 import { asPerson } from "./core/person.js";
+import { historyLines } from "./core/mouse-leak.js";
 import { AskCards, linkCtl } from "./cards.js";
 import * as strips from "./strips.js";
 import { button, red, green, amber, H, RADIUS, TEXT, toast, toastWho, plainError } from "./ui.js";
@@ -1061,7 +1062,7 @@ export default class Chat extends View {
     const fresh = kind ? agent.freshArgv(kind, t?.argv) : null;
     if (!fresh) return false;
     if (t.state !== "live" && (t.exit_code ?? 1) === 0) return false;
-    const screen = (await hc(["read", addr, "--lines", "40"]).catch(() => null))?.stdout ?? "";
+    const screen = (await hc(["read", addr, "--lines", String(historyLines(t, 40))]).catch(() => null))?.stdout ?? "";
     if (!LOST.test(screen.split("\n").slice(-30).join("\n"))) return false;
     // One start for it, whichever chat saw it first (its own, its Assistant's): shared "chat.lost"
     // = { [address]: when }.

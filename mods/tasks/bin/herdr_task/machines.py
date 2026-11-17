@@ -956,7 +956,8 @@ def _deliver(names, hows, address, text):
         return False
     for i in range(3):
         time.sleep(0.4)
-        if "ctrl+enter to send now" in there(["hc", "read", address, "--lines", "40"]).stdout.lower():
+        # its screen alone (SHEP-14): history is read by scrolling a full-screen agent (Codex) with mouse reports
+        if "ctrl+enter to send now" in there(["hc", "read", address, "--lines", "0"]).stdout.lower():
             there(["hc", "keys", address, "ctrl+enter"])
             break
     return True

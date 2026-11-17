@@ -502,3 +502,49 @@ class TestsOnAThrowawayHome(unittest.TestCase):
         # this repo's own files are fine, wherever its worktree lives
         open(J("README.md")).close()
         subprocess.run(["true"], check=True)
+
+
+class NoCodexHistoryReads(unittest.TestCase):
+    """SHEP-14: herdr-core reads a full-screen app's history (`hc read <t> --lines N`, N > 0) by scrolling it, with
+    wheel reports at its screen's middle ("[<65;101;61M" on 200x120). Codex runs full screen with mouse reports on, so
+    such a read sends it a burst it can type into its box, and holds hc's quiet pause before any send. A fixed history
+    count is only for terminals that are never Codex; anything else reads core/mouse-leak.js historyLines (Python:
+    news.history_lines)."""
+
+    # (file, history count) -> why that read never reaches Codex (a shared module's copies count as its source)
+    NEVER_CODEX = {
+        ("core/send.js", "40"): "steerNow: Claude Code's send-now, only after a send to Claude",
+        ("lib/coordinator.js", "40"): "shellState: a shell's prompt",
+        ("mods/tasks/bin/herdr_task/news.py", "40"): "news_send: Claude Code's send-now (herdr.agent claude)",
+        ("mods/tasks/bin/herdr_task/agents.py", "40"): "trust_asked: Claude Code's trust dialog (herdr.agent claude)",
+        ("mods/chat/main.js", "8"): "endedWhy: an agent that already ended",
+        ("bin/herdr-browser-view", "40"): "tell: Claude Code's send-now (ws.claude)",
+    }
+    READ = re.compile(r"""["']read["'],\s*[^,\n]+?,\s*["']--lines["'],\s*["'](\d+)["']""")
+
+    @staticmethod
+    def source_of(rel):
+        """A shared module's copy in a mod (lib/COPIES) stands for its source."""
+        if rel.startswith("mods/") and rel.endswith("/core/send.js"):
+            return "core/send.js"
+        if rel.startswith("mods/") and rel.endswith("/coordinator.js"):
+            return "lib/coordinator.js"
+        return rel
+
+    def test_history_counts_only_where_codex_never_is(self):
+        found = []
+        for p in text_files():
+            rel = os.path.relpath(p, ROOT)
+            if "/.last/" in rel or rel.endswith((".test.js", ".test.ts")):
+                continue
+            try:
+                with open(p, encoding="utf-8") as f:
+                    text = f.read()
+            except (UnicodeDecodeError, OSError):
+                continue
+            for m in self.READ.finditer(text):
+                if m.group(1) != "0":
+                    found.append((self.source_of(rel), m.group(1), text.count("\n", 0, m.start()) + 1))
+        stray = [f"{rel}:{line}" for rel, n, line in found if (rel, n) not in self.NEVER_CODEX]
+        self.assertEqual(stray, [], "reads a fixed history count where Codex may run: use historyLines / history_lines")
+        self.assertTrue(found, "the pattern no longer matches anything: update this test")
