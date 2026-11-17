@@ -92,7 +92,7 @@ export default function App() {
     <div
       data-device={device}
       className={clsx(
-        'isolate flex h-full touch-pan-y touch-pinch-zoom flex-col overflow-hidden bg-bg font-sans text-sm/5 antialiased phone:text-base/6',
+        'isolate flex h-full touch-pan-y touch-pinch-zoom flex-col overflow-hidden bg-bg pane-wash font-sans text-sm/5 antialiased phone:text-base/6',
         device !== 'phone' && 'pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pl-[env(safe-area-inset-left)]',
         device !== 'phone' && !keyboard && 'pb-[env(safe-area-inset-bottom)]',
       )}
@@ -155,12 +155,19 @@ function useKeyboard() {
 export function Brand() {
   const snap = useSnap()!
   return (
-    <div className="flex items-center gap-1 px-3.5 pt-3 pb-0.5 text-[0.9375rem] font-semibold desktop:pr-2.5 phone:px-5 phone:pt-3 phone:pb-1 phone:text-[1.125rem]">
-      <CrookIcon className="mr-0.5 size-6" />
-      <span className="min-w-0 flex-1 truncate">{snap.name}</span>
-      {registry.sideHead.map((View, i) => <View key={i} />)}
-      <SearchButton />
-      <PlacesToggle when="open" />
+    <div className="flex flex-col">
+      <div className="flex items-center gap-1 px-3.5 pt-3 pb-0.5 text-[0.9375rem] font-semibold desktop:pr-2.5 phone:px-5 phone:pt-3 phone:pb-1 phone:text-[1.125rem]">
+        {/* the mark in a warm tile, as the window's brand (company-brand) shows its sign */}
+        <span aria-hidden className="mr-1.5 grid size-7 shrink-0 place-items-center overflow-hidden rounded-[8px] bg-[linear-gradient(135deg,#f5a25d,#f2707a)] pt-1 text-[#18181a] phone:size-8">
+          <CrookIcon className="size-6 overflow-visible phone:size-7" />
+        </span>
+        <span className="min-w-0 flex-1 truncate">{snap.name}</span>
+        {registry.sideHead.map((View, i) => <View key={i} />)}
+        <SearchButton />
+        <PlacesToggle when="open" />
+      </div>
+      {/* the window's pixel rule under its brand (jhq-rule) */}
+      <span aria-hidden className="pixel-rule mx-3.5 mt-2 mb-1 phone:mx-5" />
     </div>
   )
 }

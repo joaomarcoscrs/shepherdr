@@ -133,7 +133,7 @@ export function Pushed({
     })
   }
   return (
-    <section ref={ref} role={role} aria-label={label} data-pushed="" onPointerDown={down} className={clsx('absolute inset-0 flex flex-col bg-bg shadow-push', className)}>
+    <section ref={ref} role={role} aria-label={label} data-pushed="" onPointerDown={down} className={clsx('absolute inset-0 flex flex-col bg-bg pane-wash shadow-push', className)}>
       {children}
       {/* the very edge always takes a swipe back, even over something that scrolls sideways (a diff, a terminal); with
           a screen pushed inside this one (a settings section over their list), that one's edge takes it */}
@@ -243,7 +243,7 @@ export function Drawer({ open, onOpen, can, panel, label, children }: { open: bo
   return (
     <div ref={root} inert={!open} onPointerDown={shut} className="absolute inset-0 z-5 touch-pan-y overflow-hidden">
       <button ref={shade} type="button" aria-label="Close" tabIndex={-1} className="absolute inset-0 bg-black/30" onClick={() => onOpen(false)} />
-      <nav ref={side} aria-label={label} className={clsx('absolute inset-y-0 left-0 flex min-h-0 touch-pan-y flex-col overflow-x-hidden overflow-y-auto overscroll-contain bg-well shadow-drawer will-change-transform', panel)}>
+      <nav ref={side} aria-label={label} className={clsx('absolute inset-y-0 left-0 flex min-h-0 touch-pan-y flex-col overflow-x-hidden overflow-y-auto overscroll-contain bg-well side-wash shadow-drawer will-change-transform', panel)}>
         {/* drawn all along, hidden while shut: a swipe doesn't wait for the list to be drawn under the finger */}
         {children}
       </nav>
