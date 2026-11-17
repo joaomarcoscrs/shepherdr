@@ -26,18 +26,72 @@ export const webOrigin = (dns: string, hp = DEFAULT_HTTPS) => (hp === DEFAULT_HT
 /** The web app's link: <origin>/shepherdr/. */
 export const webLink = (dns: string, hp = DEFAULT_HTTPS) => `${webOrigin(dns, hp)}${MOUNT}/`;
 
-async function run(args: string[]): Promise<{ ok: boolean; out: string; err: string }> {
-  try {
-    const p = Bun.spawn(["tailscale", ...args], { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
-    const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
-    return { ok: (await p.exited) === 0, out, err };
-  } catch (e) {
-    return { ok: false, out: "", err: (e as Error).message };
+// tailscale's own commands can hang (JHQ-40: `tailscale serve` waiting for Serve to be enabled, a wedged tailscaled):
+// each call has a time limit, past which it and anything it started are ended (its own process group: TERM, then KILL),
+// and the caller hears TailscaleStuck. SHEPHERDR_TAILSCALE: another tailscale (tests).
+export const LIMITS = { read: 8_000, change: 20_000, grace: 2_000 };
+const bin = () => process.env.SHEPHERDR_TAILSCALE || "tailscale";
+
+/** tailscale didn't answer in time: why, in words the person can act on (its own words when it said some). */
+export class TailscaleStuck extends Error {
+  constructor(public command: string, public seconds: number, public said = "") {
+    super(`Tailscale isn't answering (\`tailscale ${command}\` took over ${seconds} s${said ? `: ${said}` : ""}). ` +
+      "Shepherdr keeps trying; check `tailscale status` on this machine.");
   }
 }
 
+// the tailscale calls running now, so a service that stops ends them too (stopTailscale)
+const running = new Set<{ pid: number; kill(sig?: number | NodeJS.Signals): void }>();
+function signal(p: { pid: number; kill(sig?: number | NodeJS.Signals): void }, sig: NodeJS.Signals) {
+  try { process.kill(-p.pid, sig); } catch { try { p.kill(sig); } catch {} }
+}
+/** Ends every tailscale call still running (the service stopping): nothing is left behind. */
+export function stopTailscale() {
+  for (const p of running) signal(p, "SIGKILL");
+  running.clear();
+}
+// in their own process group, so a service that ends any other way (a crash, the port taken) ends them on its way out
+process.on("exit", stopTailscale);
+/** How many tailscale calls run now (tests). */
+export const tailscaleRunning = () => running.size;
+
+const firstWords = (t: string) => t.trim().split("\n").map((l) => l.trim()).filter(Boolean).slice(0, 2).join(" ").slice(0, 300);
+
+async function run(args: string[], limit = LIMITS.read): Promise<{ ok: boolean; out: string; err: string; stuck?: TailscaleStuck }> {
+  let p: ReturnType<typeof Bun.spawn<"ignore", "pipe", "pipe">>;
+  try {
+    // its own process group, so a timeout ends what it started too
+    p = Bun.spawn([bin(), ...args], { stdout: "pipe", stderr: "pipe", stdin: "ignore", detached: true } as any) as any;
+  } catch (e) {
+    return { ok: false, out: "", err: (e as Error).message };
+  }
+  running.add(p);
+  const got = { out: "", err: "" };
+  const drain = async (s: ReadableStream<Uint8Array>, k: "out" | "err") => {
+    const d = new TextDecoder();
+    try { for await (const c of s as any) got[k] += d.decode(c, { stream: true }); } catch {}
+  };
+  const reads = Promise.all([drain(p.stdout, "out"), drain(p.stderr, "err")]);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<"late">((r) => { timer = setTimeout(() => r("late"), limit); });
+  try {
+    const code = await Promise.race([Promise.all([p.exited, reads]).then(([c]) => c), late]);
+    if (code !== "late") return { ok: code === 0, ...got };
+    signal(p, "SIGTERM");
+    if ((await Promise.race([p.exited, Bun.sleep(LIMITS.grace).then(() => "late" as const)])) === "late") signal(p, "SIGKILL");
+    await Promise.race([p.exited, Bun.sleep(LIMITS.grace)]);
+    const stuck = new TailscaleStuck(args.filter((a) => !/^\d+$/.test(a)).join(" "), Math.round(limit / 1000), firstWords(got.err || got.out));
+    return { ok: false, ...got, stuck };
+  } finally {
+    clearTimeout(timer);
+    running.delete(p);
+  }
+}
+
+/** serve status, read: what it says, or {} when it failed. A tailscale that doesn't answer throws TailscaleStuck. */
 async function serveStatus(): Promise<any> {
   const r = await run(["serve", "status", "--json"]);
+  if (r.stuck) throw r.stuck;
   try { return r.ok ? JSON.parse(r.out || "{}") : {}; } catch { return {}; }
 }
 
@@ -56,9 +110,11 @@ export function meOf(out: string): Me | null {
   }
 }
 
-/** The machine owner's login and the machine's tailnet name, or null without Tailscale. */
+/** The machine owner's login and the machine's tailnet name, or null without Tailscale. Throws TailscaleStuck when
+ *  tailscale doesn't answer in time (not the same as not running: who owns the machine stays what it was). */
 export async function whoami(): Promise<Me | null> {
   const r = await run(["status", "--json"]);
+  if (r.stuck) throw r.stuck;
   return r.ok ? meOf(r.out) : null;
 }
 
@@ -76,7 +132,8 @@ export async function served(dns: string, status?: any): Promise<Served> {
       if (h) return { proxy: h.Proxy ?? null, port, funnel: !!s.AllowFunnel?.[hostPort] };
     }
     return none;
-  } catch {
+  } catch (e) {
+    if (e instanceof TailscaleStuck) throw e;
     return none;
   }
 }
@@ -123,16 +180,23 @@ export async function share(dns: string, port: number, hp = DEFAULT_HTTPS): Prom
   if (now.proxy === ours && now.port === String(hp)) return null;
   if (now.proxy && now.proxy !== ours) return `${MOUNT} is already shared to ${now.proxy}`;
   if (heldBy(status, hp)) return shareProblem(status, hp);
-  const r = await run(["serve", "--bg", `--https=${hp}`, "--set-path", MOUNT, String(port)]);
+  const r = await run(["serve", "--bg", `--https=${hp}`, "--set-path", MOUNT, String(port)], LIMITS.change);
+  if (r.stuck) throw r.stuck;
   if (!r.ok) return shareProblem(status, hp, r.err || r.out);
-  if (now.proxy === ours && now.port) await run(["serve", `--https=${now.port}`, "--set-path", MOUNT, "off"]);
+  if (now.proxy === ours && now.port) {
+    const off = await run(["serve", `--https=${now.port}`, "--set-path", MOUNT, "off"], LIMITS.change);
+    if (off.stuck) throw off.stuck;
+  }
   return null;
 }
 
-/** Stops sharing /shepherdr. port: only when it leads to this service (another one's share is left alone). */
+/** Stops sharing /shepherdr. port: only when it leads to this service (another one's share is left alone).
+ *  Throws TailscaleStuck when tailscale doesn't answer in time (then it isn't known to be stopped: try again). */
 export async function unshare(dns: string, port?: number): Promise<void> {
   const now = await served(dns);
-  if (now.proxy && (port === undefined || now.proxy === `http://127.0.0.1:${port}`)) await run(["serve", `--https=${now.port ?? 443}`, "--set-path", MOUNT, "off"]);
+  if (!now.proxy || (port !== undefined && now.proxy !== `http://127.0.0.1:${port}`)) return;
+  const r = await run(["serve", `--https=${now.port ?? 443}`, "--set-path", MOUNT, "off"], LIMITS.change);
+  if (r.stuck) throw r.stuck;
 }
 
 /** What a move here set aside (shepherdr web serve-from --take-link: ~/.local/state/shepherdr/service/replaced-share.json), shared
@@ -141,7 +205,7 @@ export async function restoreShare(file: string): Promise<boolean> {
   let r: { port?: string; proxy?: string } | null = null;
   try { r = JSON.parse(await Bun.file(file).text()); } catch { return false; }
   if (!r?.proxy || !/^\d+$/.test(String(r.port)) || !/^https?:\/\/127\.0\.0\.1:\d+\/?$/.test(r.proxy)) return false;
-  const ok = (await run(["serve", "--bg", `--https=${r.port}`, "--set-path", MOUNT, r.proxy])).ok;
+  const ok = (await run(["serve", "--bg", `--https=${r.port}`, "--set-path", MOUNT, r.proxy], LIMITS.change)).ok;
   if (ok) try { (await import("node:fs")).unlinkSync(file); } catch {}
   return ok;
 }
