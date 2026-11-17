@@ -7197,3 +7197,273 @@ class DeliveryProfiles(unittest.TestCase):
         self.ready(1)
         self.assertFalse([c for c in self.calls if c[:2] == ("api", "--paginate") or c[:2] == ("pr", "edit")])
         self.assertNotIn("handoff", self.task(1))
+
+
+class BranchUpdates(unittest.TestCase):
+    """SHEP-10: a branch update of a pull request the person named (herdr-task add --update-pr): the person's ask is its
+    Accept, so the tick accepts it by itself once Herdr reads it clean on GitHub, in a Merge space and an Open PR space
+    alike, and never changes either space's settings. A real throwaway repo with a real bare "origin" the worker pushes
+    to (normal pushes, a force push in one test); GitHub is a fake that reads the pull request's head from that origin.
+    Every gh call is recorded; a `pr merge` or `pr edit` fails the test (Herdr never merges or edits the pull request)."""
+    ROBO, HQ = DeliveryProfiles.ROBO, DeliveryProfiles.HQ
+    setUp_auto, run_cmd, task, git = AutoAccept.setUp, Scheduled.run_cmd, Scheduled.task, AutoAccept.git
+    tick_at, status, settings, spaces = AutoAccept.tick_at, AutoAccept.status, DeliveryProfiles.settings, DeliveryProfiles.spaces
+    ready = DeliveryProfiles.ready
+    PASSED = [{"name": "test", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "1"}]
+
+    def setUp(self):
+        self.setUp_auto()
+        from unittest import mock
+        import herdr_task.branch_update as bu
+        import herdr_task.settings as settings
+        self.bu, self.settings_mod = bu, settings
+        self.origin = os.path.join(self.tmp, "origin.git")
+        subprocess.run(["git", "clone", "-q", "--bare", self.folder, self.origin], check=True)
+        self.git(self.folder, "remote", "add", "origin", self.origin)
+        # the pull request's branch: one commit of its own, pushed; then main moves on (it is behind)
+        self.clone = os.path.join(self.tmp, "clone")
+        subprocess.run(["git", "clone", "-q", self.origin, self.clone], check=True)
+        self.git(self.clone, "checkout", "-q", "-b", "feat")
+        self.commit(self.clone, "feat.txt")
+        self.git(self.clone, "push", "-q", "origin", "feat")
+        self.git(self.clone, "checkout", "-q", "main")
+        self.commit(self.clone, "main.txt")
+        self.git(self.clone, "push", "-q", "origin", "main")
+        self.git(self.clone, "checkout", "-q", "feat")
+        self.pr = {"number": 7, "state": "OPEN", "headRefName": "feat", "baseRefName": "main", "isCrossRepository": False,
+                   "mergeable": "MERGEABLE", "checks": list(self.PASSED), "url": "https://github.com/o/r/pull/7"}
+        self.calls = []
+
+        def gh(*args, cwd=None):
+            self.calls.append(args)
+            if args[:2] in (("pr", "merge"), ("pr", "edit"), ("pr", "ready")):
+                raise AssertionError(f"Herdr touched the pull request: {args}")
+            if args[:2] == ("repo", "view"):
+                return True, "o/r", ""
+            if args[:2] == ("api", "repos/o/r/branches/main"):
+                return True, self.ref("main"), ""
+            if args[:2] == ("pr", "view") and args[2] == str(self.pr["number"]):
+                p = self.pr
+                return True, json.dumps({"number": p["number"], "state": p["state"], "url": p["url"], "headRefName": p["headRefName"],
+                                         "baseRefName": p["baseRefName"], "headRefOid": self.ref(p["headRefName"]),
+                                         "isCrossRepository": p["isCrossRepository"], "mergeable": p["mergeable"],
+                                         "statusCheckRollup": p["checks"]}), ""
+            if args[:2] == ("pr", "view"):
+                return False, "", "no pull requests found"
+            return False, "", "not faked"
+        p = mock.patch.object(bu, "gh", gh)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def ref(self, branch):
+        return self.git(self.origin, "rev-parse", f"refs/heads/{branch}")
+
+    def commit(self, wt, name):
+        with open(os.path.join(wt, name), "w") as f:
+            f.write(name)
+        self.git(wt, "add", "-A")
+        self.git(wt, "-c", "user.name=T", "-c", "user.email=t@example.com", "commit", "-q", "-m", name)
+
+    def update(self, n=1, space=None, **kw):
+        """The Assistant's add for "update #7 with main", then its worker started (as begin() would)."""
+        out = self.run_cmd(self.commands.cmd_add, title="Update #7 with main", prompt="Bring main in.", update_pr="7",
+                           space=space, **kw)
+        with self.store_mod.Store(self.store_mod.locate(self.folder)) as s:
+            t = s.find(n)
+            self.settings_mod.keep_delivery(t, space)
+            block = self.settings_mod.settings_block(s, t, space, ["claude"])
+            t.update(state="running", started=1)
+            s.dirty = True
+        return out, block
+
+    def merge_and_push(self):
+        """The worker's update: main merged in and pushed with a normal push."""
+        self.git(self.clone, "fetch", "-q", "origin")
+        self.git(self.clone, "-c", "user.name=T", "-c", "user.email=t@example.com", "merge", "-q", "--no-edit", "origin/main")
+        self.git(self.clone, "push", "-q", "origin", "feat")
+
+    def settings_now(self):
+        with open(os.path.join(self.tmp, "settings.json")) as f:
+            return f.read()
+
+    # ---- what add keeps and what the brief says ----
+
+    def test_add_reads_the_pull_request_and_its_brief_says_how(self):
+        self.spaces()
+        before = self.settings_now()
+        out, block = self.update(space=self.ROBO)
+        t = self.task(1)
+        bu = t["branch_update"]
+        self.assertEqual((t["mode"], bu["pr"], bu["repo"], bu["branch"], bu["base"], bu["how"]), ("here", 7, "o/r", "feat", "main", "merge"))
+        self.assertEqual((bu["from"], bu["base_at"]), (self.ref("feat"), self.ref("main")))
+        self.assertEqual((t["auto_accept"]["by"], t["accept_default"], t["set"]["proof"]), ("branch-update", "task", "off"))
+        self.assertFalse(t.get("worktree") or t.get("branch"))
+        # the Open PR space's Delivery never applies: no hand-off, nothing merged, and the how is in the brief
+        self.assertNotIn("- Delivery:", block)
+        self.assertIn("- Merge: never: you update pull request #7's own branch", block)
+        line = next(x for x in block.splitlines() if x.startswith("- Branch update:"))
+        for words in ("https://github.com/o/r/pull/7", "`feat`", "`git merge origin/main`", "never a rebase", "normal `git push`, never force",
+                      "gh pr checks 7 --watch", "accepted by itself", "Never merge the pull request", "touch no other branch",
+                      "set by the assistant for this task"):
+            self.assertIn(words, line)
+        self.assertEqual(self.settings_now(), before)  # no space's setting changed
+
+    def test_rebase_only_when_asked_and_it_asks_before_a_force_push(self):
+        self.spaces()
+        _, block = self.update(space=self.HQ, rebase=True)
+        self.assertEqual(self.task(1)["branch_update"]["how"], "rebase")
+        line = next(x for x in block.splitlines() if x.startswith("- Branch update:"))
+        self.assertIn("rebase `feat` onto `origin/main`, as the person asked", line)
+        self.assertIn("ask the person in your chat (question tool) before any `--force-with-lease`", line)
+        with self.assertRaises(self.Fail):
+            self.run_cmd(self.commands.cmd_add, title="Plain", rebase=True)  # --rebase alone is no branch update
+
+    def test_refused_for_a_closed_fork_other_repo_or_unknown_pull_request_and_with_a_worktree(self):
+        cases = [({"state": "MERGED"}, "7", "merged"), ({"isCrossRepository": True}, "7", "fork"),
+                 ({}, "https://github.com/x/y/pull/7", "x/y"), ({}, "8", "couldn't read"), ({}, "seven", "number or link")]
+        for change, ref, words in cases:
+            with self.subTest(words=words):
+                self.pr.update({"state": "OPEN", "isCrossRepository": False, **change})
+                with self.assertRaises(self.Fail) as e:
+                    self.run_cmd(self.commands.cmd_add, title="Update", update_pr=ref)
+                self.assertIn(words, str(e.exception).lower())
+        with self.assertRaises(self.Fail):
+            self.run_cmd(self.commands.cmd_add, title="Update", update_pr="7", worktree=True)
+        with self.store_mod.Store(self.store_mod.locate(self.folder), write=False) as s:
+            self.assertEqual(s.data["tasks"], [])  # nothing added by a refusal
+
+    # ---- accepted by itself when clean, in both delivery profiles ----
+
+    def test_clean_update_is_accepted_by_itself_in_a_merge_and_an_open_pr_space(self):
+        # roboflow: Open PR, Accept when ready off; joão HQ: Merge, and its Accept when ready off here too
+        self.spaces()
+        self.settings({"spaces": {self.HQ: {"folder": "/srv/hq", "tasks": {"delivery": "merge", "auto_accept": False}},
+                                  self.ROBO: {"folder": self.folder, "tasks": {"delivery": "open_pr", "pr_assign": "joao",
+                                                                               "pr_review": "jarbas-local"}}}})
+        before = self.settings_now()
+        for n, space in ((1, self.ROBO), (2, self.HQ)):
+            with self.subTest(space=space):
+                self.pr["checks"] = [{"name": "test", "status": "IN_PROGRESS", "conclusion": "", "startedAt": "1"}]
+                self.update(n, space=space)
+                self.merge_and_push()
+                # checks still run: ready waits (Working), nothing accepted
+                with self.assertRaises(self.Fail) as e:
+                    self.ready(n)
+                self.assertIn("checks still run", str(e.exception))
+                self.assertEqual(self.task(n)["state"], "running")
+                self.pr["checks"] = list(self.PASSED)
+                out = self.ready(n)
+                self.assertEqual(out["state"], "ready")
+                c = self.task(n)["branch_update"]["check"]
+                self.assertTrue(c["clean"], c)
+                self.assertIn("contains main", c["line"])
+                self.assertEqual(self.status(n), ("working", "Accepting by itself"))
+                # a fresh list read from disk each tick, as after a restart
+                report = self.tick_at(int(__import__("time").time() * 1000) + n)
+                self.assertEqual(report.get("auto_accepted"), [{"ref": f"APP-{n}", "how": "done"}])
+                t = self.task(n)
+                self.assertEqual((t["state"], t.get("accepted_by"), t.get("merged")), ("done", "auto", None))
+                self.assertNotIn("handoff", t)
+                self.assertNotIn("pr", t)
+                # the news says what Herdr found
+                with self.store_mod.Store(self.store_mod.locate(self.folder), write=False) as s:
+                    line = __import__("herdr_task.news", fromlist=["x"]).news_line(s, t, {}, "done")
+                self.assertIn("(auto-accept) · Branch update checked: pull request #7", line)
+                # the next one starts from main moved on again
+                self.git(self.clone, "checkout", "-q", "main")
+                self.git(self.clone, "pull", "-q", "--no-rebase", "origin", "main")
+                self.commit(self.clone, f"main{n}.txt")
+                self.git(self.clone, "push", "-q", "origin", "main")
+                self.git(self.clone, "checkout", "-q", "feat")
+        self.assertEqual(self.settings_now(), before)
+        # Herdr itself pushed nothing and never touched the pull request beyond reading it
+        self.assertFalse([c for c in self.calls if c[0] == "pr" and c[1] != "view"])
+        # a normal task in the Open PR space is still never accepted by itself
+        self.run_cmd(self.commands.cmd_add, title="Feature", space=self.ROBO)
+        with self.assertRaises(self.Fail):
+            self.run_cmd(self.commands.cmd_auto_accept, id="3", off=False)
+
+    # ---- anything not clean waits for the person, saying why ----
+
+    def attempt(self, n, prepare, after_ready=None):
+        self.update(n, space=self.ROBO)
+        prepare()
+        self.ready(n)
+        if after_ready:
+            after_ready()
+        report = self.tick_at(int(__import__("time").time() * 1000) + n)
+        t = self.task(n)
+        self.assertEqual(t["state"], "ready")
+        self.assertNotIn("auto_accepted", report)
+        self.assertEqual(self.status(n)[0], "ready")  # the person's Accept now
+        return report["auto_accept_failed"][0]["why"], t
+
+    def test_failing_checks_conflicts_a_missing_base_a_force_push_or_a_moved_head_wait_for_the_person(self):
+        self.spaces()
+
+        def failing():
+            self.merge_and_push()
+            self.pr["checks"] = [{"name": "lint", "status": "COMPLETED", "conclusion": "FAILURE", "startedAt": "1"}]
+
+        def conflicting():
+            self.merge_and_push()
+            self.pr["mergeable"] = "CONFLICTING"
+
+        def not_merged():
+            self.commit(self.clone, "other.txt")  # pushed, but main never came in
+            self.git(self.clone, "push", "-q", "origin", "feat")
+
+        def forced():
+            self.git(self.clone, "fetch", "-q", "origin")
+            self.git(self.clone, "-c", "user.name=T", "-c", "user.email=t@example.com", "rebase", "-q", "origin/main")
+            self.git(self.clone, "push", "-q", "--force-with-lease", "origin", "feat")
+
+        def moved():
+            self.commit(self.clone, "later.txt")
+            self.git(self.clone, "push", "-q", "origin", "feat")
+        cases = [(failing, None, "checks failing: lint"), (conflicting, None, "conflicts with main"),
+                 (not_merged, None, "doesn't contain main"), (forced, None, "history was rewritten"),
+                 (self.merge_and_push, moved, "moved to")]
+        for n, (prepare, after, words) in enumerate(cases, 1):
+            with self.subTest(words=words):
+                self.pr.update(checks=list(self.PASSED), mergeable="MERGEABLE")
+                why, t = self.attempt(n, prepare, after)
+                self.assertIn(words, why)
+                self.assertEqual(t["auto_accept"]["failed"], why)
+                # the person's own Accept still takes it: done, nothing merged
+                self.run_cmd(self.commands.cmd_accept, id=str(n), agent=None, argv=None)
+                self.assertEqual(self.task(n)["state"], "done")
+                # back to a pull request behind main for the next case
+                self.git(self.clone, "checkout", "-q", "main")
+                self.git(self.clone, "pull", "-q", "--no-rebase", "origin", "main")
+                self.commit(self.clone, f"next{n}.txt")
+                self.git(self.clone, "push", "-q", "origin", "main")
+                self.git(self.clone, "checkout", "-q", "feat")
+                self.git(self.clone, "reset", "-q", "--hard", "origin/feat")
+
+    def test_unpushed_work_refuses_ready_and_no_auto_accept_keeps_it_for_the_person(self):
+        self.spaces()
+        self.update(1, space=self.HQ, no_auto_accept=True)
+        self.assertNotIn("auto_accept", self.task(1))
+        # the worker merged in the folder's own copy of the branch but didn't push it
+        self.git(self.folder, "fetch", "-q", "origin")
+        self.git(self.folder, "checkout", "-q", "-b", "feat", "origin/feat")
+        self.git(self.folder, "-c", "user.name=T", "-c", "user.email=t@example.com", "merge", "-q", "--no-edit", "origin/main")
+        with self.assertRaises(self.Fail) as e:
+            self.ready(1)
+        self.assertIn("push it (a normal `git push`, never force)", str(e.exception))
+        self.git(self.folder, "push", "-q", "origin", "feat")
+        self.assertEqual(self.ready(1)["state"], "ready")
+        self.assertTrue(self.task(1)["branch_update"]["check"]["clean"])
+        self.assertNotIn("auto_accepted", self.tick_at(int(__import__("time").time() * 1000)))
+        self.assertEqual(self.status(1)[0], "ready")
+
+    def test_every_assistant_reads_the_branch_update_rule_from_its_template(self):
+        """The rule lives in templates/assistant.md, the one prompt every space's Assistant (Claude, Codex or Cursor)
+        starts from, after any restart; herdr-task carries the rest (the brief, the checks, the accept)."""
+        with open(os.path.join(ROOT, "templates", "assistant.md")) as f:
+            tpl = f.read()
+        for words in ("--update-pr 280", "Only the pull requests they named in that message", "add `--rebase` only when the person says rebase",
+                      "Their ask is its Accept", "whatever the space's Delivery or Accept when ready, which you never change for it",
+                      "A conflict, a failing check or a rewritten history waits for the person", "is a normal task they accept as usual"):
+            self.assertIn(words, tpl)

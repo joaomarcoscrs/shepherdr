@@ -36,6 +36,7 @@ from .scheduler import ensure_scheduler
 from .proof import evidence, find_proof
 from .when import when_from
 from .delivery import accept_check, handoff_gate, handoff_line, NO_MERGE
+from . import branch_update
 
 
 # ---- commands -------------------------------------------------------------------------------
@@ -106,9 +107,20 @@ def cmd_add(args):
             raise Fail(wrong)
         if args.worktree and not repo:
             raise Fail("Worktrees need a git repo; this folder isn't one.")
+        # SHEP-10: a branch update of a pull request the person named: read on GitHub first, refused before it's added
+        update = getattr(args, "update_pr", None)
+        if getattr(args, "rebase", False) and not update:
+            raise Fail("--rebase is for a branch update (--update-pr).")
+        if update:
+            branch_update.guard({"branch_update": True}, args)
+            bu = branch_update.plan(s, update, "rebase" if getattr(args, "rebase", False) else "merge")
         # The person's setting wins: worktrees off for this repo means in the folder, --worktree or not.
-        mode = "here" if args.here or not worktrees_on(s) else "worktree"
+        mode = "here" if args.here or update or not worktrees_on(s) else "worktree"
         t = s.new(args.title.strip(), prompt, mode)
+        if update:
+            t["branch_update"] = bu
+            # Herdr's own reading of GitHub at ready is its proof; a --set proof=on still asks for an artifact
+            t.setdefault("set", {})["proof"] = "off"
         set_opts(t, args)
         space = bare(args.space) if args.space else caller_space()
         set_base(s, t, args.base, space, new=True)
@@ -122,6 +134,11 @@ def cmd_add(args):
         # SHEP-5: its space's Accept when ready, unless this one waits for the person's Accept (--no-auto-accept)
         if getattr(args, "no_auto_accept", False):
             t["accept_default"] = OWN_CHOICE
+        elif update:
+            # SHEP-10: the person's ask for this update is its Accept given ahead (accepted only once Herdr finds it clean);
+            # the space's Accept when ready and delivery are never read for it
+            t["accept_default"] = OWN_CHOICE
+            t["auto_accept"] = {"at": now(), "by": branch_update.BY}
         space_accept(t, space or (t.get("queue") or {}).get("space"), new=True)
         v = view(s, t)
     if at:
@@ -289,6 +306,10 @@ def cmd_show(args):
         text.append(f"for AGENTS.md: {v['agents_md']}")
     if v.get("pr"):
         text.append(f"pull request: #{v['pr']['number']} {v['pr']['url']}")
+    if v.get("branch_update"):
+        bu = v["branch_update"]
+        text.append(f"branch update: {branch_update.words(bu)} {bu.get('url') or ''}".rstrip()
+                    + (f"; checked: {bu['check']['line']}" if bu.get("check") else ""))
     if v.get("why") and v["status"] == "needs":
         text.append(f"needs the person: {v['why']}")
     if v.get("proof"):
@@ -340,6 +361,7 @@ def cmd_start(args):
             raise Fail(f"{s.ref(t)} is already running ({live[0]['address']}). Use switch or resume.")
         if t["state"] == "done":
             raise Fail(f"{s.ref(t)} is done. Reopen it first.")
+        branch_update.guard(t, args)
         if args.here:
             t["mode"] = "here"
         elif args.worktree and worktrees_on(s):
@@ -429,6 +451,9 @@ def cmd_ready(args):
         if not refused and dv["mode"] == "open_pr" and wt and os.path.isdir(wt) and not (t.get("start") and in_base(s, t)):
             # SHEP-7: Open PR: its pull request opened and assigned, and its approval read for this exact head, first
             refused = handoff_gate(s, t, dv, wt, said or t.get("summary"), blocked or None)
+        if not refused and t.get("branch_update"):
+            # SHEP-10: the pull request read on GitHub (waits while its checks run); its verdict kept for auto-accept
+            refused = branch_update.check(s, t)
         if refused:
             # Kept (the task's line says why it waits); refused after the store is saved.
             s.dirty = True
@@ -487,6 +512,13 @@ def cmd_ready(args):
             say(args, v, f"{s.ref(t)}: {how}; done.")
             return
         msg = finalize(s, t)
+        bu = t.get("branch_update")
+        if bu and bu.get("check"):
+            c = bu["check"]
+            msg = msg.replace(" The person accepts it in the Tasks panel.", "")
+            msg += f" Herdr checked GitHub: {c['line']}." + (
+                " It is accepted by itself (the person asked for this update)." if c["clean"] and auto_on(t) else
+                " It waits for the person's Accept." if not c["clean"] else "")
         # Its own background work still running (SHEP-148): the task shows Working until it ends.
         log = agent_log(t, me) if me else None
         jobs = background_jobs(log)[0] if log else {}
@@ -905,6 +937,7 @@ def cmd_edit(args):
         if args.prompt_file:
             with open(args.prompt_file) as f:
                 t["prompt"] = f.read()
+        branch_update.guard(t, args)
         pick = [t.get(k) for k in ("agent", "model", "effort")]
         set_opts(t, args)
         if [t.get(k) for k in ("agent", "model", "effort")] != pick:
@@ -1419,7 +1452,9 @@ def cmd_auto_accept(args):
         else:
             if t["state"] == "done":
                 raise Fail(f"{s.ref(t)} is already done.")
-            if delivery_of(t)["mode"] == "open_pr" if (t.get("brief_delivery") or t.get("started")) else \
+            if t.get("branch_update"):
+                pass  # SHEP-10: no pull request of its own to hand off, whatever the space's delivery
+            elif delivery_of(t)["mode"] == "open_pr" if (t.get("brief_delivery") or t.get("started")) else \
                     delivery_for(t.get("space") or (t.get("queue") or {}).get("space")
                                  or (t.get("accept_default") if t.get("accept_default") not in (PENDING_SPACE, OWN_CHOICE) else None), t)["mode"] == "open_pr":
                 raise Fail(f"{s.ref(t)}'s delivery is Open PR: it is handed to you with its pull request open, never "
@@ -1434,6 +1469,10 @@ def cmd_auto_accept(args):
                    ". Turn it off any time before then.")
         v = view(s, t)
     say(args, v, msg)
+
+
+def auto_on(t):
+    return isinstance(t.get("auto_accept"), dict)
 
 
 def accepted_words(s, t, how, sent=None, started=False):

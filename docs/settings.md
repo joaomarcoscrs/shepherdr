@@ -88,6 +88,18 @@ task values a machine set before (the old machine scope) still apply there until
     everything in it is on that pull request.
   - Accept when ready never takes a hand-off: a space's default doesn't arm it, the menu doesn't offer it, and
     `herdr-task auto-accept` refuses it.
+- Branch updates (SHEP-10, `herdr_task/branch_update.py`): the person asks the Assistant to bring a pull request they
+  name up to date with its base. `herdr-task add … --update-pr <n or link> [--rebase]` reads it on GitHub (refused unless
+  open, in this repo and not from a fork) and keeps its branch, base, head and the base's head then on the task. It
+  works in the folder itself on that branch (no worktree, branch or pull request of Herdr's; its brief's Merge line
+  says never and a Branch update line says how: merge in, normal push, wait for checks, never force-push or merge). The
+  ask is its Accept given ahead (per-task auto-accept, `by: branch-update`); no setting is read or changed for it, so
+  it goes the same way in a Merge and an Open PR space, whatever Accept when ready says. `ready` reads the pull
+  request itself and waits while its checks run; the tick accepts it only when it is clean: still open on the same
+  branch and base, containing the base as it was asked for, its earlier head still in its history (no force push), no
+  conflicts, every check passed, and its head unchanged since ready. Anything else stays Ready for the person, its
+  news and card saying why. `--rebase` (only when the person says so) needs a force push, which the worker asks the
+  person for; a rewritten history then waits for their Accept. `--no-auto-accept` adds one that always waits.
 - `tasks.worktree_root` (in `everywhere`, a machine's or a space's `tasks`; no row in the window yet): the folder new
   task worktrees go in, e.g. a bigger disk (`~` allowed). Unset: `~/.local/share/shepherdr/worktrees`. A task keeps
   the worktree it has.

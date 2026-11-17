@@ -79,7 +79,10 @@ def news_line(s, t, v, event, words=None):
     if t.get("handoff") and t.get("state") == "ready":
         from .delivery import handoff_line
         handed = f" · Handed off, never merged: {handoff_line(t)}"
-    text = {"ready": f"{ref} is ready: {title}" + (f" · {said}" if said else "") + handed + (f" · For AGENTS.md: {note}" if note else "")
+    # SHEP-10: a branch update says what Herdr found on GitHub
+    c = (t.get("branch_update") or {}).get("check") or {}
+    checked = f" · Branch update checked: {c['line']}" if c.get("line") else ""
+    text = {"ready": f"{ref} is ready: {title}" + (f" · {said}" if said else "") + handed + checked + (f" · For AGENTS.md: {note}" if note else "")
                      + (f" · Auto-accept stopped: {' '.join(stopped.split())}" if stopped else ""),
             "needs-you": f"{ref} needs you: {v.get('why') or 'Needs you'} ({title})",
             "failed": f"{ref} failed: {v.get('why') or 'Agent stopped'} ({title})",
@@ -88,7 +91,7 @@ def news_line(s, t, v, event, words=None):
             "backup": f"{ref} backup: {words} ({title})",
             "done": f"{ref} is done" + (": handed off, not merged" if t.get("handed_off") and not t.get("merged") else ": merged" if t.get("merged") else ": nothing to merge" if t.get("nothing_to_merge")
                                         else ": accepted" if t.get("accepted_at") else "")
-                    + (" (auto-accept)" if t.get("accepted_by") == "auto" else "") + f" ({title})"}[event]
+                    + (" (auto-accept)" if t.get("accepted_by") == "auto" else "") + checked + f" ({title})"}[event]
     return f'<herdr-news task="{attr(ref)}" event="{event}">{text.replace("<", "‹").replace(">", "›")}</herdr-news>'
 
 
