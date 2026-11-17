@@ -228,8 +228,9 @@ def delivery_of(t):
 
 
 def open_pr(t):
-    """This task's delivery is Open PR: never merged by Herdr, whatever Merge or Accept when ready say."""
-    return delivery_of(t)["mode"] == "open_pr"
+    """This task's delivery is Open PR: never merged by Herdr, whatever Merge or Accept when ready say. A branch update
+    (SHEP-10) never is: it has no pull request of its own to hand off, whatever its space's delivery."""
+    return not t.get("branch_update") and delivery_of(t)["mode"] == "open_pr"
 
 
 def settings_layers(s, space=None):
@@ -702,7 +703,15 @@ def task_settings(s, t, space=None, argv=None, live=False):
     m_by = "task" if "merge" in sets else by_layer(s, space, "tasks", "merge", policy, "ask")
     # SHEP-7: Open PR delivery: never merged; the Delivery line says what ready does instead (Merge only says so)
     dv = delivery_now(t, space)
-    if dv["mode"] == "open_pr" and not here:
+    if t.get("branch_update"):
+        # SHEP-10: the pull request the person named is updated in place: nothing to merge or hand off, whatever the
+        # space's Merge and Delivery say
+        from .branch_update import brief_line
+        bu = t["branch_update"]
+        add("Merge", f"never: you update pull request #{bu['pr']}'s own branch; neither you nor Herdr merges the pull "
+                     "request, and it stays the person's", "never", "task")
+        add("Branch update", brief_line(bu), bu.get("how") or "merge", "task")
+    elif dv["mode"] == "open_pr" and not here:
         add("Merge", "never: this task's delivery is Open PR (Delivery line); neither you nor Herdr merges it, whatever "
                      "Merge says elsewhere", "never", delivery_by(dv["by"].get("delivery")))
         add("Delivery", delivery_words(s, t, dv), dv["mode"], delivery_by(dv["by"].get("delivery")))

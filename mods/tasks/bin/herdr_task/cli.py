@@ -230,6 +230,15 @@ def main():
     c.add_argument("--space", help="the space it's for, whose settings it takes (default: yours)")
     c.add_argument("--no-auto-accept", action="store_true",
                    help="wait for the person's Accept even in a space whose Accept when ready is on (only when the person asks)")
+    # SHEP-10: a branch update of a pull request the person named (branch_update.py)
+    c.add_argument("--update-pr", metavar="PR",
+                   help="a branch update: bring this open pull request's own branch (its number or link, one the person "
+                        "named) up to date with its base, in the folder itself; no new pull request. The person's ask is "
+                        "its Accept: once Herdr finds it clean on GitHub (base in, pushed without force, no conflicts, "
+                        "checks passed) it is accepted by itself; anything else waits for the person")
+    c.add_argument("--rebase", action="store_true",
+                   help="--update-pr: rebase onto the base instead of merging it in (only when the person says so: it "
+                        "needs a force push, which the worker asks the person for first)")
     when_opts(c)
     c = cmd("show", cmd_show, "one task")
     c.add_argument("--evidence", action="store_true", help="with what its Accept card shows: commits, changed files, checks and its proof")

@@ -270,6 +270,18 @@ def auto_accept_pass(s, t, report):
     if task_status({**t, "auto_accept": None}, live)[0] != "ready":
         return
     aa, how = t["auto_accept"], None
+    if t.get("branch_update"):
+        # SHEP-10: a branch update is accepted by itself only when Herdr found it clean on GitHub, and its pull request is
+        # still at the head it checked; GitHub out of reach: tried again at the next tick
+        from .branch_update import accept_block
+        why = accept_block(s, t)
+        if why == "":
+            return
+        if why:
+            aa["tried"], aa["tried_at"], aa["failed"] = t.get("ready_at"), now(), why
+            s.dirty = True
+            report.setdefault("auto_accept_failed", []).append({"ref": s.ref(t), "why": why})
+            return
     if open_pr(t):
         # SHEP-7: an Open PR hand-off is the person's to take: never accepted by itself (said once per ready)
         aa["tried"], aa["tried_at"], aa["failed"] = t.get("ready_at"), now(), OPEN_PR_NO_AUTO
