@@ -15,7 +15,7 @@ import { openWorktree } from '@client/screens/Worktree.tsx'
 import { act, definePlugin, getState, has, registry, removeSpace, setUI, useSnap, useStore, useUI } from '@client/kernel.ts'
 import { Dialog } from '@client/rowmenu.tsx'
 import { sectionOf, Switch } from '@client/Settings.tsx'
-import { AttentionBadge, DiffIcon, Dot, field, FolderIcon, ic, IconButton, KeyboardIcon, Menu, MenuItem, MenuLabel, MenuSeparator, ModelIcon, MoreIcon, PageIcon, PlanIcon, PlusIcon, Primary, RenameIcon, RestartIcon, SplitIcon, TasksIcon, TermIcon, XIcon } from '@client/ui.tsx'
+import { AttentionBadge, DiffIcon, Dot, EqLoader, field, FolderIcon, ic, IconButton, KeyboardIcon, Menu, MenuItem, MenuLabel, MenuSeparator, ModelIcon, MoreIcon, PageIcon, PlanIcon, PlusIcon, Primary, RenameIcon, RestartIcon, SplitIcon, TasksIcon, TermIcon, XIcon } from '@client/ui.tsx'
 import { openAddSpace } from '@plugins/places/add.tsx'
 import { toast } from '@plugins/alerts/toasts.tsx'
 import { openKeybinds } from '@plugins/keyboard/client.tsx'
@@ -184,10 +184,9 @@ function PhoneRunNow({ place }: { place: Place }) {
 /** The pane header's status (3.0's): a spinner while its agent works, "Needs you" while it waits on you, a dot once done */
 function Spin({ className }: { className?: string }) {
   return (
-    <svg role="img" aria-label="Working" viewBox="0 0 16 16" className={clsx('size-3 shrink-0 animate-spin text-work motion-reduce:animate-none', className)}>
-      <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" strokeOpacity="0.25" strokeWidth="2" />
-      <path d="M14 8a6 6 0 0 0-6-6" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-    </svg>
+    <span role="img" aria-label="Working" className={clsx('inline-flex shrink-0', className)}>
+      <EqLoader />
+    </span>
   )
 }
 

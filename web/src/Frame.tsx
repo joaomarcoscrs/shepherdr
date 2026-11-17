@@ -78,7 +78,7 @@ export function PlacesColumn({ children }: { children: ReactNode }) {
   const drawn = useStore((s) => placesDrawn(s.ui, s.snap))
   return (
     <div className="min-w-0 overflow-hidden" inert={!drawn}>
-      <nav id="places" aria-label="Spaces" className="flex h-full w-(--left-open) flex-col overflow-x-hidden overflow-y-auto border-r border-line bg-well">
+      <nav id="places" aria-label="Spaces" className="flex h-full w-(--left-open) flex-col overflow-x-hidden overflow-y-auto border-r border-line bg-well side-wash">
         {children}
       </nav>
     </div>
@@ -101,7 +101,7 @@ export function PanelColumn({ children }: { children: ReactNode }) {
   const open = useUI((u) => u.sidebars.panelOpen)
   return (
     <div className="min-w-0 overflow-hidden" inert={!open}>
-      <aside id="task-panel" aria-label="Task panel" className="flex h-full w-(--panel-open) flex-col border-l border-line bg-bg">
+      <aside id="task-panel" aria-label="Task panel" className="flex h-full w-(--panel-open) flex-col border-l border-line bg-bg pane-wash">
         {children}
       </aside>
     </div>

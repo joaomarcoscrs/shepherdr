@@ -23,6 +23,7 @@ import {
   WrenchIcon,
 } from '@heroicons/react/16/solid'
 import { act, setUI, useStore } from '@client/kernel.ts'
+import { EqLoader } from '@client/ui.tsx'
 import { Sheet, SheetClose } from '@client/Stack.tsx'
 import { countJobs, jobsWords, rowsOf, stepText, took } from '@shared/activity.ts'
 import type { ActivityAnswer, Chat, Job, Step, StepKind, StepRow, TurnActivity } from '@shared/types.ts'
@@ -388,7 +389,7 @@ export function WorkingLine({ chatKey }: { chatKey: string }) {
   }
   return (
     <div role="status" data-working className="flex h-[30px] items-center gap-2 text-[0.75rem] text-fg2 coarse:h-10 phone:h-10 phone:text-[0.8125rem]">
-      {waits ? <ClockIcon aria-hidden className="size-3 shrink-0 fill-[var(--fg3)]" /> : <span aria-hidden className="live-dot size-1.5 shrink-0 rounded-full bg-[var(--work)]" />}
+      {waits ? <ClockIcon aria-hidden className="size-3 shrink-0 fill-[var(--fg3)]" /> : <EqLoader />}
       <span className="min-w-0 flex-1 truncate">{stopping ? WORDS.stopping : chat.doing || WORDS.working}</span>
       <span className="shrink-0 font-mono text-[0.71875rem] text-fg3 tabular-nums">{elapsed(secs)}</span>
       <button type="button" onClick={stop} disabled={stopping}

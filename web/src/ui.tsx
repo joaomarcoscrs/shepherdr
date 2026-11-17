@@ -399,6 +399,20 @@ export function LiveWave({ sample, label, className }: { sample: () => Sample; l
   )
 }
 
+/** joão HQ's loader (the window's eqLoader): five bars of 2px cubes in its gradient, each rising and falling on its own
+ *  beat; still with reduced motion. Decoration: say what it means in words beside it */
+export function EqLoader({ className }: { className?: string }) {
+  return (
+    <span aria-hidden="true" className={clsx('eq', className)}>
+      <i />
+      <i />
+      <i />
+      <i />
+      <i />
+    </span>
+  )
+}
+
 /** A status mark; a working one with `p` fills its pie that far (the % done its agent reported). `frozen`: the %
  *  an agent waiting on you stopped at, said to screen readers where no pie shows it */
 export function Dot({ s, halo, p, frozen, className }: { s: Status; halo?: boolean; p?: number; frozen?: Report; className?: string }) {
@@ -669,7 +683,7 @@ export function Tabs({ className, children, label, ...p }: HTMLAttributes<HTMLDi
 }
 
 /** a segment; filling, it shares out the room its row has (a menu setting's choices), and on a narrow screen its words
- * end in … before the row runs out */
+ * wrap to a second line before the row runs out */
 export function Tab({ on, fill, className, children, ...p }: Btn & { on: boolean; fill?: boolean }) {
   return (
     <button
@@ -677,12 +691,14 @@ export function Tab({ on, fill, className, children, ...p }: Btn & { on: boolean
       aria-pressed={on}
       className={clsx(
         'relative inline-flex h-7 items-center gap-1.5 rounded-full text-[0.8125rem] whitespace-nowrap text-fg2 after:absolute after:-inset-y-2 after:inset-x-0 disabled:cursor-default disabled:opacity-40 aria-pressed:bg-seg-on aria-pressed:text-fg aria-pressed:shadow-[0_0_0_1px_var(--line2)] coarse:h-9 phone:h-9 phone:text-[0.875rem]',
-        fill ? 'min-w-0 grow justify-center px-2 phone:max-[359px]:text-[0.8125rem]' : 'shrink-0 px-2.5 phone:px-3.5',
+        // filling a row, a label too long for its share (Geist Mono is wide) wraps to a second line rather than being
+        // cut: the segment grows to fit it
+        fill ? 'h-auto! min-h-7 min-w-0 grow justify-center px-2 py-1 coarse:min-h-9 phone:min-h-9 phone:max-[359px]:text-[0.8125rem]' : 'shrink-0 px-2.5 phone:px-3.5',
         className,
       )}
       {...p}
     >
-      {fill ? <span className="truncate">{children}</span> : children}
+      {fill ? <span className="min-w-0 text-center leading-tight text-balance whitespace-normal">{children}</span> : children}
     </button>
   )
 }

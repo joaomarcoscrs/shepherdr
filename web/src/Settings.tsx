@@ -1183,7 +1183,7 @@ export default function Settings() {
           }
           name={spacePlace ? ST.SPACE_TITLE : ST.TITLE}
         />
-        <nav aria-label="Sections" className="min-h-0 flex-1 touch-pan-y overflow-y-auto overscroll-contain bg-canvas">
+        <nav aria-label="Sections" className="min-h-0 flex-1 touch-pan-y overflow-y-auto overscroll-contain bg-canvas side-wash">
           <div className="flex flex-col gap-6 px-4 pt-4 pb-[calc(env(safe-area-inset-bottom)+--spacing(8))]">
             {/* the window's pages in one list, under the title above (no group of this device's own) */}
             {groups.map((g) => (
@@ -1225,7 +1225,7 @@ export default function Settings() {
                   name={page.name}
                   kind={spacePlace && !page.device ? spacePlace.name : undefined}
                 />
-                <div className="min-h-0 flex-1 touch-pan-y overflow-y-auto overscroll-contain bg-canvas">{body}</div>
+                <div className="min-h-0 flex-1 touch-pan-y overflow-y-auto overscroll-contain bg-canvas side-wash">{body}</div>
               </section>
             )
           }

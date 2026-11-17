@@ -1,4 +1,5 @@
-@import "inter-ui/inter-variable.css";
+/* joão HQ's type: Geist Mono for everything, as the window's comando layout (its font and ui_font) */
+@import "@fontsource-variable/geist-mono";
 @import "tailwindcss";
 
 /* Plugins' client parts live outside src/ */
@@ -112,47 +113,82 @@
   --box-shadow: inset 0 0 0 1px var(--line2), 0 1px 2px rgb(0 0 0 / 0.03);
   /* the message box while you type in it: its edge a shade darker, never a bright ring */
   --box-focus-shadow: inset 0 0 0 1px rgb(9 9 11 / 0.22), 0 1px 3px rgb(0 0 0 / 0.06);
+  /* the tick in a ready or done dot */
+  --dot-check: #fff;
+  /* joão HQ's gradient (the window's pixel pieces, patches/eq.js): blue, violet, lilac, orange, coral */
+  --hq-gradient: #7aa2f7, #9d8cf0, #c49cf2, #f5a25d, #f2707a;
+  /* the window's backdrops, dark only (the window has no light look): a pane's, and the sidebar's */
+  --pane-wash: none;
+  --side-wash: none;
 }
 
 :root[data-theme=dark],
 /* SHEP-118: the full-screen call is always dark, whatever the app's appearance */
 [data-theme=dark] {
+  /* joão HQ's dark (the window's comando layout on Herdr's grafite theme): warm greys on near-black, the same canvas,
+     chrome, panes and words as the desktop, and its status colours */
   color-scheme: dark;
-  --canvas: #000;
-  --bg: #0b0b0d;
-  --fg: #fafafa;
-  --fg2: #a1a1aa;
-  --fg3: #7c7c85;
+  --canvas: #0c0c0d;
+  /* a pane: the top of the window's pane backdrop (#1b1c2a, fading to #211a1b: --pane-wash), so a bar stuck to a
+     pane's top (a header, the tasks' filter) is the colour behind it */
+  --bg: #1b1c2a;
+  --fg: #c9c8c4;
+  --fg2: #9a9993;
+  /* the window's dim (#6f6e6a) a shade lighter, so the faintest words still read 4.5:1 on a pane and a bubble */
+  --fg3: #8a8984;
   --line: rgb(255 255 255 / 0.07);
   --line2: rgb(255 255 255 / 0.12);
-  --hover: rgb(255 255 255 / 0.04);
+  --hover: rgb(255 255 255 / 0.05);
   --sel: rgb(255 255 255 / 0.07);
-  --well: #111114;
-  --bubble: #1c1c20;
-  --reply: #161b23;
-  --seg-on: #2c2c31;
+  --well: #121214;
+  --bubble: #1f1f22;
+  --reply: #22222a;
+  --seg-on: #2a2a2e;
   --thumb: rgb(255 255 255 / 0.18);
   --thumb-held: rgb(255 255 255 / 0.32);
-  --need: #ff6369;
-  --ready: #3dd68c;
-  --work: #f5b544;
-  --muted: #71717a;
-  --ready-fg: #3dd68c;
-  --work-fg: #f5b544;
-  --need-fg: #ff6369;
-  --accent: #fb923c;
-  --merged: #a78bfa;
-  --add: rgb(61 214 140 / 0.12);
-  --del: rgb(255 99 105 / 0.12);
-  --syn-kw: #c4b5fd;
-  --syn-str: #86efac;
-  --syn-num: #fcd34d;
-  --syn-com: #71717a;
-  --syn-fn: #93c5fd;
-  --syn-type: #67e8f9;
-  --syn-tag: #fda4af;
-  --syn-attr: #fcd34d;
-  --syn-meta: #a1a1aa;
+  --need: #f2707a;
+  --ready: #9ece6a;
+  --work: #e8c26b;
+  --muted: #6f6e6a;
+  --ready-fg: #9ece6a;
+  --work-fg: #e8c26b;
+  --need-fg: #f2707a;
+  --accent: #f5a25d;
+  --focus: #7aa2f7;
+  --dot-check: #1b1c2a;
+  --term: #121214;
+  --term-fg: #c9c8c4;
+  --ansi-0: #3a3a3f;
+  --ansi-1: #f2707a;
+  --ansi-2: #9ece6a;
+  --ansi-3: #e8c26b;
+  --ansi-4: #7aa2f7;
+  --ansi-5: #c49cf2;
+  --ansi-6: #6fc8c3;
+  --ansi-7: #a9a8a3;
+  --ansi-0b: #5c5c63;
+  --ansi-1b: #ff8a8f;
+  --ansi-2b: #b4e486;
+  --ansi-3b: #f5d58c;
+  --ansi-4b: #9bbcff;
+  --ansi-5b: #d6b6ff;
+  --ansi-6b: #8ee0da;
+  --ansi-7b: #d8d7d2;
+  --merged: #c49cf2;
+  --add: rgb(158 206 106 / 0.12);
+  --del: rgb(242 112 122 / 0.12);
+  --syn-kw: #c49cf2;
+  --syn-str: #9ece6a;
+  --syn-num: #f5a25d;
+  --syn-com: #6f6e6a;
+  --syn-fn: #7aa2f7;
+  --syn-type: #6fc8c3;
+  --syn-tag: #f2707a;
+  --syn-attr: #e8c26b;
+  --syn-meta: #9a9993;
+  /* the window's backdrops: the page's (its root's) and the sidebar's, deep violet into near-black */
+  --pane-wash: linear-gradient(180deg, #1b1c2a 0 14%, #211a1b);
+  --side-wash: linear-gradient(180deg, #1a1832, #121216);
   /* no shadows in dark mode: rings stay for definition */
   --menu-shadow: 0 0 0 1px var(--line2);
   --sheet-shadow: none;
@@ -167,9 +203,8 @@
 }
 
 @theme inline {
-  --font-sans: InterVariable, ui-sans-serif, system-ui, sans-serif;
-  --font-sans--font-feature-settings: "cv02", "cv03", "cv04", "cv11";
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-sans: "Geist Mono Variable", "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-mono: "Geist Mono Variable", "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --color-canvas: var(--canvas);
   --color-bg: var(--bg);
   --color-fg: var(--fg);
@@ -683,12 +718,20 @@
     border-radius: 50%;
     background: conic-gradient(var(--work) 0 var(--p), transparent 0);
   }
+  /* needs you: the window's pixel dot (eq.js pixelDot), four cubes a pixel apart */
   .dot.need {
     width: 10px;
     height: 10px;
     margin: 2px;
-    background: var(--need);
+    border-radius: 0;
     box-shadow: none;
+  }
+  .dot.need::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: var(--need);
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 9 9'%3E%3Cpath d='M0 0h4v4H0zM5 0h4v4H5zM0 5h4v4H0zM5 5h4v4H5z'/%3E%3C/svg%3E") center / 100% 100% no-repeat;
   }
   [data-device="phone"] .dot.need {
     width: 12px;
@@ -698,7 +741,7 @@
     content: "";
     position: absolute;
     inset: -3px;
-    border-radius: 50%;
+    border-radius: 3px;
     box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--need) 30%, transparent);
   }
   .dot.ready,
@@ -717,7 +760,7 @@
     top: 3px;
     width: 3.5px;
     height: 6px;
-    border: solid #fff;
+    border: solid var(--dot-check);
     border-width: 0 1.5px 1.5px 0;
     transform: rotate(45deg);
   }
@@ -773,6 +816,56 @@
   .dot.off {
     box-shadow: none;
     border: 1.5px dashed var(--muted);
+  }
+  /* joão HQ's pixel pieces (the window's patches/eq.js), drawn in CSS. The rule: a row of 2px cubes a pixel apart,
+     the gradient running left to right, as under the window's brand */
+  .pixel-rule {
+    height: 2px;
+    flex-shrink: 0;
+    background: linear-gradient(90deg, var(--hq-gradient));
+    mask: repeating-linear-gradient(90deg, #000 0 2px, transparent 2px 3px);
+    opacity: 0.9;
+  }
+  /* the loader: five 2px bars of cubes, coloured bottom to top, each rising and falling a cube at a time on its own
+     beat (eqLoader); still with reduced motion */
+  .eq {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: flex-end;
+    gap: 1px;
+    height: 11px;
+  }
+  .eq > i {
+    width: 2px;
+    height: 11px;
+    background: linear-gradient(to top, var(--hq-gradient)) bottom / 2px 11px no-repeat;
+    mask: repeating-linear-gradient(to top, #000 0 2px, transparent 2px 3px) bottom / 2px 11px;
+    animation: eq var(--eq-t) steps(var(--eq-n), jump-none) infinite alternate;
+  }
+  .eq > i:nth-child(1) { --eq-t: 310ms; --eq-low: 2px; --eq-n: 4; }
+  .eq > i:nth-child(2) { --eq-t: 430ms; --eq-low: 5px; --eq-n: 3; }
+  .eq > i:nth-child(3) { --eq-t: 270ms; --eq-low: 2px; --eq-n: 4; }
+  .eq > i:nth-child(4) { --eq-t: 380ms; --eq-low: 5px; --eq-n: 3; }
+  .eq > i:nth-child(5) { --eq-t: 345ms; --eq-low: 2px; --eq-n: 4; }
+  @keyframes eq {
+    from {
+      height: var(--eq-low);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .eq > i {
+      animation: none;
+    }
+    .eq > i:nth-child(odd) {
+      height: 5px;
+    }
+  }
+  /* the window's backdrops behind a pane and the sidebar (dark only: none in light) */
+  .pane-wash {
+    background-image: var(--pane-wash);
+  }
+  .side-wash {
+    background-image: var(--side-wash);
   }
   /* a big hit area around small controls, so a finger finds them */
   .hit {
