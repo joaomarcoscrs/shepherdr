@@ -19,16 +19,16 @@ import { knownAgents, openOverlay, shared, appHome } from "herdr";
 import * as fs from "fs/promises";
 import * as agent from "./agent.js";
 // The button's words and the choices on offer: core/settings.js, shared with the web app's Settings.
-import { modelLabel, choicesFrom } from "./core/settings.js";
-import { permAcross } from "./core/agents.js";
+import { modelLabel, choicesFrom, forRole } from "./core/settings.js";
+import { permAcross, fitPerm } from "./core/agents.js";
 
 const ROW = 31, LABEL = 110;
 const LEVEL = { minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max", ultra: "Ultra", none: "None" };
 const LAST = () => `${appHome()}/data/coordinator-last.json`;
 
 // What the agents on this machine (or `machine`) offer: { menus, icons, installed, permDefault,
-// defaults } (defaults: the CLI's own, for a first time).
-export async function loadChoices(machine = null) {
+// defaults } (defaults: the CLI's own, for a first time); `role`: only what that role can run.
+export async function loadChoices(machine = null, role = null) {
   const [claude, codex, cursor, known] = await Promise.all([agent.defaults("claude", machine), agent.defaults("codex", machine),
     agent.defaults("cursor", machine), knownAgents({ on: machine }).catch(() => [])]);
   const prog = (k) => known.find((a) => a.key === k || (a.run ?? [])[0] === k);
@@ -36,7 +36,9 @@ export async function loadChoices(machine = null) {
   // Cursor: its CLI on that machine's PATH (as cursor-agent or agent), else what Herdr's own agent list says
   installed.cursor = Boolean(cursor?.installed) || prog("cursor")?.installed === true;
   const icons = Object.fromEntries(["claude", "codex", "cursor"].map((k) => [k, { icon: prog(k)?.icon ?? null, tint: Boolean(prog(k)?.tint) }]));
-  const { menus, permDefault, defaults } = choicesFrom({ claude, codex, cursor }, installed);
+  const own = choicesFrom({ claude, codex, cursor }, installed);
+  // one role's (an Assistant's, "coordinator": Cursor behind its chat bridge, without Auto): core/settings.js forRole
+  const { menus, permDefault, defaults } = role ? { ...own, menus: forRole(role, own.menus) } : own;
   return { menus, icons, installed, permDefault, defaults };
 }
 
@@ -47,7 +49,7 @@ export async function lastUsed(data) {
   try { s = JSON.parse(await fs.readFile(LAST(), "utf8")); } catch {}
   const m = s && data.menus[s.agent]?.models?.find((x) => x.id === s.model);
   return m ? { agent: s.agent, model: s.model, effort: m.efforts.includes(s.effort) ? s.effort : null, fast: Boolean(s.fast && m.fast),
-    perm: data.menus[s.agent].perms.some((p) => p.id === s.perm) ? s.perm : data.permDefault[s.agent] } : { ...data.defaults };
+    perm: fitPerm(data.menus[s.agent].perms, s.perm, data.permDefault[s.agent]) } : { ...data.defaults };
 }
 
 export async function saveLastUsed(sel) {
@@ -68,7 +70,7 @@ function choose(coord, agentKey, id) {
   const next = { ...sel, agent: agentKey, model: id };
   if (next.effort && !m.efforts.includes(next.effort)) next.effort = null;
   if (!m.fast) next.fast = false;
-  if (agentKey !== sel.agent) next.perm = permAcross(sel.perm, agentKey, data.permDefault);
+  if (agentKey !== sel.agent) next.perm = permAcross(sel.perm, agentKey, data.permDefault, data.menus[agentKey].perms);
   coord.sel = next;
 }
 

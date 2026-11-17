@@ -3,7 +3,7 @@
 // web app's Settings say the same. herdr-task reads the file (herdr_task/settings.py: settings_for); its defaults are
 // DEFAULTS there and here.
 // Shared core: the source is core/settings.js; bin/sync-shared copies it into the mods in lib/COPIES.
-import { NAMES, levelName, current, rowFor, menuFor, permAcross } from "./agents.js";
+import { NAMES, levelName, current, rowFor, menuFor, permAcross, permsFor } from "./agents.js";
 import { SERVE } from "./host.js";
 
 // ---- the frame -------------------------------------------------------------------------------------------------
@@ -148,8 +148,9 @@ export function modelLabel(menus, sel) {
 export const CLIS = ["claude", "codex", "cursor"];
 export function choicesFrom(dflts, installed = { claude: true, codex: true }) {
   const menus = Object.fromEntries(CLIS.filter((k) => installed[k]).map((k) => [k, menuFor(k, dflts[k])]));
-  // Cursor: its own ask (allowlist) mode, never --force unless chosen
-  const permDefault = { claude: dflts.claude?.mode ?? "manual", codex: "auto", cursor: "manual" };
+  // Cursor: Auto (its Auto-review, SHEP-9) where it runs it, a task's worker; an Assistant's menu has no Auto (forRole),
+  // so there the default fits to Ask (agents.js fitPerm). Never --force unless chosen.
+  const permDefault = { claude: dflts.claude?.mode ?? "manual", codex: "auto", cursor: "auto" };
   const first = menus.claude ? "claude" : Object.keys(menus)[0] ?? "claude";
   const c = current(first, [], {}, dflts[first]);
   const model = rowFor(first, c) ?? menus[first]?.models?.[0]?.id ?? null;
@@ -165,9 +166,13 @@ export function roleSel(role, own, choices, worker) {
 }
 // The agents a role can run: Cursor for task workers (its own terminal UI) and Assistants (its chat bridge,
 // herdr-task cursor-chat, SHEP-6). Not reviewers: Cursor has no read-only mode in every version of its CLI.
+// An Assistant's Cursor has no Auto: its ACP server ignores Auto-review (agents.js CURSOR_CHAT_PERMS, SHEP-9).
 export const CURSOR_ROLES = ["worker", "coordinator"];
+export const CHAT_ROLES = ["coordinator"];
 export function forRole(role, menus) {
-  if (CURSOR_ROLES.includes(role) || !menus?.cursor) return menus;
+  if (!menus?.cursor) return menus;
+  if (CHAT_ROLES.includes(role)) return { ...menus, cursor: { ...menus.cursor, perms: permsFor("cursor", true) } };
+  if (CURSOR_ROLES.includes(role)) return menus;
   const { cursor: _, ...rest } = menus;
   return rest;
 }
@@ -180,7 +185,7 @@ export function chooseModel(menus, permDefault, sel, agent, id) {
   if (next.effort && !m.efforts.includes(next.effort)) next.effort = null;
   if (!m.fast) next.fast = false;
   if (agent !== sel.agent) {
-    next.perm = permAcross(sel.perm, agent, permDefault);
+    next.perm = permAcross(sel.perm, agent, permDefault, menus[agent].perms);
     next.fast = false;
   }
   return next;

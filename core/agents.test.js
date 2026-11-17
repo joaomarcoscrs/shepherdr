@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { argvFor, canFork, current, forkArgv, FORK_LIVE, isCursorChat, line, liveTaskAgent, menuFor, modelSections, parseDefaults, parsePicks, permAcross, pickKey, resumeArgv, rowFor, sessionOf, withPin, withRecent } from "./agents.js";
+import { argvFor, canFork, current, fitPerm, forkArgv, FORK_LIVE, isCursorChat, line, liveTaskAgent, menuFor, modelSections, parseDefaults, parsePicks, permAcross, pickKey, resumeArgv, rowFor, sessionOf, withPin, withRecent } from "./agents.js";
 
 const codex = { models: Array.from({ length: 250 }, (_, i) => ({ id: `gpt-${i}`, label: `GPT ${i}`, efforts: ["low", "high"] })) };
 const menus = { claude: menuFor("claude", {}), codex: menuFor("codex", codex) };
@@ -150,7 +150,7 @@ test("Cursor's settings, model menu and running line come from its own config, w
   expect(parseDefaults("cursor", "bin\t\n")).toMatchObject({ model: null, installed: false, models: [] });
   const menu = menuFor("cursor", d, "sonnet-4-thinking");
   expect(menu.name).toBe("Cursor");
-  expect(menu.perms.map((p) => p.id)).toEqual(["manual", "full"]);
+  expect(menu.perms.map((p) => p.id)).toEqual(["manual", "auto", "full"]);
   expect(menu.models.map((m) => [m.id, m.efforts, m.fast])).toEqual([["sonnet-4-thinking", [], false], ["gpt-5", [], false]]);
   const c = current("cursor", ["cursor-agent", "--force"], {}, d);
   expect(c).toMatchObject({ agent: "cursor", model: "gpt-5", perm: "full", effort: null, fast: false });
@@ -164,9 +164,48 @@ test("Cursor's settings, model menu and running line come from its own config, w
 test("switching to Cursor keeps full access as full access and never grants more than chosen", () => {
   expect(permAcross("bypassPermissions", "cursor", {})).toBe("full");
   expect(permAcross("full", "cursor", {})).toBe("full");
-  for (const p of ["auto", "acceptEdits", "plan", "read-only", "manual"]) expect(permAcross(p, "cursor", { cursor: "manual" })).toBe("manual");
+  // SHEP-9: auto (Claude's auto mode, Codex's sandboxed auto) is Cursor's Auto-review; what asks more is its Ask
+  expect(permAcross("auto", "cursor", { cursor: "auto" })).toBe("auto");
+  for (const p of ["acceptEdits", "plan", "read-only", "manual"]) expect(permAcross(p, "cursor", { cursor: "auto" })).toBe("manual");
+  // and back: Cursor's Auto is the others' auto
+  expect(permAcross("auto", "claude", {})).toBe("auto");
+  expect(permAcross("auto", "codex", {})).toBe("auto");
   expect(permAcross("full", "claude", {})).toBe("bypassPermissions");
   expect(permAcross("manual", "claude", {})).toBe("manual");
+});
+
+// SHEP-9: Cursor's Auto is its Auto-review (--auto-review), which only its terminal UI (a task's worker) honors: its ACP
+// server, an Assistant's chat bridge, ignores it, so a chat never offers it, shows it or starts with it.
+test("Cursor's Auto is --auto-review for a worker, never --force, and never offered or run in a chat", () => {
+  const d = parseDefaults("cursor", "model\tgpt-5\napproval\t\nbin\t/usr/local/bin/cursor-agent\n");
+  expect(menuFor("cursor", d).perms.map((p) => p.label)).toEqual(["Ask", "Auto", "Full access"]);
+  expect(menuFor("cursor", d, null, { chat: true }).perms.map((p) => p.label)).toEqual(["Ask", "Full access"]);
+  expect(menuFor("claude", {}, null, { chat: true }).perms.map((p) => p.id)).toContain("auto");
+  // a worker: Auto is --auto-review alone; Full access --force alone (Cursor refuses the two together); Ask neither
+  const worker = (perm, argv = ["cursor-agent"]) => argvFor({ agent: "cursor", model: "gpt-5", perm }, { agent: "cursor", argv }).argv;
+  expect(worker("auto")).toEqual(["cursor-agent", "--model", "gpt-5", "--auto-review"]);
+  expect(worker("full")).toEqual(["cursor-agent", "--model", "gpt-5", "--force"]);
+  expect(worker("manual")).toEqual(["cursor-agent", "--model", "gpt-5"]);
+  // a restart chooses again: the old mode's flag never stays beside the new one
+  expect(worker("full", ["cursor-agent", "--auto-review"])).toEqual(["cursor-agent", "--model", "gpt-5", "--force"]);
+  expect(worker("manual", ["cursor-agent", "--auto-review"])).toEqual(["cursor-agent", "--model", "gpt-5"]);
+  expect(worker("auto", ["cursor-agent", "--force"])).toEqual(["cursor-agent", "--model", "gpt-5", "--auto-review"]);
+  // a chat (an Assistant): Auto runs as Ask, never passed to the bridge as if it worked; Full access stays --force
+  const chat = (perm) => argvFor({ agent: "cursor", perm }, { agent: "claude", argv: ["claude"] }, { chat: true }).argv;
+  expect(chat("auto")).toEqual(["herdr-task", "cursor-chat"]);
+  expect(chat("full")).toEqual(["herdr-task", "cursor-chat", "--force"]);
+  // what runs: --auto-review or Cursor's own approvalMode in its terminal UI; never in a chat (its ACP server ignores both)
+  expect(current("cursor", ["cursor-agent", "--auto-review"], {}, d).perm).toBe("auto");
+  expect(current("cursor", ["cursor-agent"], {}, { ...d, mode: "auto-review" }).perm).toBe("auto");
+  expect(current("cursor", ["cursor-agent"], {}, d).perm).toBe("manual");
+  expect(current("cursor", ["herdr-task", "cursor-chat", "--auto-review"], {}, { ...d, mode: "auto-review" }).perm).toBe("manual");
+  expect(current("cursor", ["herdr-task", "cursor-chat", "--force"], {}, d).perm).toBe("full");
+  // a chat's menu fits a mode it lacks to its least access, Ask
+  const chatPerms = menuFor("cursor", d, null, { chat: true }).perms;
+  expect(permAcross("auto", "cursor", { cursor: "auto" }, chatPerms)).toBe("manual");
+  expect(permAcross("bypassPermissions", "cursor", { cursor: "auto" }, chatPerms)).toBe("full");
+  expect(fitPerm(chatPerms, "auto", "auto")).toBe("manual");
+  expect(fitPerm(menuFor("cursor", d).perms, null, "auto")).toBe("auto");
 });
 
 test("a Cursor session: its id from its chat or transcript, resumed with --resume; no fork", () => {

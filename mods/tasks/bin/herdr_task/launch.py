@@ -589,11 +589,17 @@ def closing_line(s, task, parent=None, argv=None):
 def cursor_line(argv):
     """What a Cursor worker needs to know: Cursor Agent reports no status to Herdr (no working, idle or asking), so its
     status line and ready are all the person sees of its progress; without --force it asks in its own terminal before
-    each command its allowlist doesn't have, herdr-task's own too."""
+    a command its allowlist doesn't have (Ask), or that Cursor's Auto-review doesn't judge safe (--auto-review),
+    herdr-task's own too."""
     text = (" Cursor can't tell Herdr whether you are working, done or asking: your status line and ready are how the "
             "person knows, so keep the status line current, and before you stop to wait for the person set it to why "
             "and end your reply with the question.")
-    if not any(a in ("--force", "-f", "--yolo") for a in argv):
+    if any(a in ("--force", "-f", "--yolo") for a in argv):
+        return text
+    if "--auto-review" in argv:
+        text += (" You run in Cursor's Auto-review: Cursor runs the commands it judges safe, and one it doesn't, these "
+                 "herdr-task commands too, waits for the person's yes in your terminal.")
+    else:
         text += (" You run in Cursor's Ask mode: a command its allowlist doesn't have, these herdr-task commands too, "
                  "waits for the person's yes in your terminal.")
     return text

@@ -115,6 +115,21 @@ class CursorChat(unittest.TestCase):
         self.assertEqual([r["argv"] for r in self.sent() if "argv" in r], [["--force", "acp"]])
         self.assertEqual(self.transcript()[0]["perm"], "full")
 
+    def test_auto_review_runs_as_ask_and_says_so(self):
+        """SHEP-9: Cursor's ACP server ignores Auto-review (a real cursor-agent 2026.11.13 asked for `echo > file`
+        with --auto-review and with approvalMode "auto-review"): the bridge never passes it on as if it worked, runs Ask
+        and says so in its terminal and the chat."""
+        code, out, err = self.run_bridge("say hi\n", "--auto-review")
+        self.assertEqual(code, 0, err)
+        self.assertEqual([r["argv"] for r in self.sent() if "argv" in r], [["acp"]])
+        recs = self.transcript()
+        self.assertEqual(recs[0]["perm"], "manual")
+        self.assertIn("Auto-review isn't available in a Cursor chat", next(r["text"] for r in recs if r["type"] == "error"))
+        self.assertIn("Auto-review isn't available", out)
+        # Full access stays itself: no note
+        code, out, err = self.run_bridge("say hi\n", "--force", "--auto-review")
+        self.assertNotIn("Auto-review isn't available", out)
+
     def test_permission_goes_to_the_chat_card(self):
         p = self.start(env={"HC_TERMINAL_ID": "t9"})
         p.stdin.write("run touch made.txt\n")

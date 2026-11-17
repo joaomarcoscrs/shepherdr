@@ -35,21 +35,41 @@ const PERMS = {
   claude: [{ id: "manual", label: "Ask" }, { id: "auto", label: "Auto" }, { id: "acceptEdits", label: "Accept edits" },
     { id: "plan", label: "Plan" }, { id: "bypassPermissions", label: "Full access" }],
   codex: [{ id: "read-only", label: "Read only" }, { id: "auto", label: "Auto" }, { id: "full", label: "Full access" }],
-  // Cursor Agent: its own allowlist (cli-config.json's permissions) asking in its terminal for anything else, or --force
-  // (every command its deny list doesn't stop). It has no read-only or plan flag in every version, so none here.
-  cursor: [{ id: "manual", label: "Ask" }, { id: "full", label: "Full access" }],
+  // Cursor Agent: Ask is its own allowlist (cli-config.json's permissions) asking in its terminal for anything else; Auto
+  // is its Auto-review (--auto-review: Cursor's server classifier runs the calls it judges safe and asks for the rest,
+  // never Run Everything); Full access is --force (every command its deny list doesn't stop). It has no read-only or
+  // plan flag in every version, so none here. Ask comes first: the least access, where a mode doesn't fit (fitPerm).
+  cursor: [{ id: "manual", label: "Ask" }, { id: "auto", label: "Auto" }, { id: "full", label: "Full access" }],
 };
+// Cursor in a chat (an Assistant, herdr-task cursor-chat) runs Cursor's ACP server, which ignores Auto-review: neither
+// --auto-review nor cli-config.json's approvalMode "auto-review" stops it asking for a call its terminal UI runs
+// (checked on cursor-agent 2026.11.13, SHEP-9: its ACP sessions never turn the classifier on). So a chat offers Ask and
+// Full access only, and an Auto picked elsewhere runs as Ask there (argvFor), never as more.
+export const CURSOR_CHAT_PERMS = PERMS.cursor.filter((p) => p.id !== "auto");
+export const CURSOR_CHAT_AUTO = "Cursor's Auto-review doesn't work in a chat (its ACP server ignores it): Ask instead.";
+/** The permission modes `agent` offers; chat: it runs in a chat (an Assistant: Cursor behind its bridge). */
+export function permsFor(agent, chat = false) {
+  return agent === "cursor" && chat ? CURSOR_CHAT_PERMS : PERMS[agent] ?? [];
+}
+/** `perm` when `perms` (a menu's modes) has it, else `dflt` when it has that, else its first (Cursor's Ask), else perm. */
+export function fitPerm(perms, perm, dflt) {
+  if (!perms?.length) return perm ?? dflt ?? null;
+  return [perm, dflt].find((x) => x && perms.some((p) => p.id === x)) ?? perms[0].id;
+}
 // A permission mode carried to the other agent when the agent is switched: its nearest mode there (auto stays auto,
 // full access stays full access, Claude's accept edits is Codex's auto, plan and read only swap), else that agent's
 // default (Claude's ask has no Codex match). Never silently drops auto to ask on a round trip (#758).
 const PERM_ACROSS = {
   claude: { "read-only": "plan", auto: "auto", full: "bypassPermissions" },
   codex: { plan: "read-only", auto: "auto", acceptEdits: "auto", bypassPermissions: "full" },
-  // Only full access carries over as full access; every other mode becomes Cursor's ask, never more access than chosen.
-  cursor: { bypassPermissions: "full", full: "full", auto: "manual", acceptEdits: "manual", plan: "manual", "read-only": "manual" },
+  // Full access stays full access and auto (Claude's auto mode, Codex's sandboxed auto) Cursor's Auto-review; every other
+  // mode becomes Cursor's ask, never more access than chosen (accept edits runs no command by itself, Auto-review may).
+  cursor: { bypassPermissions: "full", full: "full", auto: "auto", acceptEdits: "manual", plan: "manual", "read-only": "manual" },
 };
-export function permAcross(perm, agent, permDefault) {
-  return PERM_ACROSS[agent]?.[perm] ?? (PERMS[agent]?.some((p) => p.id === perm) ? perm : null) ?? permDefault?.[agent] ?? null;
+// perms: the modes the menu offers that agent there (a chat's Cursor has no Auto): the mode found fits them (fitPerm).
+export function permAcross(perm, agent, permDefault, perms) {
+  const p = PERM_ACROSS[agent]?.[perm] ?? (PERMS[agent]?.some((p) => p.id === perm) ? perm : null) ?? permDefault?.[agent] ?? null;
+  return perms ? fitPerm(perms, p, permDefault?.[agent]) : p;
 }
 
 // What a model id says, in words: "claude-opus-5-5" → "Opus 5.5", "opus[1m]" → "Opus 1M".
@@ -169,8 +189,11 @@ export function current(kind, argv, meta, dflt) {
     // a chat (herdr-task cursor-chat): its transcript names the model it runs now and its name, /model in place too
     const model = meta.model ?? flag(argv, "--model") ?? dflt.model ?? null;
     const full = argv.some((a) => a === "--force" || a === "-f" || a === "--yolo");
+    // Auto-review: --auto-review, or cli-config.json's approvalMode, which Cursor's terminal UI (a worker) honors; never
+    // in a chat (its ACP server ignores both, CURSOR_CHAT_PERMS)
+    const auto = !isCursorChat(argv) && (argv.includes("--auto-review") || dflt.mode === "auto-review");
     const label = meta.label ?? dflt.models?.find((m) => m.id === model || m.id.split("[")[0] === model)?.label ?? (model ? String(model).split("[")[0] : null);
-    return { agent: "cursor", model, label: model === "default[]" ? "Auto" : label, perm: full ? "full" : "manual",
+    return { agent: "cursor", model, label: model === "default[]" ? "Auto" : label, perm: full ? "full" : auto ? "auto" : "manual",
       effort: null, fast: false, used: meta.used ?? null, window: meta.window ?? null };
   }
   const o = overrides(argv);
@@ -206,7 +229,8 @@ export function contextWords(c) {
 // { name, models: [{ id, name, efforts, defaultEffort, fast }], perms }: every model the CLI
 // offers (Codex: its own models_cache.json; Claude Code: its /model menu), the picker searches them.
 // `dflt` is that agent's settings (defaults()); `current` its running model, kept in the list.
-export function menuFor(agent, dflt, current = null) {
+// opts.chat: for a chat agent (an Assistant): Cursor then runs behind its chat bridge, without Auto (CURSOR_CHAT_PERMS).
+export function menuFor(agent, dflt, current = null, opts = {}) {
   if (agent === "claude") {
     const models = CLAUDE_MODELS.map((m) => ({ id: m.id, name: m.name, efforts: CLAUDE_EFFORTS,
       defaultEffort: dflt?.per?.[m.match[1].replace(/\[1m\]$/, "")] ?? dflt?.effort ?? null, fast: m.id.startsWith("opus") }));
@@ -218,7 +242,7 @@ export function menuFor(agent, dflt, current = null) {
     // No effort or speed choices: Cursor has none to give (a "thinking" model is a model of its own).
     const all = (dflt?.models ?? []).map((m) => ({ id: m.id, name: m.label ?? m.id, efforts: [], defaultEffort: null, fast: false }));
     if (current && !all.some((m) => m.id === current)) all.unshift({ id: current, name: current, efforts: [], defaultEffort: null, fast: false });
-    return { name: NAMES.cursor, perms: PERMS.cursor, models: all };
+    return { name: NAMES.cursor, perms: permsFor("cursor", opts.chat), models: all };
   }
   const all = (dflt?.models ?? []).map((m) => ({ id: m.id, name: m.label, efforts: m.efforts?.length ? m.efforts : ["low", "medium", "high", "xhigh"],
     defaultEffort: m.defaultEffort ?? dflt?.effort ?? null, fast: m.fast }));
@@ -334,8 +358,8 @@ const CODEX_VALUE = new Set(["-c", "--config", "-m", "--model", "-p", "--profile
 // Cursor Agent's (its --resume takes an optional id, so it is read on its own).
 const CURSOR_VALUE = new Set(["--mode", "--sandbox", "--workspace", "--output-format", "-H", "--header", "--plugin-dir",
   "--worktree-base", "--api-key"]);
-// Cursor's flags chosen again by a restart (its model and full access) or that pick a conversation.
-const CURSOR_DROP = new Set(["--force", "-f", "--yolo", "--continue"]);
+// Cursor's flags chosen again by a restart (its model, full access and Auto-review) or that pick a conversation.
+const CURSOR_DROP = new Set(["--force", "-f", "--yolo", "--auto-review", "--continue"]);
 
 // Where the agent's own word (claude, codex, cursor-agent) is in argv: a terminal's argv starts with what launched it (nice,
 // sh -c, env, the person's `bash -ic`), whose words are no agent flags (#1001: its -ic was Codex's `-i c`, an image).
@@ -440,8 +464,11 @@ export function argvFor(pick, old, opts = {}) {
     const word = same && !chat ? argvWord(old.argv) : null;
     const a = chat ? [...CURSOR_CHAT, ...flags] : [word && word !== "cursor-chat" && kindOfWord(word) === "cursor" ? word : CURSOR_BIN, ...flags];
     if (pick.model) a.push("--model", pick.model);
-    // Full access is --force, said only when chosen: Ask is Cursor's own default (its allowlist, asking in its terminal).
+    // Full access is --force and Auto --auto-review (never both: Cursor refuses them together), each said only when
+    // chosen: Ask is Cursor's own default (its allowlist, asking in its terminal). A chat's Cursor (its ACP server)
+    // ignores Auto-review, so there Auto runs as Ask, said so by the bridge (CURSOR_CHAT_PERMS), never as more.
     if (pick.perm === "full") a.push("--force");
+    else if (pick.perm === "auto" && !chat) a.push("--auto-review");
     if (same && old.session) return { argv: [...a, "--resume", old.session], resume: true, base: a };
     return { argv: a, resume: false, base: a };
   }

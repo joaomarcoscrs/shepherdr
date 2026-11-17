@@ -40,4 +40,13 @@ test("its model menu offers Cursor beside Claude Code and Codex; a reviewer's do
   expect(cursorRole(t)).toBe(true);
   expect(cursorRole({ labels: { "herdr.role": "reviewer" } })).toBe(false);
   expect(cursorRole({ labels: { "herdr.role": "helper", "herdr.task": "x#1" } })).toBe(false);
+  // SHEP-9: an Assistant's Cursor runs Cursor's ACP server, which ignores Auto-review: no Auto in its menu
+  expect(menu.menus.cursor.perms.map((p: any) => p.label)).toEqual(["Ask", "Full access"]);
+  expect(menu.permDefault.cursor).toBe("auto");
+  // a task's worker runs Cursor's own terminal UI, which honors it: Auto there
+  const worker = { ...t, address: "t8", foreground: { ...t.foreground, argv: ["cursor-agent", "--auto-review"] }, labels: { ...t.labels, "herdr.role": "worker", "herdr.task": "x#1" } };
+  hub.terminals.set("t8", worker);
+  const wm = await new Agents(hub).menu("t8", null);
+  expect(wm.menus.cursor.perms.map((p: any) => p.label)).toEqual(["Ask", "Auto", "Full access"]);
+  expect(wm.current).toMatchObject({ agent: "cursor", perm: "auto" });
 });
