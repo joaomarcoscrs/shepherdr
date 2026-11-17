@@ -6,6 +6,8 @@
 // (one JSON-RPC line in, its answer out), the documented way in that names nobody.
 // Shared core: the source is core/person.js; bin/sync-shared copies it into the mods in lib/COPIES.
 
+import { settleIfCodex } from "./mouse-leak.js";
+
 // The one request line: terminal.send for addr with text, no caller.
 export const personRequest = (addr, text) => JSON.stringify({ jsonrpc: "2.0", id: 1, method: "terminal.send", params: { terminal: addr, text } });
 
@@ -21,8 +23,13 @@ export function personResult(r) {
 }
 
 // Sends text to addr as the person. exec: herdr's exec(command, args). When hc connect gave no answer (no sh, an hc
-// without it), hc send instead: the words still go, named as before.
+// without it), hc send instead: the words still go, named as before. To Codex, mouse reports it typed into its box
+// are deleted first, so they don't go out in front of the words (core/mouse-leak.js, SHEP-13).
 export async function sendAsPerson({ hc, exec }, addr, text) {
+  await settleIfCodex({ hc }, addr, async (a) => {
+    const r = await hc(["get", a, "--json"]);
+    return r?.code === 0 ? JSON.parse(r.stdout) : null;
+  });
   const r = await exec("sh", ["-c", 'printf "%s\\n" "$1" | hc connect', "hc-send", personRequest(addr, text)]).catch(() => null);
   return personResult(r) ?? hc(["send", addr, text]);
 }

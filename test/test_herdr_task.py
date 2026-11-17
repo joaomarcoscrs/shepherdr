@@ -7467,3 +7467,128 @@ class BranchUpdates(unittest.TestCase):
                       "Their ask is its Accept", "whatever the space's Delivery or Accept when ready, which you never change for it",
                       "A conflict, a failing check or a rewritten history waits for the person", "is a normal task they accept as usual"):
             self.assertIn(words, tpl)
+
+
+class MouseReports(unittest.TestCase):
+    """SHEP-13: mouse reports Codex typed into its own box ("[<65;101;61M": a wheel move whose ESC reached it apart
+    from the rest) are no one's draft: messages to it aren't held for them, and they're deleted before a send instead
+    of going out in front of it. Words in the box (a draft, reports among them or not) are never touched."""
+
+    R1, R2 = "[<65;101;61M", "[<64;101;61M"
+
+    def setUp(self):
+        sys.path.insert(0, BIN)
+        from unittest import mock
+        from herdr_task import news, machines
+        self.news, self.machines, self.mock = news, machines, mock
+        self.store = tempfile.mkdtemp()
+        p = mock.patch.object(news, "HELD", os.path.join(self.store, ".held.json"))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def codex(self, box, app="codex", on_quiet="", on_keys=""):
+        """A Codex terminal as hc sees it: its box, the keys pressed, what was sent. on_quiet / on_keys: a report
+        landing while hc waits for quiet before the F12 / the next keys."""
+        t = {"box": box, "keys": [], "sent": [], "on_quiet": on_quiet, "on_keys": on_keys}
+        rec = {"address": "t1", "state": "live", "status": {"app": app, "state": "idle"}, "labels": {"herdr.agent": app}}
+        screen = lambda: f"  history\n\n› {t['box']}\n\n  GPT-6.2-Sol low · ~/proj\n  ← for agents · ? for shortcuts\n"
+
+        def hc(argv, **kw):
+            out = ""
+            if argv[:2] == ["hc", "get"]:
+                out = json.dumps(rec)
+            elif argv[:2] == ["hc", "read"]:
+                out = screen()
+            elif argv[:2] == ["hc", "keys"]:
+                keys = argv[3:]
+                if keys == ["f12"]:
+                    t["box"] += t["on_quiet"]
+                    t["on_quiet"] = ""
+                else:
+                    t["box"] += t["on_keys"]
+                    t["on_keys"] = ""
+                t["keys"].append(keys)
+                for k in keys:
+                    if k == "backspace":
+                        t["box"] = t["box"][:-1]
+            elif argv[:2] == ["hc", "send"]:
+                t["sent"].append(t["box"] + argv[3])
+                t["box"] = ""
+            return subprocess.CompletedProcess(argv, 0, out, "")
+
+        t["hc"], t["rec"] = hc, rec
+        n, mock = self.news, self.mock
+        for p in (mock.patch.object(n, "run", hc), mock.patch.object(n, "guard", lambda a: None),
+                  mock.patch.object(n.subprocess, "run", hc),
+                  mock.patch.object(n, "hc_json", lambda *a: rec if a[0] == "get" else None),
+                  mock.patch.object(n, "screen_raw", lambda address, there=None: "\x1b[1;1H" + screen().replace("\n", "\r\n"))):
+            p.start()
+            self.addCleanup(p.stop)
+        return t
+
+    def test_reports_alone_are_no_draft(self):
+        n = self.news
+        self.assertEqual(n.typing("t1", self.codex(self.R1 + self.R2)["rec"]), None)
+        self.assertEqual(n.typing("t1", self.codex("fix the login bug" + self.R1)["rec"]), "input")
+        self.assertEqual(n.typing("t1", self.codex(self.R1 + "please review")["rec"]), "input")
+        self.assertEqual(n.typing("t1", self.codex("see [<b>] tag")["rec"]), "input")
+        # another CLI's box: as it was (only Codex types reports)
+        self.assertEqual(n.typing("t1", self.codex(self.R1, app="claude")["rec"]), "input")
+
+    def test_settle_deletes_reports_alone_after_quiet(self):
+        t = self.codex(self.R1 + self.R2, on_quiet=self.R2)
+        self.assertTrue(self.news.settle("t1"))
+        self.assertEqual(t["box"], "")
+        # the wait for quiet first, then the box as it is then (the report that came meanwhile too)
+        self.assertEqual(t["keys"][0], ["f12"])
+        self.assertEqual(t["keys"][1], ["end"] + ["backspace"] * len(self.R1 + self.R2 + self.R2))
+
+    def test_settle_never_touches_words(self):
+        for box in ("fix the login bug" + self.R1, self.R1 + "please review", "see [<b>] tag", "[<65;101;61"):
+            t = self.codex(box)
+            ok = self.news.settle("t1")
+            self.assertEqual(t["box"], box)
+            self.assertFalse(any("backspace" in k for k in t["keys"]), box)
+            self.assertEqual(ok, not self.news.REPORTS.search(box), box)
+
+    def test_settle_other_clis_and_no_box(self):
+        t = self.codex(self.R1, app="claude")
+        self.assertTrue(self.news.settle("t1"))
+        self.assertEqual((t["box"], t["keys"]), (self.R1, []))
+        t = self.codex(self.R1)
+        t["rec"]["status"]["app"] = "codex"
+        with self.mock.patch.object(self.news, "codex_box", lambda s: None):
+            self.assertTrue(self.news.settle("t1"))
+        self.assertEqual(t["keys"], [])
+
+    def test_codex_box(self):
+        b = self.news.codex_box
+        self.assertEqual(b("x\n› [<65;1;1M\n\n  model · ~\n  ? for shortcuts"), "[<65;1;1M")
+        self.assertEqual(b("› a long one\n  that wraps\n\n  model"), "a long onethat wraps")
+        self.assertIsNone(b("› old message\n" + "\n".join(f"line {i}" for i in range(9))))
+        self.assertIsNone(b("no box here"))
+
+    def test_send_or_hold_sends_clean_words(self):
+        t = self.codex(self.R1 + self.R2)
+        self.assertEqual(self.news.send_or_hold("t1", "<herdr-assistant>hi</herdr-assistant>", "news"), "sent")
+        self.assertEqual(t["sent"], ["<herdr-assistant>hi</herdr-assistant>"])
+        t = self.codex("my draft" + self.R1)
+        self.assertEqual(self.news.send_or_hold("t1", "hi", "news"), "held")
+        self.assertEqual((t["sent"], t["box"]), ([], "my draft" + self.R1))
+
+    def test_held_message_goes_once_reports_are_gone(self):
+        n = self.news
+        t = self.codex(self.R1)
+        n.hold("t1", "later", "news")
+        n.held_pass({})
+        self.assertEqual(t["sent"], ["later"])
+
+    def test_remote_tell(self):
+        """tell-assistant to another machine's Assistant: its loop no longer waits a minute and gives up."""
+        t = self.codex(self.R1 + self.R2)
+        with self.mock.patch.object(self.machines, "_hops", lambda names, hows, inner: inner), \
+                self.mock.patch.object(self.machines.subprocess, "run", t["hc"]), \
+                self.mock.patch.object(self.machines, "guard", lambda a: None), \
+                self.mock.patch.object(self.machines.time, "sleep", lambda s: None):
+            self.assertTrue(self.machines._deliver(["vmb"], ["herdr-core"], "t1", "<herdr-assistant>hi</herdr-assistant>"))
+        self.assertEqual(t["sent"], ["<herdr-assistant>hi</herdr-assistant>"])

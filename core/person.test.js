@@ -10,7 +10,12 @@ function fake(stdout, code = 0) {
     calls,
     io: {
       exec: async (cmd, args) => { calls.push(["exec", cmd, ...args]); return { code, stdout, stderr: "" }; },
-      hc: async (args) => { calls.push(["hc", ...args]); return { code: 0, stdout: '{"started":true}', stderr: "" }; },
+      // hc get: not Codex (its mouse-report check, core/mouse-leak.js, has nothing to do)
+      hc: async (args) => {
+        if (args[0] === "get") return { code: 0, stdout: '{"status":{"app":"claude"}}', stderr: "" };
+        calls.push(["hc", ...args]);
+        return { code: 0, stdout: '{"started":true}', stderr: "" };
+      },
     },
   };
 }
@@ -55,4 +60,39 @@ test("asPerson: only a plain send goes as the person", async () => {
   await h(["keys", "t5", "esc"]);
   await h(["send", "t5", "hi", "--force"]);
   expect(f.calls.map((c) => c[0] === "exec" ? "connect" : c[1])).toEqual(["connect", "keys", "send"]);
+});
+
+// SHEP-13: to Codex, mouse reports it typed into its box (alone there) are deleted before the words go
+test("to Codex: reports alone in its box are deleted first", async () => {
+  let box = "[<64;101;61M[<65;101;61M";
+  const calls = [];
+  const io = {
+    exec: async (cmd, args) => { calls.push(["send", box + JSON.parse(args[3]).params.text]); return { code: 0, stdout: '{"id":1,"jsonrpc":"2.0","result":{}}', stderr: "" }; },
+    hc: async (args) => {
+      if (args[0] === "get") return { code: 0, stdout: '{"status":{"app":"codex"}}' };
+      if (args[0] === "read") return { code: 0, stdout: `› ${box}\n\n  gpt · ~\n` };
+      calls.push(args.slice(2));
+      for (const k of args.slice(2)) if (k === "backspace") box = box.slice(0, -1);
+      return { code: 0, stdout: "{}" };
+    },
+  };
+  await sendAsPerson(io, "t5", "/model");
+  expect(calls[0]).toEqual(["f12"]);
+  expect(calls.at(-1)).toEqual(["send", "/model"]);
+});
+
+test("to Codex: a draft with reports in it is left as it is", async () => {
+  const box = "fix it[<65;101;61M";
+  const keys = [];
+  const io = {
+    exec: async () => ({ code: 0, stdout: '{"id":1,"jsonrpc":"2.0","result":{}}', stderr: "" }),
+    hc: async (args) => {
+      if (args[0] === "get") return { code: 0, stdout: '{"status":{"app":"codex"}}' };
+      if (args[0] === "read") return { code: 0, stdout: `› ${box}\n\n  gpt · ~\n` };
+      keys.push(...args.slice(2));
+      return { code: 0, stdout: "{}" };
+    },
+  };
+  await sendAsPerson(io, "t5", "hello");
+  expect(keys).toEqual(["f12"]);
 });

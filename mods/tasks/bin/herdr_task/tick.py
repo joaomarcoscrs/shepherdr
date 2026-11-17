@@ -26,7 +26,7 @@ from .archive import archive_pass
 from .browsers import browser_pass
 from .output import progress_clock, say
 from .commands import accept_merge, accept_refusal, back_to_work, begin, merge_now, MERGE_FAILED, space_accept
-from .news import news_pass, typing
+from .news import news_pass, settle, typing
 from .takeover import cant_go_on, takeover
 from .ghnews import main_pass, pr_deliver, pr_news
 from .scheduler import SCHEDULER
@@ -558,7 +558,8 @@ def retry_one(row, k, log, report):
                "at": now(), **({"due": now() + wait * 60000} if wait else {"over": True})}
         report["retries"].append({"address": addr, "reason": row["reason"], "tries": row["tries"], "over": bool(row.get("over"))})
     # Not into words the person is writing to it (HERD-71): the next round tries again.
-    if row.get("due") and row["due"] <= now() and status_word(k) != "working" and not typing(addr, k):
+    if row.get("due") and row["due"] <= now() and status_word(k) != "working" and not typing(addr, k) \
+            and settle(addr, k):
         r = run(["hc", "send", addr, NUDGE.format(row["reason"].lower())])
         if r.returncode == 0:
             row = {**row, "nudged": now()}

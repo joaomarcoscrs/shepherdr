@@ -2,6 +2,7 @@
 // the link comes back by itself (0.5 s, 1, 2, then every 5 s) and everyone listening hears "reset".
 import { CoreClient } from "./hc/client.ts";
 import type { CoreNotification, CoreTerminal } from "./hc/protocol.ts";
+import { settleIfCodex } from "../core/mouse-leak.js";
 
 type Listener = (e: { type: string; terminal?: string; data?: any } | { type: "reset" }) => void;
 
@@ -36,9 +37,20 @@ export class Hub {
   async send(terminal: string, text: string): Promise<{ code: number; stdout: string; stderr: string }> {
     const fail = (kind: string | null, message: string) => ({ code: 1, stdout: "", stderr: JSON.stringify({ error: { kind, message } }) });
     if (!this.client) return fail("unavailable", "herdr-core isn't answering here.");
+    // To Codex, mouse reports it typed into its box go first, not out in front of the words (SHEP-13)
+    await settleIfCodex({ hc: (args: string[]) => this.hcLike(args) }, terminal, async (t: string) => this.terminals.get(t) ?? null);
     // it waits for a person to pause typing there (~3 s), so longer than a plain call
     try { return { code: 0, stdout: JSON.stringify(await this.call("terminal.send", { terminal, text }, 120_000)), stderr: "" }; }
     catch (e: any) { return fail(e?.kind ?? null, e?.message ?? String(e)); }
+  }
+
+  /** hc's read and keys over this link, in hc's own result shape, for core/mouse-leak.js. */
+  private async hcLike(args: string[]): Promise<{ code: number; stdout: string }> {
+    try {
+      if (args[0] === "read") return { code: 0, stdout: String((await this.call("terminal.read", { terminal: args[1], lines: Number(args[3] ?? 0) }))?.text ?? "") };
+      if (args[0] === "keys") return { code: 0, stdout: JSON.stringify(await this.call("terminal.keys", { terminal: args[1], keys: args.slice(2) }, 60_000)) };
+    } catch {}
+    return { code: 1, stdout: "" };
   }
 
   private async connect(): Promise<CoreClient> {

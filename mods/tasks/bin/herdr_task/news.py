@@ -277,12 +277,14 @@ def news_read(quiet):
             break
 
 
-def news_send(address, text, check=True):
+def news_send(address, text, check=True, settled=False):
     """Delivers news as the chat delivers the person's words: typed in, sent at once mid-turn (for
     Claude Code its "send now", Ctrl+Enter). Not as a message from this terminal: no <hc from>.
     False when it can't take it now (a dialog of its own is open, or the person is writing to it:
-    typing()): tried again next time. check=False: typing() was just asked."""
+    typing()): tried again next time. check=False: typing() was just asked. settled: settle() was just done."""
     if check and typing(address):
+        return False
+    if not settled and not settle(address):
         return False
     env = {k: v for k, v in os.environ.items() if k != "HC_TERMINAL_ID"}
     guard(["hc"])
@@ -307,7 +309,8 @@ def news_send(address, text, check=True):
 # its chat box holding unsent words (mods/chat labels the terminal herdr.typing=<ms>, again each
 # minute while they stay, removed once they're gone), or the CLI's own input line holding text
 # typed in its terminal (read off the screen: the CLI's dim placeholder or suggestion isn't
-# theirs). hc send itself also waits until no key went in for ~3 s.
+# theirs). hc send itself also waits until no key went in for ~3 s. Mouse reports Codex typed into its own
+# box (below) are no one's words.
 
 TYPING = "herdr.typing"
 TYPING_KEEP_MS = 5 * 60000     # unsent words untouched this long hold nothing any more
@@ -398,6 +401,80 @@ def typed_input(raw):
     return "\n".join(out).strip()
 
 
+# ---- mouse reports Codex typed into its own box (SHEP-13) -----------------------------------------
+# Codex turns on mouse reports for its box, so a view of its terminal sends it every wheel move as
+# "ESC [ < button ; column ; row M". When a report's ESC reaches Codex apart from the rest (Codex 0.169:
+# 10 ms apart is still one report, 20 ms is not), Codex takes the ESC for the Esc key and types the rest,
+# "[<65;101;61M", into its box. typing() took that for the person's draft and held every message to it
+# (tell-assistant: "the person is writing to that Assistant"); a send pasted after it went out with it.
+# Claude Code reads a split report as one. The window and the service do the same: core/mouse-leak.js.
+
+REPORT = r"\[<\d{1,3};\d{1,4};\d{1,4}[Mm]"
+REPORTS = re.compile(REPORT)
+ONLY_REPORTS = re.compile(rf"^\s*(?:{REPORT}\s*)+$")
+QUIET_KEY = "f12"   # a key Codex's box ignores (no text, no cursor move): pressed only to wait for quiet
+
+
+def strip_reports(text):
+    return REPORTS.sub("", text or "")
+
+
+def is_codex(k):
+    k = k or {}
+    return ((k.get("status") or {}).get("app") or (k.get("foreground") or {}).get("name") or
+            (k.get("labels") or {}).get("herdr.agent")) == "codex"
+
+
+def codex_box(screen):
+    """Codex's box on its screen (hc read --lines 0): its text, wrapped lines joined, or None when the
+    screen shows none (a picker, a question). The last line starting with "›", only its footer under it."""
+    lines = [l for l in (screen or "").split("\n") if not l.startswith("[hc]")]
+    at = next((i for i in range(len(lines) - 1, -1, -1) if re.match(r"^›(?: |$)", lines[i])), None)
+    if at is None:
+        return None
+    end, text = at + 1, re.sub(r"^›\s?", "", lines[at])
+    while end < len(lines) and re.match(r"^ {2}\S", lines[end]):
+        text, end = text + lines[end][2:], end + 1
+    if len([l for l in lines[end:] if l.strip()]) > 5:
+        return None
+    return text.rstrip()
+
+
+def settle(address, k=None, there=None, tries=3):
+    """Before a send to Codex: deletes mouse reports that are all its box holds, after a quiet moment
+    (hc presses keys ~3 s after the person's last key, a report's included: one still coming lands
+    before the box is read, not in front of the words). True: go ahead (the box is clear, shows none,
+    or it isn't Codex). False: reports sit among other text, the person's draft, left as it is."""
+    if k is None:
+        if there:
+            try:
+                k = json.loads(there(["hc", "get", address, "--json"]).stdout or "null")
+            except ValueError:
+                k = None
+        else:
+            k = hc_json("get", address)
+    if not is_codex(k):
+        return True
+    sh = there or run
+
+    def box():
+        r = sh(["hc", "read", address, "--lines", "0"])
+        return codex_box(r.stdout) if r.returncode == 0 else None
+
+    if box() is None:
+        return True
+    sh(["hc", "keys", address, QUIET_KEY])
+    for _ in range(tries):
+        b = box()
+        if b is None or not REPORTS.search(b):
+            return True
+        if not ONLY_REPORTS.match(b):
+            return False
+        sh(["hc", "keys", address, "end", *["backspace"] * len(b)])
+    b = box()
+    return b is None or not REPORTS.search(b)
+
+
 def typing(address, k=None, there=None):
     """Why the person is writing to this agent now, else None: "chat" (its chat box holds unsent
     words) or "input" (its CLI's input line holds text they typed). k: its hc get, when at hand."""
@@ -417,7 +494,10 @@ def typing(address, k=None, there=None):
         at = 0
     if at and now() - at < TYPING_KEEP_MS:
         return "chat"
-    return "input" if typed_input(screen_raw(address, there)) else None
+    typed = typed_input(screen_raw(address, there))
+    if is_codex(k):
+        typed = strip_reports(typed).strip()  # reports alone are no one's words (settle() deletes them)
+    return "input" if typed else None
 
 
 @contextmanager
@@ -448,11 +528,11 @@ def hold(address, text, how="send"):
 def send_or_hold(address, text, how="send"):
     """Sends it now, or holds it while the person is writing to that agent. Returns "sent",
     "held", or None when it couldn't go (hc refused it)."""
-    if typing(address):
+    if typing(address) or not settle(address):
         hold(address, text, how)
         return "held"
     if how == "news":
-        return "sent" if news_send(address, text, check=False) else None
+        return "sent" if news_send(address, text, check=False, settled=True) else None
     return "sent" if run(["hc", "send", address, text]).returncode == 0 else None
 
 
@@ -468,14 +548,14 @@ def held_pass(report):
             if not k or k.get("state") != "live":
                 held.pop(addr)
                 continue
-            if typing(addr, k):
+            if typing(addr, k) or not settle(addr, k):
                 continue
             for how in ("news", "send"):
                 batch = [x for x in items if x.get("how", "send") == how]
                 if not batch:
                     continue
                 text = "\n\n".join(x["text"] for x in batch)
-                ok = news_send(addr, text, check=False) if how == "news" else run(["hc", "send", addr, text]).returncode == 0
+                ok = news_send(addr, text, check=False, settled=True) if how == "news" else run(["hc", "send", addr, text]).returncode == 0
                 if ok:
                     items[:] = [x for x in items if x not in batch]
                     report.setdefault("held", []).append({"to": addr, "messages": len(batch)})
