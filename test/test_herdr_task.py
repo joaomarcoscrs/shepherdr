@@ -6733,7 +6733,9 @@ class CursorAgent(unittest.TestCase):
 
     def test_start_argv_and_key(self):
         s = self.settings
-        self.assertEqual(s.argv_for({"agent": "cursor"}), ["cursor-agent"])
+        # SHEP-9: Auto (Cursor's Auto-review) unless another mode is chosen; Ask (manual) and Full access kept as chosen
+        self.assertEqual(s.argv_for({"agent": "cursor"}), ["cursor-agent", "--auto-review"])
+        self.assertEqual(s.argv_for({"agent": "cursor", "perm": "auto"}), ["cursor-agent", "--auto-review"])
         self.assertEqual(s.argv_for({"agent": "cursor", "model": "gpt-5", "effort": "high", "fast": True, "perm": "manual"}),
                          ["cursor-agent", "--model", "gpt-5"])
         self.assertEqual(s.argv_for({"agent": "cursor", "perm": "full"}), ["cursor-agent", "--force"])
@@ -6745,7 +6747,23 @@ class CursorAgent(unittest.TestCase):
         # the task's own --agent cursor starts from Cursor's own defaults, not Settings' Claude model
         pick = s.worker_pick(Store([]), {"agent": "cursor"})
         self.assertEqual(pick, {"agent": "cursor"})
-        self.assertEqual(s.worker_argv(Store([]), {"agent": "cursor", "model": "sonnet-4"}), ["cursor-agent", "--model", "sonnet-4"])
+        self.assertEqual(s.worker_argv(Store([]), {"agent": "cursor", "model": "sonnet-4"}),
+                         ["cursor-agent", "--model", "sonnet-4", "--auto-review"])
+
+    def test_cursor_never_asks_less_than_settings_worker(self):
+        """SHEP-9: a task's --agent cursor starts on Auto, but Settings' worker set to ask more (Claude's Ask, Plan...)
+        keeps Cursor on Ask: never more access than chosen."""
+        s = self.settings
+        for perm, want in (("manual", ["cursor-agent"]), ("plan", ["cursor-agent"]), ("acceptEdits", ["cursor-agent"]),
+                           ("auto", ["cursor-agent", "--auto-review"]), ("bypassPermissions", ["cursor-agent", "--auto-review"]),
+                           (None, ["cursor-agent", "--auto-review"])):
+            with self.mock.patch.object(s, "settings_for", lambda st, sp, perm=perm: {"worker": {"agent": "claude", "model": "opus", "perm": perm}}):
+                self.assertEqual(s.worker_argv(Store([]), {"agent": "cursor"}), want, perm)
+        # Settings' own Cursor worker: its mode as saved (Ask stays Ask)
+        with self.mock.patch.object(s, "settings_for", lambda st, sp: {"worker": {"agent": "cursor", "perm": "manual"}}):
+            self.assertEqual(s.worker_argv(Store([]), {}), ["cursor-agent"])
+        with self.mock.patch.object(s, "settings_for", lambda st, sp: {"worker": {"agent": "cursor", "perm": None}}):
+            self.assertEqual(s.worker_argv(Store([]), {}), ["cursor-agent", "--auto-review"])
 
     def test_resume_argv(self):
         from herdr_task import launch, revive
@@ -6800,6 +6818,10 @@ class CursorAgent(unittest.TestCase):
         self.assertIn("Cursor can't tell Herdr", ask)
         self.assertIn("Ask mode", ask)
         self.assertNotIn("Ask mode", launch.cursor_line(["cursor-agent", "--force"]))
+        auto = launch.cursor_line(["cursor-agent", "--auto-review"])
+        self.assertIn("Auto-review", auto)
+        self.assertIn("waits for the person's yes", auto)
+        self.assertNotIn("Ask mode", auto)
         # own_argv leaves Cursor's argv as it is: no Claude --settings, no Codex -c hooks
         self.assertEqual(launch.own_argv(["cursor-agent", "--model", "gpt-5"]), ["cursor-agent", "--model", "gpt-5"])
 

@@ -369,7 +369,7 @@ function ModelMenu({ chat, typed }: { chat: string; typed?: string }) {
     if (!m.fast) next.fast = false
     if (m.agent !== was.agent) {
       // another agent: its own permission modes, the nearest to the one chosen
-      next.perm = AGc.permAcross(was.perm, m.agent, d.permDefault)
+      next.perm = AGc.permAcross(was.perm, m.agent, d.permDefault, d.menus[m.agent]?.perms)
       next.fast = false
     }
     return next

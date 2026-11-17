@@ -121,21 +121,32 @@ test("Feedback offers and the repo they file to", () => {
   expect(read("mods/shepherdr-settings/main.js")).toContain("feedbackRow(this, t)");
 });
 
-// SHEP-2: Cursor where its CLI is installed, for task workers only; Ask by default, never --force unless chosen.
-test("Cursor is offered for workers and Assistants where installed, its own Ask by default", () => {
+// SHEP-2: Cursor where its CLI is installed; never --force unless chosen. SHEP-9: Auto (its Auto-review) by default for a
+// task's worker; an Assistant's Cursor (its ACP server ignores Auto-review) offers Ask and Full access, Ask by default.
+test("Cursor is offered for workers and Assistants where installed, Auto by default where it works", () => {
   const dflts = { claude: { model: "opus", per: {} }, codex: { models: [{ id: "gpt-5", label: "GPT-5", efforts: ["low"] }] },
     cursor: { model: "gpt-5", label: "OpenAI GPT-5", installed: true, models: [{ id: "gpt-5", label: "OpenAI GPT-5", efforts: [], fast: false }] } };
   expect(Object.keys(S.choicesFrom(dflts).menus)).toEqual(["claude", "codex"]);
   const { menus, permDefault, defaults } = S.choicesFrom(dflts, { claude: true, codex: true, cursor: true });
   expect(Object.keys(menus)).toEqual(["claude", "codex", "cursor"]);
-  expect(permDefault.cursor).toBe("manual");
+  expect(permDefault.cursor).toBe("auto");
+  expect(menus.cursor.perms.map((p) => p.id)).toEqual(["manual", "auto", "full"]);
+  expect(S.forRole("worker", menus).cursor.perms.map((p) => p.id)).toEqual(["manual", "auto", "full"]);
+  expect(S.forRole("coordinator", menus).cursor.perms.map((p) => p.id)).toEqual(["manual", "full"]);
+  expect(menus.cursor.perms.map((p) => p.id)).toEqual(["manual", "auto", "full"]);   // forRole copies, never changes
   expect(defaults.agent).toBe("claude");
   expect(Object.keys(S.forRole("worker", menus))).toEqual(["claude", "codex", "cursor"]);
   // SHEP-6: an Assistant runs Cursor in its chat (herdr-task cursor-chat); a reviewer still can't (no read-only mode)
   expect(Object.keys(S.forRole("coordinator", menus))).toEqual(["claude", "codex", "cursor"]);
   expect(Object.keys(S.forRole("reviewer", menus))).toEqual(["claude", "codex"]);
   const toCursor = S.chooseModel(menus, permDefault, { agent: "claude", model: "opus", effort: "high", perm: "auto" }, "cursor", "gpt-5");
-  expect(toCursor).toMatchObject({ agent: "cursor", model: "gpt-5", effort: null, fast: false, perm: "manual" });
+  expect(toCursor).toMatchObject({ agent: "cursor", model: "gpt-5", effort: null, fast: false, perm: "auto" });
+  expect(S.chooseModel(menus, permDefault, { agent: "claude", model: "opus", perm: "manual" }, "cursor", "gpt-5").perm).toBe("manual");
+  expect(S.chooseModel(menus, permDefault, { agent: "claude", model: "opus", perm: "acceptEdits" }, "cursor", "gpt-5").perm).toBe("manual");
+  // the Assistant's menu: Claude's auto becomes Cursor's Ask there, not an Auto it can't run
+  const coord = S.forRole("coordinator", menus);
+  expect(S.chooseModel(coord, permDefault, { agent: "claude", model: "opus", perm: "auto" }, "cursor", "gpt-5").perm).toBe("manual");
+  expect(S.chooseModel(coord, permDefault, { agent: "codex", model: "gpt-5", perm: "full" }, "cursor", "gpt-5").perm).toBe("full");
   expect(S.chooseModel(menus, permDefault, { agent: "claude", model: "opus", perm: "bypassPermissions" }, "cursor", "gpt-5").perm).toBe("full");
   expect(S.modelLabel(menus, toCursor)).toBe("OpenAI GPT-5");
   // a Cursor worker's unset Reviewer is Claude Code

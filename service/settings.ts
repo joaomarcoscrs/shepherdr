@@ -14,7 +14,7 @@ import * as APc from "../core/autopilot.js";
 import type { SettingRow, SettingSection } from "../web/shared/types.ts";
 
 const { TASK_ROWS, DEFAULTS, wordFor, valueFor, ROLES: CORE_ROLES, NOTES: CORE_NOTES, ABOUT, BACKUP, REACTIONS, SUGGESTIONS, FEEDBACK, feedbackRepo, upgradeReactions, BASE, BRANCH, branchPattern, PR_ASSIGN, PR_NEXT, prAssign, MACHINES, OLD_NAMES, SECTIONS,
-  WEB, modelLabel, roleSel, otherCli, otherCliWords, CURSOR_ROLES, backupProblem, homeAbout, webState, fromWord, LOADING_AGENTS, RESET, machineLabel } = C as any;
+  WEB, modelLabel, roleSel, otherCli, otherCliWords, CURSOR_ROLES, CHAT_ROLES, backupProblem, homeAbout, webState, fromWord, LOADING_AGENTS, RESET, machineLabel } = C as any;
 const AP = APc as any;
 /** Autopilot as Everywhere has it now (herdr-task's view: what Settings keeps, else what it kept before, else the
  *  defaults): its schedule's words, events, heartbeat words and what wakes it in plain words */
@@ -468,8 +468,12 @@ export class Settings {
         if (!clis.includes(v?.agent) || !ok(v.model) || !ok(v.effort))
           throw new Error(v?.agent === "cursor" ? "Cursor can't run the reviewer." : clis.includes("cursor") ? "Pick Claude Code, Codex or Cursor." : "Pick Claude Code or Codex.");
         // its permission mode, as the window's Permissions pick (one of the CLI's modes; none: the CLI's own default)
-        const PERM: Record<string, string[]> = { claude: ["manual", "auto", "acceptEdits", "plan", "bypassPermissions"], codex: ["read-only", "auto", "full"], cursor: ["manual", "full"] };
-        if (v.perm != null && !PERM[v.agent].includes(v.perm)) throw new Error("Not one of its permission modes.");
+        // Cursor's Auto (Auto-review) runs only in its own terminal UI, a task's worker: an Assistant's Cursor (its chat
+        // bridge, Cursor's ACP server) ignores it (core/agents.js CURSOR_CHAT_PERMS, SHEP-9)
+        const PERM: Record<string, string[]> = { claude: ["manual", "auto", "acceptEdits", "plan", "bypassPermissions"], codex: ["read-only", "auto", "full"],
+          cursor: CHAT_ROLES.includes(field) ? ["manual", "full"] : ["manual", "auto", "full"] };
+        if (v.perm != null && !PERM[v.agent].includes(v.perm))
+          throw new Error(v.agent === "cursor" && v.perm === "auto" ? "Cursor's Auto-review doesn't work for an Assistant: pick Ask or Full access." : "Not one of its permission modes.");
         v = { agent: v.agent, model: v.model ?? null, effort: v.effort ?? null, fast: !!v.fast, perm: v.perm ?? null };
       }
       put(field, null, v);

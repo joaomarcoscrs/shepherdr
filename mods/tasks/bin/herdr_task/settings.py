@@ -15,6 +15,10 @@ from .base import Fail, git, HOME, MAX_RUNNING, WHERE
 AGENTS = {"claude": ["claude"], "codex": ["codex", "--no-daemon"], "cursor": ["cursor-agent"]}
 # Cursor Agent's CLI is `cursor-agent`, or `agent` as newer installs and Herdr's agent list call it: both are "cursor".
 WORDS = {"cursor-agent": "cursor", "agent": "cursor"}
+# A Cursor worker's permission mode when none is chosen: Auto, its Auto-review (core/settings.js permDefault).
+CURSOR_PERM_DEFAULT = "auto"
+# Other CLIs' modes that ask more than Cursor's Auto-review: Cursor's Ask for them (core/agents.js PERM_ACROSS).
+ASKS_MORE = {"manual", "default", "acceptEdits", "plan", "read-only"}
 
 
 # ---- the person's settings ------------------------------------------------------------------
@@ -305,13 +309,18 @@ def argv_for(pick):
             a += ["--permission-mode", "default" if perm == "manual" else perm]
         return a
     if agent == "cursor":
-        # Cursor has no effort, speed or plan flag in every version: its model, and --force only for full access
-        # (Ask, its own allowlist asking in its terminal, is its default and needs no flag).
+        # Cursor has no effort, speed or plan flag in every version: its model, --force only for full access, and
+        # --auto-review for Auto (Cursor's server classifier runs the calls it judges safe and asks in its terminal for the
+        # rest), the default for a task's worker (SHEP-9); Ask (its allowlist asking for the rest) needs no flag. An
+        # Assistant's Cursor (herdr-task cursor-chat) never starts here: its ACP server ignores Auto-review.
         a = ["cursor-agent"]
         if pick.get("model"):
             a += ["--model", pick["model"]]
-        if pick.get("perm") == "full":
+        perm = pick.get("perm") or CURSOR_PERM_DEFAULT
+        if perm == "full":
             a.append("--force")
+        elif perm == "auto":
+            a.append("--auto-review")
         return a
     if agent == "codex":
         a = ["codex", "--no-daemon"]
@@ -339,7 +348,10 @@ def worker_pick(s, task, space=None, agent=None):
     pick = dict(settings_for(s, space)["worker"] or {})
     for key in (task.get("agent"), agent):
         if key and key != pick.get("agent"):
-            pick = {"agent": key}
+            # Cursor starts on Auto (CURSOR_PERM_DEFAULT) unless Settings' worker asks more often than that: its Ask
+            # then, never more access than chosen (core/agents.js permAcross)
+            asks = key == "cursor" and pick.get("perm") in ASKS_MORE
+            pick = {"agent": key, **({"perm": "manual"} if asks else {})}
     if not pick.get("agent") and not pick.get("argv"):
         pick["agent"] = "claude"
     for k in ("model", "effort"):

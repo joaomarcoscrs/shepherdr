@@ -299,3 +299,17 @@ test("Delivery (SHEP-7): Merge by default; a space's Open PR with its approval, 
   expect(JSON.parse(readFileSync(file, "utf8")).spaces.spRobo?.tasks).toBeUndefined();
   expect(row(robo, "tasks.pr_review")).toBeUndefined();
 });
+
+// SHEP-9: Cursor's Auto (its Auto-review) is a worker's mode; an Assistant's Cursor (its chat bridge, Cursor's ACP server)
+// ignores Auto-review, so Settings never keeps it for the Assistant.
+test("Cursor's Auto is kept for a task's worker, refused for an Assistant", () => {
+  const s = new Settings();
+  s.start();
+  const scope = { id: "sp9", name: "c", machine: null, folder: "/c" };
+  s.set("role.worker", JSON.stringify({ agent: "cursor", model: "gpt-5", perm: "auto" }), "sp9", scope);
+  expect(JSON.parse(readFileSync(file, "utf8")).spaces.sp9.worker).toMatchObject({ agent: "cursor", perm: "auto" });
+  expect(() => s.set("role.coordinator", JSON.stringify({ agent: "cursor", model: "gpt-5", perm: "auto" }), "sp9", scope))
+    .toThrow("Cursor's Auto-review doesn't work for an Assistant");
+  s.set("role.coordinator", JSON.stringify({ agent: "cursor", model: "gpt-5", perm: "manual" }), "sp9", scope);
+  expect(JSON.parse(readFileSync(file, "utf8")).spaces.sp9.coordinator).toMatchObject({ agent: "cursor", perm: "manual" });
+});

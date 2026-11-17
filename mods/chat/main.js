@@ -1815,11 +1815,13 @@ export default class Chat extends View {
     this.choice = { sel: null, data: null };
     cx.spawn(async (cx) => {
       try {
-        const data = await choices.loadChoices(space?.machine ?? null);
+        // an Assistant's: Cursor behind its chat bridge, without Auto (core/settings.js forRole)
+        const data = await choices.loadChoices(space?.machine ?? null, "coordinator");
         let kept = null;
         try { kept = JSON.parse(localStorage.getItem(`choice:${this.slot}`) ?? "null"); } catch {}
         const st = kept?.agent ? kept : props()?.settings;
-        const sel = st?.agent && data.menus[st.agent] ? { perm: data.permDefault[st.agent], effort: null, fast: false, ...st } : { ...data.defaults };
+        const sel = st?.agent && data.menus[st.agent]
+          ? { effort: null, fast: false, ...st, perm: agent.fitPerm(data.menus[st.agent].perms, st.perm, data.permDefault[st.agent]) } : { ...data.defaults };
         this.choice = { sel, data, key: this.choice.key };
       } catch { this.choice = null; }
       cx.notify();
@@ -2771,8 +2773,9 @@ export default class Chat extends View {
         // Cursor for a task's worker (its own terminal UI) and a chat agent such as an Assistant (its chat bridge,
         // herdr-task cursor-chat, SHEP-6), never a reviewer or a helper (core/settings.js forRole)
         const cursorOk = !["reviewer", "helper"].includes(this.t?.labels?.["herdr.role"]);
+        // A chat's own agent (not a task's): Cursor runs behind its chat bridge, without Auto (agent.CURSOR_CHAT_PERMS)
         const menus = Object.fromEntries(["claude", "codex", "cursor"].filter((k) => k === c.agent || (installed[k] && (k !== "cursor" || cursorOk)))
-          .map((k) => [k, agent.menuFor(k, dflts[k], k === c.agent ? currentRow : null)]));
+          .map((k) => [k, agent.menuFor(k, dflts[k], k === c.agent ? currentRow : null, { chat: !this.thread })]));
         // As tall as the menu can get (chat-models' sizes): border and padding, another machine's
         // offline line, agent tabs, search, the list (it scrolls past 8 rows), separator, Reasoning header
         // and levels, Fast, Permissions, the new conversation's two lines, Restart (two lines).
@@ -2783,7 +2786,7 @@ export default class Chat extends View {
             // chat: Cursor runs behind its chat bridge here (herdr-task cursor-chat): its model can switch in place (/model)
             current: { agent: c.agent, model: currentRow, effort: c.effort ?? null, fast: c.fast, perm: c.perm ?? null,
               ...(c.agent === "cursor" && agent.isCursorChat(this.argv) ? { chat: true } : {}) },
-            menus, icons, permDefault: { claude: dflts.claude?.mode ?? "manual", codex: "auto", cursor: "manual" } } });
+            menus, icons, permDefault: { claude: dflts.claude?.mode ?? "manual", codex: "auto", cursor: "auto" } } });
       } finally {
         this.picking = false;
         cx.notify();

@@ -79,9 +79,11 @@ export class Agents {
     if (t.created_ms && meta.at && meta.at < t.created_ms) meta = { used: meta.used, window: meta.window };
     const c = current(kind, t.foreground?.argv ?? t.argv ?? [], meta, dflts[kind]);
     const row = rowFor(kind, c);
-    const menus = Object.fromEntries(["claude", "codex", "cursor"].filter(offered).map((k) => [k, menuFor(k, dflts[k], k === kind ? row : null)]));
+    // not a task's agent (an Assistant): Cursor runs behind its chat bridge there, which has no Auto (CURSOR_CHAT_PERMS)
+    const chat = !t.labels?.["herdr.task"];
+    const menus = Object.fromEntries(["claude", "codex", "cursor"].filter(offered).map((k) => [k, menuFor(k, dflts[k], k === kind ? row : null, { chat })]));
     return { current: { agent: kind, model: row, effort: c.effort ?? null, fast: !!c.fast, perm: c.perm ?? null }, menus,
-      permDefault: { claude: claude?.mode ?? "manual", codex: "auto", cursor: "manual" }, picks: this.picks(), offline: machine && !(await this.reachable(machine)) ? machine : null };
+      permDefault: { claude: claude?.mode ?? "manual", codex: "auto", cursor: "auto" }, picks: this.picks(), offline: machine && !(await this.reachable(machine)) ? machine : null };
   }
 
   /** whether another machine answers now (hc machine ls: connected) */
@@ -116,7 +118,7 @@ export class Agents {
       // its permission modes, and the one a new agent gets unless picked (the CLI's own: Claude Code's settings mode)
       return { kind: k, name: NAMES[k], models: m.models.map((x: any) => ({ id: x.id, label: x.name, efforts: x.efforts, ...(x.defaultEffort ? { defaultEffort: x.defaultEffort } : {}) })),
         speeds: m.models.some((x: any) => x.fast) ? ["normal", "fast"] : ["normal"], perms: m.perms ?? [],
-        permDefault: k === "claude" ? dflt.claude?.mode ?? "manual" : k === "cursor" ? "manual" : "auto" };
+        permDefault: k === "claude" ? dflt.claude?.mode ?? "manual" : "auto" };
     });
   }
 

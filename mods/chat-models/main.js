@@ -116,7 +116,7 @@ export default class ModelMenu extends View {
     if (!m.fast) next.fast = false;
     if (m.agent !== was.agent) {
       // Another agent: its own permission modes, the nearest to the one chosen.
-      next.perm = permAcross(was.perm, m.agent, this.p.permDefault);
+      next.perm = permAcross(was.perm, m.agent, this.p.permDefault, this.p.menus?.[m.agent]?.perms);
       next.fast = false;
     }
     this.sel = next;
