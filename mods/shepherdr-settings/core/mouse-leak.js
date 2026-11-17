@@ -9,6 +9,12 @@
 // last key, a mouse report's included), so a report still coming lands before the box is read, not after; then
 // reports that are all the box holds are deleted. A box with any other text is the person's draft and is never
 // touched. herdr-task's own sends do the same (mods/tasks/bin/herdr_task/news.py's settle).
+//
+// Where the reports come from (SHEP-14): herdr-core reads a full-screen app's history (`hc read <t> --lines N`, N > 0)
+// by scrolling it, with wheel reports at its screen's middle ("[<65;101;61M" on a 200x120 terminal, every leaked one
+// so far), even when the read gives up and returns the screen alone. Codex runs full screen with mouse reports on, so
+// each such read sends it a burst (one of 2000 lines of a long session: hundreds), and hc's wait for a quiet moment
+// before a send starts over with each. So Codex is never read with history here (historyLines): its screen is all.
 // Shared core: the source is core/mouse-leak.js; bin/sync-shared copies it into the mods in lib/COPIES.
 
 /** One report as Codex types it, its ESC taken as a key: "[<button;column;row" then M (press) or m (release). */
@@ -28,6 +34,10 @@ export const hasReport = (text) => ANY.test(String(text ?? ""));
 
 /** Whether the terminal (hc get's record) runs Codex. */
 export const isCodex = (t) => (t?.status?.app ?? t?.foreground?.name ?? t?.labels?.["herdr.agent"]) === "codex";
+
+/** How many lines of history to read (`hc read <t> --lines`) from a terminal: n, or none from Codex (reading its
+ *  history scrolls it with wheel reports; above). t: its hc get record, or "codex" when the caller knows the CLI. */
+export const historyLines = (t, n) => (t === "codex" || isCodex(t) ? 0 : n);
 
 /** Codex's box on its screen (`hc read <t> --lines 0`): its text, its wrapped lines joined, or null when the screen
  *  shows no box (a picker, a question, still starting). The box is the last line starting with "›", near the bottom

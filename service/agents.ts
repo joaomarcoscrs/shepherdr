@@ -13,6 +13,7 @@ import * as AG from "../core/agents.js";
 import { chatLabel } from "../core/spaces.js";
 import { agentKindOf as kindOf } from "../core/chat-reader.js";
 import * as LS from "../core/live-switch.js";
+import { historyLines } from "../core/mouse-leak.js";
 
 const { DEFAULTS, parseDefaults, current, menuFor, rowFor, argvFor, sessionOf, NAMES, line, PICKS_FILE, parsePicks, pickKey, withPin, withRecent, isCursorChat } = AG as any;
 /** Whether Cursor may run this agent: anything but a reviewer or a helper (core/settings.js CURSOR_ROLES). */
@@ -168,7 +169,8 @@ export class Agents {
         if (r && r.code !== 0) throw new Error("It couldn't be reached to switch.");
       },
       keys: async (...keys: string[]) => { await hc(["keys", addr, ...keys]); },
-      screen: async () => (await hc(["read", addr, "--lines", "2000"])).out,
+      // Codex: its screen alone (reading its history scrolls it with mouse reports, SHEP-14)
+      screen: async () => (await hc(["read", addr, "--lines", String(historyLines(kind, 2000))])).out,
       readFile: async (rel: string) => {
         const r = await sh(this.hub, 'cat "$HOME/$1"', ["read", rel], machine);
         if (r.code !== 0) throw new Error("no file");

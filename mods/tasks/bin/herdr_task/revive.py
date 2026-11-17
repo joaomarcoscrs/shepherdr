@@ -272,7 +272,8 @@ def plan(k, rec, running):
         # Typed here already: once more only when the resume said its session is gone.
         if rec.get("how") != "resume" or now() - (rec.get("sent") or 0) > LOOK_MS:
             return None
-        screen = run(["hc", "read", k["address"], "--lines", "40"]).stdout
+        from .news import history_lines  # Codex: its screen alone (reading its history scrolls it, SHEP-14)
+        screen = run(["hc", "read", k["address"], "--lines", str(history_lines(k, 40))]).stdout
         if not LOST.search("\n".join(screen.split("\n")[-30:])):
             return None
         rec = dict(rec, session=None)

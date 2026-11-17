@@ -425,6 +425,13 @@ def is_codex(k):
             (k.get("labels") or {}).get("herdr.agent")) == "codex"
 
 
+def history_lines(k, n):
+    """How many lines of history to read (hc read --lines) from an agent: n, or none from Codex. herdr-core reads a
+    full-screen app's history by scrolling it with wheel reports at its screen's middle ("[<65;101;61M" on 200x120),
+    the very reports above (SHEP-14); Codex's screen is all there is to read anyway."""
+    return 0 if is_codex(k) else n
+
+
 def codex_box(screen):
     """Codex's box on its screen (hc read --lines 0): its text, wrapped lines joined, or None when the
     screen shows none (a picker, a question). The last line starting with "›", only its footer under it."""

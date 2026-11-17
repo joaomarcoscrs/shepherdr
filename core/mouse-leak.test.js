@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { codexBox, deleteKeys, hasReport, isCodex, onlyReports, settle, settleIfCodex, stripReports } from "./mouse-leak.js";
+import { codexBox, deleteKeys, hasReport, historyLines, isCodex, onlyReports, settle, settleIfCodex, stripReports } from "./mouse-leak.js";
 
 // SHEP-13: reports Codex typed into its box ("[<65;101;61M", a wheel move whose ESC reached it apart from the rest)
 const R1 = "[<65;101;61M", R2 = "[<64;101;61M";
@@ -71,4 +71,14 @@ test("settleIfCodex: other agents untouched; a failing check never stops the sen
   expect(await settleIfCodex(t.io, "t1", async () => ({ status: { app: "claude" } }))).toBe(true);
   expect(t.keys).toEqual([]);
   expect(await settleIfCodex(t.io, "t1", async () => { throw new Error("gone"); })).toBe(true);
+});
+
+// SHEP-14: herdr-core reads a full-screen app's history by scrolling it with wheel reports: never Codex's
+test("historyLines: none from Codex, as asked from anything else", () => {
+  expect(historyLines({ status: { app: "codex" } }, 2000)).toBe(0);
+  expect(historyLines({ labels: { "herdr.agent": "codex" } }, 40)).toBe(0);
+  expect(historyLines("codex", 2000)).toBe(0);
+  expect(historyLines({ status: { app: "claude" } }, 40)).toBe(40);
+  expect(historyLines("claude", 2000)).toBe(2000);
+  expect(historyLines(null, 40)).toBe(40);
 });

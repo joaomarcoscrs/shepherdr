@@ -7592,3 +7592,29 @@ class MouseReports(unittest.TestCase):
                 self.mock.patch.object(self.machines.time, "sleep", lambda s: None):
             self.assertTrue(self.machines._deliver(["vmb"], ["herdr-core"], "t1", "<herdr-assistant>hi</herdr-assistant>"))
         self.assertEqual(t["sent"], ["<herdr-assistant>hi</herdr-assistant>"])
+
+    def test_remote_tell_reads_no_codex_history(self):
+        """SHEP-14: herdr-core reads a full-screen app's history by scrolling it, with wheel reports at its screen's
+        middle: the very "[<65;101;61M" Codex types into its box. After a tell-assistant send, only its screen is read."""
+        t = self.codex("")
+        reads = []
+
+        def hc(argv, **kw):
+            if argv[:2] == ["hc", "read"]:
+                reads.append(argv[argv.index("--lines") + 1] if "--lines" in argv else "0")
+            return t["hc"](argv, **kw)
+
+        with self.mock.patch.object(self.machines, "_hops", lambda names, hows, inner: inner), \
+                self.mock.patch.object(self.machines.subprocess, "run", hc), \
+                self.mock.patch.object(self.machines, "guard", lambda a: None), \
+                self.mock.patch.object(self.machines.time, "sleep", lambda s: None):
+            self.assertTrue(self.machines._deliver(["vmb"], ["herdr-core"], "t1", "<herdr-assistant>hi</herdr-assistant>"))
+        self.assertTrue(reads)
+        self.assertEqual(set(reads), {"0"})
+
+    def test_history_lines(self):
+        n = self.news
+        self.assertEqual(n.history_lines(self.codex("")["rec"], 40), 0)
+        self.assertEqual(n.history_lines({"foreground": {"name": "codex"}}, 40), 0)
+        self.assertEqual(n.history_lines({"status": {"app": "claude"}}, 40), 40)
+        self.assertEqual(n.history_lines(None, 40), 40)
