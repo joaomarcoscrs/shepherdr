@@ -609,18 +609,43 @@ def checks_missing(v, since, expect=None):
     return "waiting" if gone < (MAYBE_CHECKS_MS if expect == "maybe" else NO_CHECKS_MS) else None
 
 
-def pr_wait(v, since, expect=None):
+# SHEP-8: GitHub says mergeable UNKNOWN for a while each time the base branch moves (it works it out again). At a head
+# it already said MERGEABLE, that is no news: this long before it counts.
+UNKNOWN_MERGEABLE_MS = 5 * 60000
+
+
+def mergeable_known(pr, v):
+    """SHEP-8: GitHub knows the pull request can merge: it says MERGEABLE, or UNKNOWN (for no longer than
+    UNKNOWN_MERGEABLE_MS) at a head it said MERGEABLE before. Remembers that head (pr["mergeable_head"]) and since when
+    it has been UNKNOWN there (pr["unknown_at"]); a conflict forgets the head."""
+    head, said = v.get("headRefOid"), (v.get("mergeable") or "").upper()
+    if said == "MERGEABLE":
+        pr.pop("unknown_at", None)
+        if head:
+            pr["mergeable_head"] = head
+        return True
+    if said == "CONFLICTING" or not head or pr.get("mergeable_head") != head:
+        if said == "CONFLICTING":
+            pr.pop("mergeable_head", None)
+        pr.pop("unknown_at", None)
+        return False
+    pr.setdefault("unknown_at", now())
+    return now() - pr["unknown_at"] < UNKNOWN_MERGEABLE_MS
+
+
+def pr_wait(v, since, expect=None, known=False):
     """SHEP-175: what a Ready task's pull request (v: pr_view's answer) still waits on before the
     person has anything to do, in a few words, or None once its checks are done and GitHub knows it
     can merge. A problem (pr_problem()) goes back to its agent: Working still, never Ready first.
-    expect: expected_checks(); since: checks_since()."""
+    expect: expected_checks(); since: checks_since(); known: mergeable_known() (SHEP-8: a brief
+    UNKNOWN at a head GitHub said MERGEABLE is no wait)."""
     if v.get("state") != "OPEN":
         return None
     if pr_problem(v):
         return BACK_TO_AGENT
     if pr_pending(v):
         return CHECKS_RUNNING
-    if (v.get("mergeable") or "").upper() not in ("MERGEABLE",):
+    if (v.get("mergeable") or "").upper() not in ("MERGEABLE",) and not known:
         return GITHUB_LOOKS
     if checks_missing(v, since, expect) == "waiting":
         return CHECKS_RUNNING

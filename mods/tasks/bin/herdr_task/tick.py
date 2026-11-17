@@ -17,7 +17,7 @@ from .agents import (
 )
 from .provider import NUDGE, provider_cut, provider_error, PROVIDER_WAITS
 from .sessions import find_lost_logs, refresh_sessions, session_of
-from .github import (already_merged, BEHIND, CHECKS_NEVER, checks_missing, checks_since, drop_branch, expected_checks, finish, github, merged_here, needs_approval, note_checks, pr_merged, pr_pending, pr_problem,
+from .github import (already_merged, BEHIND, CHECKS_NEVER, checks_missing, checks_since, drop_branch, expected_checks, finish, github, mergeable_known, merged_here, needs_approval, note_checks, pr_merged, pr_pending, pr_problem,
                      pr_view, pr_wait, queue_entry, queue_merge, tidy_done, tidy_due, update_main, watch_main)
 from .launch import default_space
 from .store import locate, read_list, Store, store_files
@@ -136,8 +136,9 @@ def facts(s, t, report):
         missing = checks_missing(v, since, expect)
         t["_pr_fresh"] = not problem and not pr_pending(v) and not needs_approval(v) and not missing
         # Ready only once its checks are done and GitHub knows it can merge (SHEP-175): Working till then.
+        known = mergeable_known(pr, v)
         if t["state"] == "ready":
-            wait = pr_wait(v, since, expect)
+            wait = pr_wait(v, since, expect, known)
             if wait != pr.get("wait"):
                 if wait:
                     pr["wait"] = wait

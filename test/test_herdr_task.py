@@ -3192,6 +3192,89 @@ class ChecksBeforeReady(PrLooks):
         self.assertEqual(self.agents.task_status(t, self.live), ("working", None, "Merging"))
 
 
+class MergeableUnknownFlap(PrLooks):
+    """SHEP-8: GitHub says mergeable UNKNOWN for a while each time the base branch moves. In a busy repo a tick often
+    reads it then: a Ready task flipped to Working ("Waiting for GitHub") and back, with news each time, nothing about
+    its pull request changed. A brief UNKNOWN at a head GitHub said MERGEABLE keeps it Ready; a real change still
+    moves it."""
+
+    RUNNING, PASSED, FAILED = ChecksBeforeReady.RUNNING, ChecksBeforeReady.PASSED, ChecksBeforeReady.FAILED
+    READY, LOOKS = ("ready", None, "ready"), ("working", "Waiting for GitHub", None)
+
+    def github_says(self, mergeable="MERGEABLE", checks=(), head="abc"):
+        with open(os.path.join(self.dir, "view.json"), "w") as f:
+            json.dump({"state": "OPEN", "mergeable": mergeable, "headRefOid": head, "statusCheckRollup": list(checks)}, f)
+
+    def ready_at_a_mergeable_head(self):
+        t = self.said_ready()
+        self.github_says(checks=[self.PASSED])
+        self.assertEqual(self.look(t), self.READY)
+        return t
+
+    def test_base_moving_again_and_again_never_flips_it(self):
+        t = self.ready_at_a_mergeable_head()
+        looks = []
+        for _ in range(6):  # hours of merges on its base: each tick may land in GitHub's recompute
+            self.github_says("UNKNOWN", checks=[self.PASSED])
+            looks.append(self.look(t))
+            self.github_says(checks=[self.PASSED])
+            looks.append(self.look(t))
+        self.assertEqual(looks, [self.READY] * 12)  # one status the whole time: no working-again nor ready news
+        self.assertNotIn("wait", t["pr"])
+
+    def test_unknown_that_lasts_is_waiting_for_github_then_ready(self):
+        t = self.ready_at_a_mergeable_head()
+        self.github_says("UNKNOWN", checks=[self.PASSED])
+        self.assertEqual(self.look(t), self.READY)
+        self.assertEqual(self.look(t, after=3 * 60_000), self.READY)
+        self.assertEqual(self.look(t, after=3 * 60_000), self.LOOKS)
+        self.github_says(checks=[self.PASSED])
+        self.assertEqual(self.look(t), self.READY)
+
+    def test_unknown_again_after_mergeable_starts_its_clock_over(self):
+        t = self.ready_at_a_mergeable_head()
+        self.github_says("UNKNOWN", checks=[self.PASSED])
+        self.assertEqual(self.look(t, after=4 * 60_000), self.READY)
+        self.github_says(checks=[self.PASSED])
+        self.assertEqual(self.look(t), self.READY)
+        self.github_says("UNKNOWN", checks=[self.PASSED])
+        self.assertEqual(self.look(t, after=4 * 60_000), self.READY)
+        self.assertEqual(self.look(t, after=60_000), self.READY)
+
+    def test_a_conflict_still_goes_back_to_its_agent(self):
+        t = self.ready_at_a_mergeable_head()
+        self.github_says("CONFLICTING", checks=[self.PASSED])
+        self.assertEqual(self.look(t), ("working", "Back to its agent to fix", None))
+        self.assertEqual(t["attention"], "It conflicts with the base branch.")
+        # after a conflict, GitHub's UNKNOWN at the same head is no longer known to be fine
+        self.github_says("UNKNOWN", checks=[self.PASSED])
+        self.assertEqual(self.look(t), self.LOOKS)
+
+    def test_a_failing_check_still_goes_back_to_its_agent(self):
+        t = self.ready_at_a_mergeable_head()
+        self.github_says("UNKNOWN", checks=[self.FAILED])
+        self.assertEqual(self.look(t), ("working", "Back to its agent to fix", None))
+        self.assertEqual(t["attention"], "Checks failing: check.")
+
+    def test_a_new_commit_with_running_checks_still_moves_it(self):
+        t = self.ready_at_a_mergeable_head()
+        self.github_says("UNKNOWN", checks=[self.RUNNING], head="def")
+        self.assertEqual(self.look(t), ("working", "Checks running", None))
+        # its checks passed, GitHub still working it out at this new head: never seen MERGEABLE there
+        self.github_says("UNKNOWN", checks=[self.PASSED], head="def")
+        self.assertEqual(self.look(t), self.LOOKS)
+        self.github_says(checks=[self.PASSED], head="def")
+        self.assertEqual(self.look(t), self.READY)
+
+    def test_never_seen_mergeable_at_its_head_waits_for_github_as_before(self):
+        t = self.said_ready()
+        self.github_says("UNKNOWN", checks=[self.PASSED])
+        self.assertEqual(self.look(t), self.LOOKS)
+        self.assertEqual(self.look(t), self.LOOKS)
+        self.github_says(checks=[self.PASSED])
+        self.assertEqual(self.look(t), self.READY)
+
+
 class ChecksUnreadable(PrLooks):
     """SHEP-179: a GitHub token that reads the pull request but not its checks (the exe.dev GitHub integration's):
     gh pr view with statusCheckRollup fails with GitHub's own GraphQL error, and the REST check runs with a 403. The
