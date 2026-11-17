@@ -14,7 +14,8 @@ import { DATA, SOCK, TOKEN, PORT, HOME, ensureData, settingsFile, where } from "
 import { holdLock } from "./lock.ts";
 import { gate, localCaller, type Gate } from "./auth.ts";
 import { refusedWhy, trustedPeer } from "./peer.ts";
-import { whoami, share, served, unshare, restoreShare, httpsPort, webLink, webOrigin, HTTPS_PORT_FILE, type Me } from "./tailscale.ts";
+import { whoami, share, served, unshare, restoreShare, httpsPort, webLink, webOrigin, HTTPS_PORT_FILE, TailscaleStuck, stopTailscale, type Me } from "./tailscale.ts";
+import { TailnetLoop } from "./tailnet-loop.ts";
 import { qrFile } from "./qr.ts";
 import { Hub } from "./hub.ts";
 import { Store } from "./store.ts";
@@ -118,8 +119,12 @@ const host = new Host(hub, VERSION);
 await Promise.race([host.start(), Bun.sleep(10_000)]);
 const store = new Store(hub, host);
 new Sync(hub, host).start();
-let me: Me | null = await whoami();
-const g: Gate = { owner: me?.login ?? null, dns: me?.dns ?? null, port: PORT, token };
+// who owns this machine on the tailnet: known once the first look at the tailnet answers (tailnet() below, in the
+// background: a stuck tailscale never keeps the service from listening, JHQ-40). Until then no tailnet caller gets in.
+let me: Me | null = null;
+// those looks: one at a time, in the background, every minute and sooner while they fail (tailnet-loop.ts)
+const looks = new TailnetLoop(tailnet);
+const g: Gate = { owner: null, dns: null, port: PORT, token };
 // the 403 reason last logged for a Mac that can't see who connected (peer.ts refusedWhy), said once
 let saidPeer = "";
 // the tailnet HTTPS port the web app is shared on (tailscale.ts httpsPort: 443 unless this machine set another),
@@ -267,7 +272,7 @@ setInterval(() => void readDefaults(), 10 * 60_000);
 // a change made on the web goes to the other machines' herdr-task as the window's does (one push at a time)
 let pushing: Promise<unknown> = Promise.resolve();
 onWritten((file) => { pushing = pushing.then(() => Promise.all(model.machineNames().map((m) => exec(hub, ["sh", "-c", PUSH, "sh", pushBody(file, m)], m).catch(() => null)))); });
-settings.on(() => { model.rebuild(); void tailnet(); });
+settings.on(() => { model.rebuild(); void looks.kick(); });
 settings.start();
 const artifacts = new Artifacts();
 compat.artifacts = artifacts;
@@ -349,10 +354,15 @@ function webOn() {
 // Tailscale can come up after the service: look again now and then, and keep /shepherdr shared while web is on. What
 // the window's Shepherdr settings > Web shows goes into ~/.local/state/shepherdr/service/web.json (the link, its QR code).
 let wasOn: boolean | null = null;
+// the link last said in the log (said again once it changes or comes back)
+let saidLink: string | null = null;
 // Serve from: a move this service started (shepherdr web serve-from), until it ends; what went wrong, for a while
 let moving: { to: string; at: number; error?: string } | null = null;
-async function tailnet() {
-  me = await whoami();
+async function tailnet(): Promise<boolean> {
+  // tailscale didn't answer in time (tailscale.ts TailscaleStuck): who owns the machine stays what it was last seen
+  // (none yet: no tailnet caller gets in), nothing is shared or unshared on a guess, and it's tried again soon
+  let stuck: string | null = null;
+  try { me = await whoami(); } catch (e) { if (!(e instanceof TailscaleStuck)) throw e; stuck = e.message; }
   g.owner = me?.login ?? null;
   g.dns = me?.dns ?? null;
   g.httpsPort = hp = httpsPort();
@@ -361,30 +371,42 @@ async function tailnet() {
   host.link = own;
   // another machine serves it: its link (the window's Settings › Web shows it and its QR code); this one isn't shared
   const link = serving ? own : host.hostLink();
-  let why: string | null = me || !serving ? null : "Tailscale isn't running here";
+  let why: string | null = stuck ?? (me || !serving ? null : "Tailscale isn't running here");
   // what tailscale serve said when sharing failed (doctor counts it as broken, not a note)
-  let shareWhy: string | null = null;
-  if (me && on && serving) {
-    const s = await served(me.dns);
-    if (s.funnel) { why = "Funnel is on for this machine: the web app stays off until it's off"; g.owner = null; }
-    else why = shareWhy = await share(me.dns, PORT, hp);
-  } else if (me && (!on || !serving) && wasOn !== false) {
-    await unshare(me.dns, PORT);
-    // moved away: what the move here set aside is shared again (shepherdr web serve-from --take-link)
-    if (!serving) await restoreShare(join(DATA, "replaced-share.json"));
+  let shareWhy: string | null = stuck && on && serving ? stuck : null;
+  try {
+    if (stuck) { /* nothing on a guess */ }
+    else if (me && on && serving) {
+      const s = await served(me.dns);
+      if (s.funnel) { why = "Funnel is on for this machine: the web app stays off until it's off"; g.owner = null; }
+      else why = shareWhy = await share(me.dns, PORT, hp);
+    } else if (me && (!on || !serving) && wasOn !== false) {
+      await unshare(me.dns, PORT);
+      // moved away: what the move here set aside is shared again (shepherdr web serve-from --take-link)
+      if (!serving) await restoreShare(join(DATA, "replaced-share.json"));
+    }
+  } catch (e) {
+    if (!(e instanceof TailscaleStuck)) throw e;
+    why = stuck = e.message;
+    if (on && serving) shareWhy = stuck;
   }
   if (!serving && !link) why = host.reachable() ? "The machine serving the web app hasn't said its link yet." : "The machine serving the web app can't be reached now.";
-  wasOn = on && serving;
+  // a stuck unshare isn't known to be done: wasOn stays, so the next look unshares again
+  if (!stuck) wasOn = on && serving;
   let qr: string | null = null;
   try { if (link && on && !why) qr = qrFile(existsSync(join(APP_DATA, "..")) ? APP_DATA : DATA, link); } catch {}
   const serve = serveNow();
-  writeFileSync(join(DATA, "web.json"), JSON.stringify({ on, link, qr, why, share_error: shareWhy, https_port: hp, serve, at: Date.now() }) + "\n");
+  writeFileSync(join(DATA, "web.json"), JSON.stringify({ on, link, qr, why, share_error: shareWhy, https_port: hp, serve, ...(stuck ? { tailscale: "stuck" } : {}), at: Date.now() }) + "\n");
   let picture: string | null = null;
   try { if (qr) picture = `data:image/svg+xml;base64,${Buffer.from(readFileSync(qr)).toString("base64")}`; } catch {}
   const was = JSON.stringify(webNow);
   webNow = { on, link, why, qr: picture, serve };
   if (JSON.stringify(webNow) !== was) model.rebuild();
   if (why) console.error(why);
+  else if (link && on && link !== saidLink) console.log(`web app: ${link}`);
+  saidLink = why ? null : link;
+  // looked again sooner (tailnet-loop.ts) while it's stuck, not running, or sharing failed here
+  return !stuck && !(on && serving && (!me || shareWhy));
 }
 
 /** Settings › Web's Serve from: every machine with its words, which one serves, and a move under way. */
@@ -399,7 +421,7 @@ async function serveFrom(machine: string | null) {
   if (moving && !moving.error) throw new Error(`Already moving it to ${moving.to}.`);
   const target = machine ?? host.me?.name ?? "here";
   moving = { to: target, at: Date.now() };
-  void tailnet();
+  void looks.kick();
   const cli = [join(HOME, ".local", "bin", "shepherdr"), join(ROOT, "bin", "shepherdr")].find(existsSync) ?? "shepherdr";
   try {
     const p = Bun.spawn([cli, "web", "serve-from", machine ?? "here", "--json"], { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
@@ -409,16 +431,16 @@ async function serveFrom(machine: string | null) {
     void out;
   } catch (err) {
     moving = { to: target, at: Date.now(), error: (err as Error).message };
-    setTimeout(() => { if (moving?.error) { moving = null; void tailnet(); } }, 60_000);
+    setTimeout(() => { if (moving?.error) { moving = null; void looks.kick(); } }, 60_000);
   }
   await host.poll();
-  await tailnet();
+  await looks.kick();
 }
-host.on(() => { void tailnet(); model.rebuild(); });
+host.on(() => { void looks.kick(); model.rebuild(); });
 // shepherdr web https-port changed the port: move the share and the links within seconds, not at the next minute
-watchFile(HTTPS_PORT_FILE, { interval: 2000 }, () => { if (httpsPort() !== hp) void tailnet(); });
-await tailnet();
-setInterval(tailnet, 60_000);
+watchFile(HTTPS_PORT_FILE, { interval: 2000 }, () => { if (httpsPort() !== hp) void looks.kick(); });
+// the first look starts now but is never waited for: the service listens and says so in service.json first (JHQ-40)
+void looks.kick();
 
 const json = (body: unknown, status = 200) => Response.json(body, { status, headers: { "cache-control": "no-store" } });
 
@@ -950,6 +972,8 @@ setInterval(() => {
   if (callsOn() || !existsSync(RESTART_WHEN_FREE)) return;
   console.log("Starting again on the update that waited for a call to end.");
   try { rmSync(RESTART_WHEN_FREE); } catch {}
-  server.stop(true); try { rmSync(SERVICE_FILE); } catch {} release(); process.exit(0);
+  stop();
 }, 5000);
-for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, () => { server.stop(true); try { rmSync(SERVICE_FILE); } catch {} release(); process.exit(0); });
+// stopping: no more looks at the tailnet, and a tailscale call still running ends too (never left behind)
+function stop() { looks.stop(); stopTailscale(); server.stop(true); try { rmSync(SERVICE_FILE); } catch {} release!(); process.exit(0); }
+for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, stop);
