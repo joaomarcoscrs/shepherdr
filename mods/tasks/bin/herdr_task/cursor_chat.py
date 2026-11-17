@@ -14,6 +14,9 @@ client a person or the chat types into, as they would into Claude Code:
   data/chat-asks/req/<id>.json, answered in ans/<id>.json). Whichever answers first wins; nothing is allowed unread.
 - `--resume <chat id>` loads that chat again (session/load: the conversation goes on); `--model` picks a model and
   `/model <id>` switches it in place; `--force` is Full access (Cursor's own: its deny list still applies).
+- No Auto: Cursor's ACP server ignores Auto-review (`cursor-agent --auto-review acp` and cli-config.json's approvalMode
+  "auto-review" still ask for what its terminal UI runs: cursor-agent 2026.11.13, SHEP-9). `--auto-review` given here
+  runs as Ask and says so, never passed on as if it worked.
 
 Usage: herdr-task cursor-chat [--model <id>] [--force] [--resume <chat id>] [first message...]
 """
@@ -35,6 +38,9 @@ from . import layout
 
 NAME = "cursor"           # what its status reports as its app (core/chat-reader.js KINDS)
 CLIP = 4000               # a tool's input or output kept in the transcript, at most this many characters
+# Cursor's ACP server never turns Auto-review's classifier on (its sessions send no smartModeClassifierAutoModeEnabled,
+# whatever --auto-review or approvalMode say), so this chat asks for every call its allowlist lacks.
+AUTO_IGNORED = "Auto-review isn't available in a Cursor chat (Cursor's ACP server ignores it): it runs in Ask, asking you for what its allowlist lacks."
 ASK_WAIT = 1800           # a permission waits this long for an answer (as the hook's 30 minutes)
 
 
@@ -245,6 +251,7 @@ class Bridge:
         self.inp = inp if inp is not None else sys.stdin
         self.model = None
         self.force = False
+        self.auto_asked = False
         self.resume = None
         words = []
         it = iter(argv)
@@ -255,6 +262,8 @@ class Bridge:
                 self.model = a.split("=", 1)[1]
             elif a in ("--force", "-f", "--yolo"):
                 self.force = True
+            elif a == "--auto-review":
+                self.auto_asked = True   # Cursor's ACP server ignores it: Ask, said so (AUTO_IGNORED)
             elif a == "--resume":
                 self.resume = next(it, None)
             elif a.startswith("--resume="):
@@ -438,6 +447,9 @@ class Bridge:
         perm = "Full access" if self.force else "Ask"
         self.say(f"\x1b[1mCursor\x1b[0m · {self.model_name(self.model_id) or 'its default model'} · {perm} · chat {self.session}"
                  + (" (resumed)" if resumed else ""))
+        if self.auto_asked and not self.force:
+            self.transcript.write("error", text=AUTO_IGNORED)
+            self.say(f"\x1b[33m{AUTO_IGNORED}\x1b[0m")
         if lost:
             self.say(f"\x1b[33m{lost}\x1b[0m")
         if self.first:
