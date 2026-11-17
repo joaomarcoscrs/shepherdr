@@ -25,7 +25,7 @@ import threading
 import time
 
 from .base import addon_off, APP_HOME, ASK_HOME, sync_held, bundle, ENTRY, Fail, guard, HOME, hc_json, layout, now, PACKAGE, run, STORE, WHERE
-from .news import news_send, send_or_hold, typing
+from .news import news_send, send_or_hold, settle, typing
 
 
 # ---- sync: the same task tools on every machine ---------------------------------------------
@@ -947,7 +947,7 @@ def _deliver(names, hows, address, text):
                                          universal_newlines=True, timeout=90)
     # Not into words the person is writing to it (HERD-71): a minute for them to finish.
     for i in range(12):
-        if not typing(address, there=there):
+        if not typing(address, there=there) and settle(address, there=there):
             break
         if i == 11:
             raise Fail("not sent: the person is writing to that Assistant right now; try again in a few minutes")
