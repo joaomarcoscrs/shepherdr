@@ -817,6 +817,28 @@
     box-shadow: none;
     border: 1.5px dashed var(--muted);
   }
+  /* awaiting review (SHEP-15): handed off and taken, its pull request open on GitHub: a ring with a dot inside, amber
+     while a review is awaited, green approved, red changes asked or closed, grey while GitHub is checked or unreachable */
+  .dot.awaiting {
+    --tone: var(--work);
+    box-shadow: inset 0 0 0 1.5px var(--tone);
+  }
+  .dot.awaiting::after {
+    content: "";
+    position: absolute;
+    inset: 4.75px;
+    border-radius: 50%;
+    background: var(--tone);
+  }
+  .dot.awaiting.tone-ready {
+    --tone: var(--ready);
+  }
+  .dot.awaiting.tone-need {
+    --tone: var(--need);
+  }
+  .dot.awaiting.tone-muted {
+    --tone: var(--muted);
+  }
   /* joão HQ's pixel pieces (the window's patches/eq.js), drawn in CSS. The rule: a row of 2px cubes a pixel apart,
      the gradient running left to right, as under the window's brand */
   .pixel-rule {

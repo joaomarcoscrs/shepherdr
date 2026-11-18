@@ -23,10 +23,12 @@ const once = (name, read) => () => {
   return f.lists[name];
 };
 
-export const agents = once("agents", liveAgents);
-export const panes = once("panes", livePanes);
-export const terminals = once("terminals", liveTerminals);
-export const spaces = once("spaces", liveSpaces);
+// Each read goes through herdr's export when called, never a copy of it taken at load: a bun test file's stand-in for
+// "herdr" (mock.module) replaces the export, and a copy kept from an earlier file's stand-in read that one's lists.
+export const agents = once("agents", () => liveAgents());
+export const panes = once("panes", () => livePanes());
+export const terminals = once("terminals", () => liveTerminals());
+export const spaces = once("spaces", () => liveSpaces());
 
 // Runs fn (a render) with one copy of each list; a render inside another uses the outer one's.
 export function inRender(fn) {

@@ -6935,11 +6935,24 @@ class DeliveryProfiles(unittest.TestCase):
         self.delivery, self.settings_mod = delivery, settings
         delivery._login.clear()
         self.calls = []
-        self.gh_state = {"login": "joao", "pr": None, "state": "open", "head": None, "assignees": ["someone"], "comments": []}
+        import herdr_task.review as review
+        self.review = review
+        # SHEP-15: draft, decision (GitHub's reviewDecision), reviews (REST rows), offline (every read fails)
+        self.gh_state = {"login": "joao", "pr": None, "state": "open", "head": None, "assignees": ["someone"], "comments": [],
+                         "draft": False, "decision": "", "reviews": [], "offline": False}
 
         def gh(*args, cwd=None):
             self.calls.append(args)
             st = self.gh_state
+            if st["offline"]:
+                return False, "", "error connecting to api.github.com"
+            if args[:2] == ("pr", "view") and st["pr"] and args[2] == str(st["pr"]) and args[-1] == review.VIEW:
+                return True, json.dumps({"state": st["state"].upper(), "isDraft": st["draft"], "headRefOid": st["head"],
+                                         "reviewDecision": st["decision"], "mergedAt": "x" if st["state"] == "merged" else None,
+                                         "mergeCommit": {"oid": "m" * 40} if st["state"] == "merged" else None,
+                                         "url": f"https://github.com/o/r/pull/{st['pr']}"}), ""
+            if args[:2] == ("api", "--paginate") and args[2].startswith(f"repos/o/r/pulls/{st['pr']}/reviews"):
+                return True, "\n".join(json.dumps(r) for r in st["reviews"]), ""
             if args[:2] == ("api", "user"):
                 return True, st["login"], ""
             if args[0] == "pr" and args[1] == "merge":
@@ -6963,7 +6976,8 @@ class DeliveryProfiles(unittest.TestCase):
             t["pr"] = {"number": st["pr"], "url": f"https://github.com/o/r/pull/{st['pr']}", "repo": repo}
             return t["pr"]
         for mod, name, value in ((delivery, "gh", gh), (github, "gh", gh), (github, "github", lambda s: "o/r"),
-                                 (github, "pr_open", pr_open)):
+                                 (github, "pr_open", pr_open), (review, "gh", gh),
+                                 (review, "now", lambda: self.clock if self.clock is not None else int(__import__("time").time() * 1000))):
             p = mock.patch.object(mod, name, value)
             p.start()
             self.addCleanup(p.stop)
@@ -7132,9 +7146,10 @@ class DeliveryProfiles(unittest.TestCase):
         self.assertEqual(self.task(1)["state"], "ready")
         self.gh_state["head"] = real
         out = self.run_cmd(self.commands.cmd_accept, id="1")
-        self.assertEqual(out["accepted"], "handoff")
+        # SHEP-15: its pull request open, it isn't done: Awaiting review (an ongoing state), never merged
+        self.assertEqual(out["accepted"], "awaiting")
         t = self.task(1)
-        self.assertEqual((t["state"], bool(t.get("handed_off")), t.get("merged")), ("done", True, None))
+        self.assertEqual((t["state"], bool(t.get("handed_off")), t.get("merged")), ("awaiting", True, None))
         self.assertNotIn("Fix login", self.on_main())
         self.assertNotIn(("pr", "merge"), [c[:2] for c in self.calls])
 
@@ -7197,6 +7212,360 @@ class DeliveryProfiles(unittest.TestCase):
         self.ready(1)
         self.assertFalse([c for c in self.calls if c[:2] == ("api", "--paginate") or c[:2] == ("pr", "edit")])
         self.assertNotIn("handoff", self.task(1))
+
+
+class AwaitingReview(unittest.TestCase):
+    """SHEP-15: the person's Accept of an Open PR hand-off whose pull request is open moves it to Awaiting review (an
+    ongoing state), its review a signal read on GitHub by the tick, until GitHub says it merged or the person marks it
+    Done. DeliveryProfiles' real task list, real worktrees and fake GitHub (any `pr merge` fails the test)."""
+    ROBO, HQ = DeliveryProfiles.ROBO, DeliveryProfiles.HQ
+    setUp = DeliveryProfiles.setUp
+    setUp_auto, run_cmd, task, git = AutoAccept.setUp, Scheduled.run_cmd, Scheduled.task, AutoAccept.git
+    tick_at, status, auto, on_main, work = AutoAccept.tick_at, AutoAccept.status, AutoAccept.auto, AutoAccept.on_main, SpaceAutoAccept.work
+    settings, spaces, briefed, ready, verdict = (DeliveryProfiles.settings, DeliveryProfiles.spaces, DeliveryProfiles.briefed,
+                                                 DeliveryProfiles.ready, DeliveryProfiles.verdict)
+    open_pr_task, add, head, commit = DeliveryProfiles.open_pr_task, DeliveryProfiles.add, DeliveryProfiles.head, DeliveryProfiles.commit
+
+    def accepted(self, title="Fix login", n=1):
+        """An Open PR task handed off approved by Jarbas Local, then taken by the person: Awaiting review."""
+        wt = self.open_pr_task(title, n)
+        with self.assertRaises(self.Fail):
+            self.ready(n)
+        self.verdict(self.head(wt))
+        self.ready(n)
+        out = self.run_cmd(self.commands.cmd_accept, id=str(n))
+        self.assertEqual(out["accepted"], "awaiting")
+        return wt
+
+    def signal(self, n=1):
+        return self.task(n).get("pr_review") or {}
+
+    def reads(self):
+        return [c for c in self.calls if c[:2] == ("pr", "view")]
+
+    def no_merge(self):
+        self.assertNotIn(("pr", "merge"), [c[:2] for c in self.calls])
+
+    def at(self, minutes):
+        return self.now + int(minutes * 60000)
+
+    def test_accept_moves_to_awaiting_review_and_only_the_merge_finishes_it(self):
+        wt = self.accepted()
+        t = self.task(1)
+        self.assertEqual((t["state"], t["awaiting"]["pr"], t["awaiting"]["head"]), ("awaiting", 7, self.head(wt)))
+        self.assertTrue(os.path.isdir(wt))  # its worktree stays while it waits
+        self.assertNotIn("done_at", t)
+        self.assertEqual(self.status(1), ("awaiting", "Checking GitHub"))
+        with self.store_mod.Store(self.store_mod.locate(self.folder), write=False) as s:
+            v = self.commands.view(s, s.find(1))
+        self.assertEqual(v["status_text"], "Awaiting review")
+        self.assertIn("Awaiting review", self.commands.line(v))
+        # GitHub: open, no review rule on its base (no decision), no review yet; Jarbas Local's APPROVED comment is no
+        # GitHub approval
+        report = self.tick_at(self.at(0))
+        r = self.signal()
+        self.assertEqual((r["state"], r["text"], r["source"], r["decision"], r["fails"]),
+                         ("awaiting_approval", "Awaiting approval", "reviews", None, 0))
+        self.assertEqual(report["review_changed"], [{"ref": self.ref(1), "review": "awaiting_approval"}])
+        # read again only when due
+        n = len(self.reads())
+        self.tick_at(self.at(1))
+        self.assertEqual(len(self.reads()), n)
+        # a person approves its head on GitHub: Approved, still ongoing (approval alone never finishes it)
+        self.gh_state["reviews"] = [{"user": "ana", "state": "APPROVED", "commit": self.gh_state["head"], "at": "2026-11-18T10:00:00Z"}]
+        self.tick_at(self.at(3))
+        r = self.signal()
+        self.assertEqual((r["state"], r["approvers"], self.task(1)["state"]), ("approved", ["ana"], "awaiting"))
+        self.assertEqual(self.status(1), ("awaiting", "Approved"))
+        # merged on GitHub (by someone, never Herdr): done, merged; its worktree goes
+        self.gh_state["state"] = "merged"
+        report = self.tick_at(self.at(6))
+        t = self.task(1)
+        self.assertEqual((t["state"], t["merged"], t["pr_review"]["state"]), ("done", True, "merged"))
+        self.assertIn(1, report["done"])
+        self.assertFalse(os.path.isdir(wt))
+        self.no_merge()
+
+    def ref(self, n):
+        with self.store_mod.Store(self.store_mod.locate(self.folder), write=False) as s:
+            return s.ref(s.find(n))
+
+    def done(self, n):
+        """The person's Done (herdr-task done)."""
+        with self.redirect(self.io.StringIO()):
+            self.commands.cmd_state(self.argparse.Namespace(folder=self.folder, json=True, id=str(n)), "done")
+
+    def test_signal_counts_only_the_latest_review_of_the_current_head(self):
+        sig = self.review.signal
+        head, old = "h" * 40, "o" * 40
+        v = {"state": "OPEN", "headRefOid": head, "reviewDecision": "", "isDraft": False}
+        rv = lambda who, st, c=head, at="2026-11-18T10:00:00Z": {"user": who, "state": st, "commit": c, "at": at}
+        # nothing, or only comments: awaiting approval
+        self.assertEqual(sig(v, [], head)["state"], "awaiting_approval")
+        self.assertEqual(sig(v, [rv("ana", "COMMENTED")], head)["state"], "awaiting_approval")
+        # an approval of an older head (no rule dismisses it on GitHub): never counted, said as stale
+        s1 = sig(v, [rv("ana", "APPROVED", old)], head)
+        self.assertEqual((s1["state"], s1["stale_approvals"]), ("awaiting_approval", 1))
+        # the latest approval of the head counts; a comment after it changes nothing
+        s2 = sig(v, [rv("ana", "APPROVED", old, "2026-11-18T09:00:00Z"), rv("ana", "APPROVED", head, "2026-11-18T10:00:00Z"),
+                     rv("ana", "COMMENTED", head, "2026-11-18T11:00:00Z")], head)
+        self.assertEqual((s2["state"], s2["approvers"], s2["stale_approvals"]), ("approved", ["ana"], 0))
+        # dismissed since: gone
+        self.assertEqual(sig(v, [rv("ana", "APPROVED", head, "2026-11-18T10:00:00Z"), rv("ana", "DISMISSED", head, "2026-11-18T11:00:00Z")],
+                             head)["state"], "awaiting_approval")
+        # anyone asking for changes outweighs an approval
+        s3 = sig(v, [rv("ana", "APPROVED"), rv("bo", "CHANGES_REQUESTED", old)], head)
+        self.assertEqual((s3["state"], s3["requesters"]), ("changes_requested", ["bo"]))
+        # who asked for changes then approved the head: approved
+        self.assertEqual(sig(v, [rv("bo", "CHANGES_REQUESTED", old, "2026-11-18T09:00:00Z"), rv("bo", "APPROVED", head)], head)["state"], "approved")
+        # GitHub's own decision, where its base has a review rule, is the answer (no reviews read for it)
+        for decision, want in (("APPROVED", "approved"), ("CHANGES_REQUESTED", "changes_requested"), ("REVIEW_REQUIRED", "awaiting_approval")):
+            out = sig({**v, "reviewDecision": decision}, None, head)
+            self.assertEqual((out["state"], out["source"], out["decision"]), (want, "decision", decision))
+        # draft, closed, merged
+        self.assertEqual(sig({**v, "isDraft": True}, None, head)["state"], "draft")
+        self.assertEqual(sig({**v, "state": "CLOSED"}, None, head)["state"], "closed")
+        self.assertEqual(sig({**v, "state": "MERGED", "mergedAt": "x"}, None, head)["state"], "merged")
+        # its head moved since the hand-off: said so
+        self.assertTrue(sig(v, [], old)["head_moved"])
+        self.assertFalse(sig(v, [], head)["head_moved"])
+
+    def test_decision_from_github_reads_no_reviews_and_a_moved_head_drops_an_old_approval(self):
+        wt = self.accepted()
+        handed = self.head(wt)
+        self.gh_state["decision"] = "APPROVED"
+        self.tick_at(self.at(0))
+        self.assertEqual((self.signal()["state"], self.signal()["source"]), ("approved", "decision"))
+        self.assertFalse([c for c in self.calls if c[:2] == ("api", "--paginate") and "/reviews" in c[2]])
+        # no rule on its base: an approval of the handed-off head, then someone pushes: the old approval doesn't count
+        self.gh_state["decision"] = ""
+        self.gh_state["reviews"] = [{"user": "ana", "state": "APPROVED", "commit": handed, "at": "2026-11-18T10:00:00Z"}]
+        self.tick_at(self.at(3))
+        self.assertEqual(self.signal()["state"], "approved")
+        self.gh_state["head"] = "f" * 40
+        self.tick_at(self.at(6))
+        r = self.signal()
+        self.assertEqual((r["state"], r["head_moved"], r["head"], r["stale_approvals"]), ("awaiting_approval", True, "f" * 40, 1))
+        self.assertEqual(self.task(1)["state"], "awaiting")
+        # draft: said so, still ongoing
+        self.gh_state["draft"] = True
+        self.tick_at(self.at(9))
+        self.assertEqual((self.signal()["state"], self.task(1)["state"]), ("draft", "awaiting"))
+        self.no_merge()
+
+    def test_github_out_of_reach_backs_off_and_says_unavailable_only_once_it_lasts(self):
+        self.accepted()
+        self.gh_state["reviews"] = [{"user": "ana", "state": "APPROVED", "commit": self.gh_state["head"], "at": "2026-11-18T10:00:00Z"}]
+        self.tick_at(self.at(0))
+        self.assertEqual(self.signal()["state"], "approved")
+        self.gh_state["offline"] = True
+        tries = []
+        t0 = self.at(3)
+        clock = t0
+        for _ in range(self.review.UNAVAILABLE_AFTER):
+            self.tick_at(clock)
+            r = self.signal()
+            tries.append((r["fails"], r["next"] - clock))
+            clock = r["next"]
+        # 1, 2, 4 minutes apart; a blip keeps the last state, then it says unavailable (and what it was)
+        self.assertEqual(tries, [(1, 60000), (2, 120000), (3, 240000)])
+        r = self.signal()
+        self.assertEqual((r["state"], r["was"], self.task(1)["state"]), ("unavailable", "approved", "awaiting"))
+        self.assertIn("error connecting", r["error"])
+        # never more often than its next try; bounded: at most RETRY_MAX apart
+        n = len(self.calls)
+        self.tick_at(r["next"] - 1)
+        self.assertEqual(len(self.calls), n)
+        for _ in range(8):
+            self.tick_at(self.signal()["next"])
+        self.assertEqual(self.signal()["next"] - self.signal()["checked"], self.review.RETRY_MAX)
+        # back online: its real state again
+        self.gh_state["offline"] = False
+        self.tick_at(self.signal()["next"])
+        r = self.signal()
+        self.assertEqual((r["state"], r["fails"], r.get("was"), r["error"]), ("approved", 0, None, None))
+        self.no_merge()
+
+    def test_closed_stays_visible_and_only_the_persons_done_ends_it(self):
+        wt = self.accepted()
+        self.gh_state["state"] = "closed"
+        self.tick_at(self.at(0))
+        t = self.task(1)
+        self.assertEqual((t["state"], t["pr_review"]["state"], t["pr_review"]["text"]), ("awaiting", "closed", "Closed without merging"))
+        self.assertEqual(self.status(1), ("awaiting", "Closed without merging"))
+        self.assertEqual(t["pr_review"]["next"] - t["pr_review"]["checked"], self.review.CLOSED_EVERY)
+        # reopened: tracked again
+        self.gh_state["state"] = "open"
+        self.tick_at(t["pr_review"]["next"])
+        self.assertEqual(self.signal()["state"], "awaiting_approval")
+        # the person's Done: done, never merged; its worktree goes as the hand-off's Accept used to take it
+        self.done(1)
+        t = self.task(1)
+        self.assertEqual((t["state"], t.get("merged"), t["done_by"], t["pr_review"]["state"]), ("done", None, "person", "awaiting_approval"))
+        self.assertFalse(os.path.isdir(wt))
+        # a Done task's pull request is never read again
+        n = len(self.reads())
+        self.tick_at(self.at(60))
+        self.assertEqual(len(self.reads()), n)
+        self.no_merge()
+
+    def test_accept_of_an_already_merged_pull_request_is_done_merged(self):
+        wt = self.open_pr_task()
+        with self.assertRaises(self.Fail):
+            self.ready(1)
+        self.verdict(self.head(wt))
+        self.ready(1)
+        self.gh_state["state"] = "merged"
+        out = self.run_cmd(self.commands.cmd_accept, id="1")
+        self.assertEqual(out["accepted"], "handoff")
+        t = self.task(1)
+        self.assertEqual((t["state"], t["merged"]), ("done", True))
+        self.assertNotIn("awaiting", t)
+
+    def test_dependents_start_after_the_accept_as_before_and_reopen_clears_it(self):
+        self.accepted()
+        self.add("After it", space=self.ROBO, after="1")
+        from herdr_task.queues import waiting_for
+        with self.store_mod.Store(self.store_mod.locate(self.folder), write=False) as s:
+            self.assertEqual(waiting_for(s, s.find(2)), [])
+        args = self.argparse.Namespace(folder=self.folder, json=True, id="1")
+        with self.redirect(self.io.StringIO()):
+            self.commands.cmd_state(args, "reopen")
+        t = self.task(1)
+        self.assertEqual(t["state"], "running")
+        self.assertFalse({"awaiting", "pr_review", "handoff", "handed_off"} & set(t))
+
+    def legacy(self, n, title, done_gap=12, pr_state="open", **extra):
+        """A task SHEP-7's Accept marked Done at once (handed_off and done_at a moment apart), its pull request #n."""
+        self.add(title, space=self.ROBO)
+        self.briefed(n, self.ROBO)
+        with self.store_mod.Store(self.store_mod.locate(self.folder)) as s:
+            s.find(n).update(state="done", mode="worktree", started=1, accepted_at=1000, handed_off=2000, done_at=2000 + done_gap,
+                             ended_at=3000, handoff={"pr": 7, "repo": "o/r", "url": "https://github.com/o/r/pull/7", "head": "c" * 40,
+                                                     "review": "jarbas-local", "verdict": "APPROVED"}, **extra)
+            s.dirty = True
+        return self.task(n)
+
+    def test_an_older_done_handoff_of_an_open_pull_request_moves_to_awaiting_review_once(self):
+        self.spaces()
+        self.gh_state.update(pr=7, head="c" * 40)
+        before = {n: self.legacy(n, title, **kw) for n, title, kw in (
+            (1, "Like ROBO-9", {}),
+            (2, "Done by hand later", {"done_gap": 3600000}),
+            (3, "Merged since", {"merged": True}),
+            (4, "Archived like ROBO-9", {"archived": 5000}))}
+        # GitHub out of reach: nothing changes, asked again later
+        self.gh_state["offline"] = True
+        self.tick_at(self.at(0))
+        self.assertEqual({n: self.task(n) for n in before}, before)
+        self.gh_state["offline"] = False
+        self.tick_at(self.at(0.5))
+        self.assertEqual(self.task(1)["state"], "done")  # not due yet (backoff)
+        report = {"started": [], "done": [], "attention": [], "fired": []}
+        self.clock = self.at(2)
+        with self.store_mod.Store(self.store_mod.locate(self.folder)) as s:
+            self.tick.tick_store(s, report)
+        self.assertEqual(sorted(report["awaiting_adopted"]), sorted([self.ref(1), self.ref(4)]))
+        t = self.task(1)
+        self.assertEqual((t["state"], t["awaiting"]["legacy"], t["awaiting"]["legacy_done_at"], t["awaiting"]["since"]),
+                         ("awaiting", True, 2012, 2000))
+        self.assertNotIn("done_at", t)
+        a = self.task(4)
+        self.assertEqual((a["state"], a.get("archived")), ("awaiting", None))
+        # a Done made by hand, or a merged one, is left exactly as it was
+        self.assertEqual(self.task(2), before[2])
+        self.assertEqual(self.task(3), before[3])
+        # its review is read like any other
+        self.tick_at(self.at(3))
+        self.assertEqual(self.signal(1)["state"], "awaiting_approval")
+
+    def test_an_older_done_handoff_whose_pull_request_closed_stays_done(self):
+        self.spaces()
+        self.gh_state.update(pr=7, head="c" * 40, state="closed")
+        before = self.legacy(1, "Closed since")
+        self.tick_at(self.at(0))
+        self.tick_at(self.at(60))
+        self.assertEqual(self.task(1), before)
+        # asked once, whatever process ticks next (the scheduler or the window's tick): kept on its list, not the task
+        self.assertEqual(len(self.reads()), 1)
+        with self.store_mod.Store(self.store_mod.locate(self.folder), write=False) as s:
+            self.assertEqual(s.data["awaiting_legacy"], {"1": self.review.SETTLED})
+
+    def test_news_says_it_awaits_review_and_when_the_signal_changes(self):
+        self.accepted()
+        with self.store_mod.Store(self.store_mod.locate(self.folder), write=False) as s:
+            t = s.find(1)
+            v, event, _ = self.news.news_state(s, t, [])
+            self.assertEqual((v["status"], event), ("awaiting", "awaiting"))
+            self.assertIn("is awaiting review: pull request #7 Checking GitHub", self.news.news_line(s, t, v, event))
+        self.gh_state["decision"] = "CHANGES_REQUESTED"
+        self.tick_at(self.at(0))
+        with self.store_mod.Store(self.store_mod.locate(self.folder), write=False) as s:
+            t = s.find(1)
+            v, _, _ = self.news.news_state(s, t, [])
+            line = self.news.news_line(s, t, v, "review")
+        self.assertIn('event="review"', line)
+        self.assertIn("review changed: pull request #7 Changes requested https://github.com/o/r/pull/7", line)
+
+    def test_show_and_list_say_the_signal(self):
+        self.accepted()
+        self.gh_state["reviews"] = [{"user": "ana", "state": "APPROVED", "commit": "0" * 40, "at": "2026-11-18T10:00:00Z"}]
+        self.tick_at(self.at(0))
+        args = self.argparse.Namespace(folder=self.folder, json=False, id="1", evidence=False)
+        out = self.io.StringIO()
+        with self.redirect(out):
+            self.commands.cmd_show(args)
+        text = out.getvalue()
+        self.assertIn("Awaiting review", text)
+        self.assertIn("PR #7 · Awaiting approval", text)
+        self.assertIn("review: Awaiting approval · no review rule on GitHub: no approval of its head; 1 approval(s) of an older head not counted", text)
+
+    def test_the_scheduler_round_reads_a_list_with_only_awaiting_tasks(self):
+        """The scheduler (automations.one_pass) ticks a list with nothing else at work when an awaiting read is due."""
+        from unittest import mock
+        import herdr_task.automations as au
+        import herdr_task.autopilot as ap
+        import herdr_task.home as home
+        self.accepted()
+        side = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, side, True)
+        patches = [mock.patch.object(au, "STORE", side), mock.patch.object(au, "SEEN", os.path.join(side, ".seen.json")),
+                   mock.patch.object(ap, "autopilot_pass", lambda r: None), mock.patch.object(home, "home_pass", lambda r: None),
+                   mock.patch.object(au, "automations_pass", lambda *a: None)]
+        patches += [mock.patch.object(au, n, lambda *a, **k: None) for n in (
+            "retry_pass", "archive_pass", "news_pass", "end_done_pass", "memory_guard", "backup_pass", "cli_check_pass", "machines_pass")]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        self.clock = self.at(0)
+        au.one_pass({"started": [], "done": [], "attention": [], "fired": []})
+        self.assertEqual(self.signal()["state"], "awaiting_approval")
+        # not due: the round leaves the list alone
+        n = len(self.reads())
+        self.clock = self.at(1)
+        au.one_pass({"started": [], "done": [], "attention": [], "fired": []})
+        self.assertEqual(len(self.reads()), n)
+
+    def test_merge_delivery_and_no_pr_cases_are_unchanged(self):
+        """joão HQ (Merge): Accept merges as before, never Awaiting review; a hand-off blocked with no pull request is done."""
+        self.spaces()
+        self.add("HQ chore", space=self.HQ)
+        self.work(1, "HQ chore")
+        self.briefed(1, self.HQ)
+        self.ready(1)
+        out = self.run_cmd(self.commands.cmd_accept, id="1")
+        self.assertEqual(out["accepted"], "merged")
+        self.assertEqual((self.task(1)["state"], self.task(1)["merged"]), ("done", True))
+        self.assertNotIn("awaiting", self.task(1))
+        # Open PR, handed off blocked without a pull request (GitHub out of reach): done at Accept, as before
+        self.add("Blocked", space=self.ROBO)
+        self.work(2, "Blocked")
+        self.briefed(2, self.ROBO)
+        with self.store_mod.Store(self.store_mod.locate(self.folder)) as s:
+            s.find(2).update(state="ready", ready_at=1, ready_turns={}, handoff={"blocked": "GitHub was down"})
+            s.dirty = True
+        out = self.run_cmd(self.commands.cmd_accept, id="2")
+        self.assertEqual((out["accepted"], self.task(2)["state"]), ("handoff", "done"))
 
 
 class BranchUpdates(unittest.TestCase):

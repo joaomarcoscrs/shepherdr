@@ -89,19 +89,36 @@ def news_line(s, t, v, event, words=None):
             "stalled": f"{ref} {words} ({title})",
             "working-again": f"{ref} is working again: {(t.get('back') or {}).get('why') or 'its agent is at work again'} ({title})",
             "backup": f"{ref} backup: {words} ({title})",
+            # SHEP-15: an accepted Open PR hand-off, tracked until its pull request merges (or the person's Done)
+            "awaiting": f"{ref} is awaiting review: {review_words(t)} ({title})",
+            "review": f"{ref}'s review changed: {review_words(t)} ({title})",
             "done": f"{ref} is done" + (": handed off, not merged" if t.get("handed_off") and not t.get("merged") else ": merged" if t.get("merged") else ": nothing to merge" if t.get("nothing_to_merge")
                                         else ": accepted" if t.get("accepted_at") else "")
                     + (" (auto-accept)" if t.get("accepted_by") == "auto" else "") + checked + f" ({title})"}[event]
     return f'<herdr-news task="{attr(ref)}" event="{event}">{text.replace("<", "‹").replace(">", "›")}</herdr-news>'
 
 
+def review_words(t):
+    """An awaiting task's pull request and review signal, in a few words: "pull request #19756 Approved"."""
+    r, a = t.get("pr_review") or {}, t.get("awaiting") or {}
+    pr = a.get("pr") or r.get("pr")
+    text = r.get("text") or "Checking GitHub"
+    if r.get("state") == "unavailable" and r.get("was"):
+        text += f" (was {r['was'].replace('_', ' ')})"
+    if r.get("head_moved") and r.get("head"):
+        text += f", its head moved to {str(r['head'])[:7]} since the hand-off"
+    return (f"pull request #{pr} " if pr else "") + text + (f" {r.get('url') or a.get('url')}" if (r.get("url") or a.get("url")) else "")
+
+
 def news_state(s, t, live):
     """What news would say of this task now: {status, why, event, stall}, with live = its running agents."""
     if t["state"] in ("running", "ready"):
         v = view(s, t, live)
+    elif t["state"] == "awaiting":
+        v = {"status": "awaiting", "needs": None, "why": (t.get("pr_review") or {}).get("text")}
     else:
         v = {"status": t["state"] if t["state"] in STATUSES else "todo", "needs": None, "why": None}
-    event = {"ready": "ready", "done": "done", "needs": "needs-you"}.get(v["status"])
+    event = {"ready": "ready", "done": "done", "needs": "needs-you", "awaiting": "awaiting"}.get(v["status"])
     if event == "needs-you" and (v["needs"] in ("stopped", "provider") or str(v.get("why") or "").startswith("Couldn't start")):
         event = "failed"
     stall = stall_of(t, v, live) if v["status"] == "working" else None
@@ -170,8 +187,12 @@ def news_pass(report, folder=None):
                 cur = {"status": v["status"], "why": v.get("why"), "stall": stall[0] if stall else None}
                 current[key] = cur
                 prev = mine.get(str(t["id"]))
+                # SHEP-15: an awaiting task's review signal, told when it changes (approved, changes asked, closed); a
+                # read still going on (unknown) is no news.
+                review = (t.get("pr_review") or {}).get("state") if v["status"] == "awaiting" else None
+                review = (prev or {}).get("review") if review == "unknown" else review
                 mine[str(t["id"])] = {"status": cur["status"], "stall": cur["stall"] or (prev or {}).get("stall"),
-                                      **({"needs": v["needs"]} if v.get("needs") else {})}
+                                      **({"needs": v["needs"]} if v.get("needs") else {}), **({"review": review} if review else {})}
                 # Its backup took over (takeover()): told once; on a first look, old news.
                 b = t.get("backup") or {}
                 backup = s.write and b.get("state") == "started" and not b.get("told")
@@ -188,6 +209,8 @@ def news_pass(report, folder=None):
                     event = "working-again"
                 if event and (prev or {}).get("status") != v["status"]:
                     lines.append((event, news_line(s, t, v, event)))
+                elif review and (prev or {}).get("status") == "awaiting" and (prev or {}).get("review") != review:
+                    lines.append(("review", news_line(s, t, v, "review")))
                 if stall and stall[0] != (prev or {}).get("stall"):
                     lines.append(("stalled", news_line(s, t, v, "stalled", stall[1])))
                 for ev, text in lines:

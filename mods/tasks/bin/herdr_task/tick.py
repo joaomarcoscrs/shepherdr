@@ -31,6 +31,7 @@ from .takeover import cant_go_on, takeover
 from .ghnews import main_pass, pr_deliver, pr_news
 from .scheduler import SCHEDULER
 from .revive import revive_pass
+from .review import adopt_legacy, AWAITING, due as review_due, legacy_candidate, legacy_due, review_pass, settled_at
 
 
 PR_WAIT_EVERY = 20000  # how often a pull request whose checks still run is read again (ms)
@@ -314,6 +315,23 @@ def auto_accept_pass(s, t, report):
         report["done"].append(t["id"])
 
 
+LEGACY_BUDGET = 3  # older Done hand-offs looked at on GitHub per folder per tick, at most
+
+
+def awaiting_pass(s, t, report):
+    """SHEP-15: an Awaiting review task's pull request read when due (review.py review_pass()); an older Done hand-off
+    whose pull request is still open moves there (adopt_legacy(), a few per tick). Never stops the tick."""
+    try:
+        if t["state"] == AWAITING:
+            review_pass(s, t, report)
+        elif legacy_candidate(t) and legacy_due(s.data, t):
+            n = getattr(s, "legacy_asked", 0)
+            if n < LEGACY_BUDGET:
+                s.legacy_asked = n + adopt_legacy(s, t, report)
+    except Exception as e:  # never stops the tick
+        report.setdefault("github_error", []).append(f"{s.ref(t)}: {e}")
+
+
 def due_pass(s, report):
     """Scheduled tasks whose time has come (SHEP-38), a time passed while the machine was off too, join
     the queue in the order they were due: the queue below starts them (after their --after tasks,
@@ -347,6 +365,7 @@ def tick_store(s, report):
             t.pop("_pr_fresh", None)
         if t["state"] == "ready" and t.get("auto_accept"):
             auto_accept_pass(s, t, report)
+        awaiting_pass(s, t, report)
     due_pass(s, report)
     queued = sorted((t for t in s.data["tasks"] if t["state"] == "queued"), key=lambda t: t.get("queued_at") or 0)
     n = running_count(s) if queued else 0
@@ -385,6 +404,11 @@ def tick_store(s, report):
             main_pass(s, report)
         except Exception as e:  # never stops the tick
             report["main_error"] = str(e)
+
+
+def awaiting_due(d, t):
+    """A list read without its lock: an Awaiting review task due a read, or an older Done hand-off not looked at yet."""
+    return review_due(t) or (legacy_candidate(t) and legacy_due(d, t))
 
 
 def lost_log(t, a):
@@ -426,7 +450,7 @@ def end_done(s, t, report, pressed=False):
     """Ends what is left of one Done task's agents now, or what may end: a shell at once, an agent
     once it's idle (or working past DONE_WORKING_MS); under memory pressure (pressed) every idle
     one at once. Returns the addresses it ended."""
-    done_at = t.get("done_at") or 0
+    done_at = settled_at(t)
     if not pressed and now() - done_at < DONE_GRACE_MS:
         return []
     me = os.environ.get("HC_TERMINAL_ID")
@@ -453,7 +477,8 @@ def end_done_pass(report, folder=None, pressed=False):
     """Every Done task here with agents left ends them (end_done()), and once none is left its
     worktree goes (tidy_done(), SHEP-161). Cheap when nothing's left: a task is looked at once after
     each time it became Done, and again only while its worktree is still on disk."""
-    ending = lambda t: t.get("state") == "done" and (t.get("ended_at") or 0) <= (t.get("done_at") or 1)
+    # SHEP-15: an Awaiting review task's too (its work handed off; resume brings its agent back).
+    ending = lambda t: t.get("state") in ("done", AWAITING) and (t.get("ended_at") or 0) <= (settled_at(t) or 1)
     ended = []
     for p in store_files(folder):
         d = read_list(p)
@@ -690,7 +715,8 @@ def cmd_tick(args):
         d = read_list(p)
         tasks = (d or {}).get("tasks") or []
         if not d or not os.path.isdir(d.get("folder") or "") or not (d.get("main_watch") or any(
-                t.get("state") in ("queued", "scheduled", "ready") or (t.get("worktree") and t.get("state") == "running") for t in tasks)):
+                t.get("state") in ("queued", "scheduled", "ready") or (t.get("worktree") and t.get("state") == "running")
+                or awaiting_due(d, t) for t in tasks)):
             continue
         with Store(locate(d["folder"])) as s:
             tick_store(s, report)

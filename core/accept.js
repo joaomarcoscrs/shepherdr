@@ -89,6 +89,8 @@ export const proofTitle = (title) => String(title ?? "").replace(/^[A-Z]+-\d+:\s
 // Where a task no longer Ready is now, calmly: x = { state, accepted_at?, status_text? }.
 export function whereNow(x) {
   if (x.state === "done") return x.accepted_at ? "Already accepted." : "Already done.";
+  // SHEP-15: an Open PR hand-off already taken: ongoing, its pull request's review followed on GitHub
+  if (x.state === "awaiting") return "Already taken: awaiting review on GitHub.";
   return `Not ready right now: it's in ${x.status_text ?? x.state}.`;
 }
 

@@ -620,6 +620,37 @@
       ]
     },
     {
+      "id": "awaiting-review",
+      "addon": "tasks",
+      "title": "Awaiting review: an accepted Open PR hand-off, its pull request's review followed on GitHub",
+      "core": [
+        "tasks",
+        "accept"
+      ],
+      "herdr": {
+        "mods": [
+          "tasks",
+          "accept-card"
+        ]
+      },
+      "web": {
+        "files": [
+          "plugins/tasks/client.tsx",
+          "src/groups.ts"
+        ]
+      },
+      "forms": {
+        "herdr": "Tasks panel: an Awaiting review group (its own chip; For you lists it after the spaces), each row's dot colored by its review and its line PR #n · Approved; herdr-task list and show say the same",
+        "desktop": "The task list's Awaiting review group, with the same dot and line",
+        "tablet": "Same",
+        "phone": "Same"
+      },
+      "service": [
+        "model.ts",
+        "compat.ts"
+      ]
+    },
+    {
       "id": "assistant",
       "addon": "assistants",
       "title": "Assistant per space",

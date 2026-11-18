@@ -36,6 +36,8 @@ MAX_RUNNING = 10
 GH = os.environ.get("HERDR_TASK_GH") or "gh"
 # How often tick asks GitHub about a pull request (ms).
 PR_EVERY = 60000
+# SHEP-15: what an --after task counts as finished: Done, or an Open PR hand-off awaiting its review (Done before).
+DONE_FOR_AFTER = ("done", "awaiting")
 
 
 class Fail(Exception):

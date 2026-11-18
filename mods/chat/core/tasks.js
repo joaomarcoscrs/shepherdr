@@ -7,11 +7,12 @@ import { REASONS } from "./needs.js";
 
 // An agent's own status, most urgent first.
 export const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
-export const STATUS = { needs: "Needs you", working: "Working", merging: "Merging", ready: "Ready", queued: "Queued", scheduled: "Scheduled", todo: "To do", done: "Done" };
-export const RANK_OF = Object.fromEntries(["needs", "ready", "merging", "working", "queued", "scheduled", "todo", "done"].map((id, i) => [id, i]));
+export const STATUS = { needs: "Needs you", working: "Working", merging: "Merging", ready: "Ready", awaiting: "Awaiting review", queued: "Queued", scheduled: "Scheduled", todo: "To do", done: "Done" };
+export const RANK_OF = Object.fromEntries(["needs", "ready", "merging", "working", "awaiting", "queued", "scheduled", "todo", "done"].map((id, i) => [id, i]));
 // The list's order: its groups, and the filter row's chips.
 // Scheduled (SHEP-38, herdr-task --at/--in): a task that starts by itself at a time, after Queued (it waits longer).
-export const ORDER = ["needs", "ready", "merging", "working", "queued", "scheduled", "todo", "done", "automations"];
+// Awaiting review (SHEP-15): an Open PR hand-off the person took, its pull request open on GitHub: after Working.
+export const ORDER = ["needs", "ready", "merging", "working", "awaiting", "queued", "scheduled", "todo", "done", "automations"];
 // How the list can be grouped (the ⋯ menu's Group by; Shepherdr's GROUP_WORDS). "folder" was Space's old key.
 export const GROUP_BY = ["you", "space", "status"];
 // A grouping's key: "folder" was Space's; Machine and Machine › Space are gone (SHEP-98): For you.
@@ -136,6 +137,35 @@ export const openPr = (task) => ((task?.set?.delivery ?? task?.brief_delivery?.m
 export const autoAcceptOn = (task) => !!task.auto_accept && typeof task.auto_accept === "object" && task.state !== "done";
 export const autoAcceptStopped = (task) => (autoAcceptOn(task) && task.state === "ready" && task.auto_accept.failed) || null;
 
+// ---- Awaiting review (SHEP-15) -------------------------------------------------------------------------------------
+// herdr-task's review.py: the person's Accept of an Open PR hand-off whose pull request is open keeps the task ongoing
+// (state "awaiting") until GitHub says it merged or the person marks it Done. Its review is a signal within it, read on
+// GitHub by herdr-task's tick and kept on the task (task.pr_review: { state, text, pr, url, head, head_moved, decision,
+// source, approvers, requesters, stale_approvals, checked, ok_at, fails, error, next, was }). Approved is never done.
+export const AWAITING = "awaiting";
+export const REVIEW = { awaiting_approval: "Awaiting approval", approved: "Approved", changes_requested: "Changes requested",
+  draft: "Draft", closed: "Closed without merging", merged: "Merged", unknown: "Checking GitHub", unavailable: "GitHub unavailable" };
+// What --after counts as finished, as herdr-task's DONE_FOR_AFTER: Done, or awaiting review (Done before SHEP-15).
+export const finished = (state) => state === "done" || state === AWAITING;
+// The signal's state ("unknown" until GitHub was read) and its words.
+export const reviewOf = (task) => {
+  const r = task?.pr_review ?? {};
+  const state = REVIEW[r.state] ? r.state : "unknown";
+  return { state, text: r.text || REVIEW[state], pr: task?.awaiting?.pr ?? r.pr ?? null, url: r.url ?? task?.awaiting?.url ?? null,
+    headMoved: !!r.head_moved, was: r.was ?? null };
+};
+// Its tone, as a dot or chip colors it: ready (approved), need (changes asked, closed), work (waiting on a review), muted.
+export const reviewTone = (state) => (state === "approved" || state === "merged" ? "ready" : state === "changes_requested" || state === "closed" ? "need"
+  : state === "awaiting_approval" || state === "draft" ? "work" : "muted");
+// A row's second line: "PR #19756 · Approved" ("GitHub unavailable (was approved)", "head moved" when it did).
+export function reviewLine(task) {
+  const r = reviewOf(task);
+  const bits = r.pr ? [`PR #${r.pr}`] : [];
+  bits.push(r.state === "unavailable" && r.was ? `${r.text} (was ${String(r.was).replace(/_/g, " ")})` : r.text);
+  if (r.headMoved) bits.push("head moved");
+  return bits.join(" · ");
+}
+
 export function readyWait(task, live = []) {
   if (task.merge_requested && live.length) return "Merging";
   if (task.merge_queued && task.pr) return "In GitHub's merge queue";
@@ -164,6 +194,8 @@ export function place(list, task, { live = [], helpers = [], loaded = true, now 
   let section = ["todo", "queued", "scheduled", "done"].includes(st) ? st : null, needs = null, why = null, settles = 0;
   const need = (kind, text) => { section = "needs"; needs = kind; why = text; };
   if (section) return { list, task, live, status, section, needs, why };
+  // SHEP-15: an Open PR hand-off awaiting its review: its own section, its signal why (never Needs you, never Done).
+  if (st === AWAITING) return { list, task, live: [], status: null, section: AWAITING, needs: null, why: reviewOf(task).text };
   // Cut off by its model's provider (herdr-task tick): Working while Herdr waits to tell it to
   // carry on ("Provider overloaded · Retry in 2m"); Needs you once the tries are used up.
   const retry = st === "running" && task.retry && live.some((a) => a.address === task.retry.address) && !states.includes("blocked") ? task.retry : null;
@@ -234,10 +266,10 @@ export function holdingItems(items, truth) {
 // running: how many of the list's tasks run with a live agent now.
 export function queueReason(list, task, running) {
   const byId = new Map(list.tasks.map((x) => [x.id, x]));
-  const wait = (task.after ?? []).filter((i) => byId.has(i) && byId.get(i).state !== "done");
+  const wait = (task.after ?? []).filter((i) => byId.has(i) && !finished(byId.get(i).state));
   // Another folder's or machine's task (herdr-task --after WEB-2, vm-b:HAT-12): its state as
   // herdr-task last read it ("gone": removed, it holds nothing up).
-  const ext = (task.after_ext ?? []).filter((x) => !["done", "gone"].includes(x.state)).map((x) => x.ref);
+  const ext = (task.after_ext ?? []).filter((x) => !finished(x.state) && x.state !== "gone").map((x) => x.ref);
   if (wait.length || ext.length) return `after ${[...wait.map((i) => refOf(list, { id: i })), ...ext].join(", ")}`;
   // In plain words, as herdr-task's queue_reason: the folder's limit, else its machine too busy
   // (herdr-task tick's "held": "vm-a's memory is 92% full", HERD-40).
@@ -274,6 +306,7 @@ export function order(section) {
   if (section === "scheduled") return (a, b) => (a.task.scheduled_for ?? 0) - (b.task.scheduled_for ?? 0);
   if (section === "todo") return (a, b) => a.task.id - b.task.id;
   if (section === "done") return (a, b) => (b.task.done_at ?? 0) - (a.task.done_at ?? 0);
+  if (section === AWAITING) return (a, b) => (b.task.awaiting?.since ?? 0) - (a.task.awaiting?.since ?? 0);
   return (a, b) => (b.task.ready_at ?? b.task.started ?? 0) - (a.task.ready_at ?? a.task.started ?? 0);
 }
 
@@ -313,6 +346,7 @@ export function secondLine(p, w, queued = null, now = Date.now()) {
   const { section } = p;
   return section === "needs" || section === "merging" ? p.why : section === "working" ? p.why ?? w?.text ?? null
     : section === "queued" ? queued
+    : section === AWAITING ? reviewLine(p.task)
     : section === "scheduled" ? startsLine(p.task.scheduled_for, now)
     // SHEP-7: an Open PR task waits for the person to take its hand-off, never to merge
     : section === "ready" && p.task.handoff ? (`Handed off${p.task.handoff.blocked ? " blocked" : ""}`

@@ -132,7 +132,9 @@ function TaskRow({ t, ix, where }: { t: Task; ix: number; where?: string[] }) {
       sel={sel}
       kb={kb}
       // its pie: the % done, while it works; an archived one is a done task's check
-      glyph={<TaskDot s={t.archived ? 'done' : t.status} w={t.archived || !t.report ? undefined : { ...t.report, eta: undefined }} />}
+      // Awaiting review (SHEP-15): its ring colored by its review (core/tasks.js reviewTone)
+      glyph={<TaskDot s={t.archived ? 'done' : t.status} w={t.archived || !t.report ? undefined : { ...t.report, eta: undefined }}
+        tone={t.review ? (TK.reviewTone as (s: string) => string)(t.review.state) : undefined} />}
       ref_={refOf(t.id)}
       title={t.name}
       sub={t.sub}

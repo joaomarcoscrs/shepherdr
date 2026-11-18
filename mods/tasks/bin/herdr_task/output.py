@@ -110,7 +110,9 @@ def say(args, data, text):
 def line(v):
     word = v.get("status_text") or v["state"]
     extra = v.get("why") or ""
-    if v["status"] in ("ready", "merging") and not extra:
+    if v["status"] == "awaiting":
+        extra = review_line(v)
+    elif v["status"] in ("ready", "merging") and not extra:
         extra = f"PR #{v['pr']['number']}" if v.get("pr") else v.get("branch") or ""
     elif v["status"] == "queued":
         wait = [f"{v['prefix']}-{i}" for i in v.get("waiting_for") or []] + (v.get("waiting_ext") or [])
@@ -119,3 +121,15 @@ def line(v):
         w = v["report"]
         extra = w["text"] + (f" · {w['done']}%" if w.get("done") is not None else "") + (f" · ~{minutes(w['left'])} left" if w.get("left") is not None else "")
     return f"{v['ref']:<7} {word:<9} {v['title']}" + (f"  ({extra})" if extra else "")
+
+
+def review_line(v):
+    """An awaiting task's second words (SHEP-15): its pull request and review signal ("PR #19756 · Approved")."""
+    r, a = v.get("pr_review") or {}, v.get("awaiting") or {}
+    bits = [f"PR #{a.get('pr') or r.get('pr')}"] if (a.get("pr") or r.get("pr")) else []
+    bits.append(r.get("text") or "Checking GitHub")
+    if r.get("state") == "unavailable" and r.get("was"):
+        bits[-1] += f" (was {r['was'].replace('_', ' ')})"
+    if r.get("head_moved") and r.get("head"):
+        bits.append(f"head now {str(r['head'])[:7]}")
+    return " · ".join(bits)
