@@ -137,6 +137,7 @@ def read_signal(repo, number, handed_head):
     sig = signal(v, rows, handed_head)
     sig["url"] = v.get("url")
     sig["merge_commit"] = (v.get("mergeCommit") or {}).get("oid")
+    sig["merged_at"] = v.get("mergedAt")
     return sig, None
 
 
@@ -179,7 +180,7 @@ def review_pass(s, t, report):
             report.setdefault("review_changed", []).append({"ref": s.ref(t), "review": "unavailable"})
         return
     before = r.get("state")
-    r.update({k: v for k, v in sig.items() if k != "merge_commit"}, fails=0, error=None, ok_at=now(),
+    r.update({k: v for k, v in sig.items() if k not in ("merge_commit", "merged_at")}, fails=0, error=None, ok_at=now(),
              url=sig.get("url") or r.get("url") or a.get("url"))
     r.pop("was", None)
     r["next"] = now() + (CLOSED_EVERY if sig["state"] == "closed" else REVIEW_EVERY)
@@ -187,6 +188,12 @@ def review_pass(s, t, report):
         from .github import finish, watch_main
         t["merged"] = True
         watch_main(s, t, sig.get("merge_commit"))
+        from .deploy import applies, await_deploy
+        if applies(t):
+            # SHEP-16: roboflow/roboflow: merged is not deployed. Awaiting deploy until its deploys pass (deploy.py).
+            await_deploy(s, t, sig.get("merge_commit"), sig.get("merged_at"))
+            report.setdefault("deploy_changed", []).append({"ref": s.ref(t), "deploy": "unknown"})
+            return
         finish(s, t)
         report["done"].append(t["id"])
         return
@@ -276,4 +283,6 @@ def settled_at(t):
         return t.get("done_at") or 0
     if t.get("state") == AWAITING:
         return (t.get("awaiting") or {}).get("since") or 0
+    if t.get("state") == "deploying":
+        return (t.get("deploy") or {}).get("since") or 0
     return 0
