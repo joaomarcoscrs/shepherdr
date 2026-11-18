@@ -8022,6 +8022,7 @@ class AwaitingDeploy(unittest.TestCase):
             with open(os.path.join(self.FIX, f)) as fh:
                 self.files[(".github/" + f) if f.endswith(".md") else (".github/workflows/" + f)] = fh.read()
         self.files["app/functions/index.js"] = self.INDEX
+        self.fixture = dict(self.files)
         self.dep = {"base": "master", "body": self.ROBO9, "merged_at": "2026-11-18T12:00:00Z", "master": self.MASTER,
                     "anc": {(self.MC, self.MASTER)}, "runs": {}, "parents": {}, "posts": [], "return_id": True, "post_error": None,
                     "offline": False, "next_id": 9000}
@@ -8302,7 +8303,7 @@ class AwaitingDeploy(unittest.TestCase):
         self.assertEqual(self.dep["posts"], [])
         self.assertEqual(self.targets()["hosting"], "unverified")
         # master's head no longer holds the landing (a force push): refused
-        self.files[".github/workflows/deploy-hosting.yaml"] = open(os.path.join(self.FIX, "deploy-hosting.yaml")).read()
+        self.files[".github/workflows/deploy-hosting.yaml"] = self.fixture[".github/workflows/deploy-hosting.yaml"]
         self.dep["master"] = "9" * 40
         self.dep["anc"].add((self.MC, self.MASTER))
         self.assertIsNone(self.deploy_cmd(yes=True, ok=False))
