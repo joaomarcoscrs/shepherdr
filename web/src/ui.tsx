@@ -415,11 +415,11 @@ export function EqLoader({ className }: { className?: string }) {
 
 /** A status mark; a working one with `p` fills its pie that far (the % done its agent reported). `frozen`: the %
  *  an agent waiting on you stopped at, said to screen readers where no pie shows it */
-export function Dot({ s, halo, p, frozen, className }: { s: Status; halo?: boolean; p?: number; frozen?: Report; className?: string }) {
+export function Dot({ s, halo, p, frozen, tone, className }: { s: Status; halo?: boolean; p?: number; frozen?: Report; tone?: string; className?: string }) {
   const pie = s === 'work' && p !== undefined
   return (
     <span
-      className={clsx('dot', s, halo && 'halo', className)}
+      className={clsx('dot', s, s === 'awaiting' && tone && `tone-${tone}`, halo && 'halo', className)}
       style={pie ? ({ '--p': `${Math.max(4, p)}%` } as CSSProperties) : undefined}
       aria-label={pie ? `${STATUS_WORD[s]}, ${p}% done` : frozen?.progress !== undefined ? `${STATUS_WORD[s]}, ${frozen.progress}% done` : STATUS_WORD[s]}
       role="img"
@@ -446,8 +446,8 @@ export function etaShort(eta: number) {
  * the row's whole width. Anything else is the dot alone; frozen while it waits on you, the % it stopped at stays in its
  * pie (still working) or, on the needs-you mark, for screen readers: its line says what it asks.
  */
-export function TaskDot({ s, w }: { s: Status; w?: Report }) {
-  const dot = <Dot s={s} p={w?.progress} frozen={w?.paused ? w : undefined} />
+export function TaskDot({ s, w, tone }: { s: Status; w?: Report; tone?: string }) {
+  const dot = <Dot s={s} p={w?.progress} frozen={w?.paused ? w : undefined} tone={tone} />
   if (s !== 'work' || !w || w.paused || w.eta === undefined) return dot
   return (
     <span className="mt-[3px] flex w-3.5 shrink-0 flex-col items-center self-stretch phone:mt-1 phone:w-4">
@@ -540,6 +540,7 @@ const STATUS_WORD: Record<Status, string> = {
   ready: 'Ready',
   merging: 'Merging',
   work: 'Working',
+  awaiting: 'Awaiting review',
   idle: 'Stopped',
   queued: 'Queued',
   scheduled: 'Scheduled',

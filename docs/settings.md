@@ -84,8 +84,23 @@ task values a machine set before (the old machine scope) still apply there until
   - Ready, the row says *Handed off · PR #n*; the card's Hand-off section shows the pull request, the approval for its
     exact head (or that it moved since, or why it's blocked), who it's assigned to and what's next, beside Try it's
     ephemeral environment for a Roboflow PR. Its button is *Take it, no merge*: the pull request is read again (closed,
-    or moved past what was handed off, is refused) and the task is done, not merged; its worktree goes only when
-    everything in it is on that pull request.
+    or moved past what was handed off, is refused). Never merged by Herdr. Merged on GitHub already, it is done,
+    merged; open, it moves to Awaiting review (below).
+  - Awaiting review (SHEP-15, `herdr_task/review.py`): an ongoing state of its own (`state: "awaiting"`), its own group
+    in the Tasks panel and the web app, never Done. The tick reads its pull request on GitHub (one read every 2 minutes
+    while open, 15 once closed; a failed read again after 1, 2, 4 … up to 30 minutes, and *GitHub unavailable* only
+    after 3 in a row) and keeps its review signal on the task (`pr_review`): *Awaiting approval*, *Approved*, *Changes
+    requested*, *Draft*, *Closed without merging*, *Checking GitHub* or *GitHub unavailable*. GitHub's own review
+    decision is the answer where its base has a review rule; with none (an empty decision), only each person's latest
+    approval of the pull request's current head counts (an older head's or a dismissed one never does; anyone asking
+    for changes outweighs it). Jarbas Local's comment, passing checks or a label are never GitHub's approval. Approved
+    is not done: only GitHub's merge (done, merged; its worktree goes) or the person's `herdr-task done` (its worktree
+    goes when its branch is still at what was handed off) ends it. Closed without merging stays in the group, saying
+    so. Its agents end as a Done task's do (`resume` brings one back to work; its next ready hands it off again). For
+    `--after` it counts as finished, as the Done it used to be. Its Assistant hears `awaiting` once and `review` each
+    time the signal changes. A task an older Accept marked Done at once (handed_off a moment before done_at, never
+    merged, its delivery Open PR) moves to Awaiting review once, if its pull request is still open on GitHub; one Done
+    by hand later, closed or merged is left as it is.
   - Accept when ready never takes a hand-off: a space's default doesn't arm it, the menu doesn't offer it, and
     `herdr-task auto-accept` refuses it.
 - Branch updates (SHEP-10, `herdr_task/branch_update.py`): the person asks the Assistant to bring a pull request they

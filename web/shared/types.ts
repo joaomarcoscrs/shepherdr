@@ -4,7 +4,7 @@ import type { BrowserNote } from './browser.ts'
 
 /** Status marks: red needs you, green ready, green turning ring merging, amber working, grey ring idle or to do, grey
  * clock queued, grey check done, dashed ring unreachable. */
-export type Status = 'need' | 'ready' | 'merging' | 'work' | 'idle' | 'queued' | 'scheduled' | 'todo' | 'done' | 'off'
+export type Status = 'need' | 'ready' | 'merging' | 'work' | 'awaiting' | 'idle' | 'queued' | 'scheduled' | 'todo' | 'done' | 'off'
 /** A chat's final segment is its role; the task ID may itself contain a machine qualifier. */
 export function taskChatId(chat: string) { const at = chat.lastIndexOf('/'); return at < 0 ? undefined : chat.slice(0, at) }
 
@@ -272,8 +272,32 @@ export interface Report {
 /** need: its agent asks or waits for you; ready: finished, waits for you to merge it; merging: finished and on its way
  * into main, nothing for you to do (GitHub's checks run, it is rebased or merged); work: its agent is at it; queued:
  * it waits for other tasks to be done, then Shepherdr tells its agent to go; todo: its agent waits for a go, or is
- * starting and not yet at work on its brief; done: merged */
-export type TaskStatus = 'need' | 'ready' | 'merging' | 'work' | 'queued' | 'scheduled' | 'todo' | 'done'
+ * starting and not yet at work on its brief; awaiting (SHEP-15): an Open PR hand-off you took, its pull request open on
+ * GitHub, ongoing until it merges there or you mark it done (its review in `review`); done: merged */
+export type TaskStatus = 'need' | 'ready' | 'merging' | 'work' | 'awaiting' | 'queued' | 'scheduled' | 'todo' | 'done'
+
+/** SHEP-15: an awaiting task's review, read on GitHub by herdr-task (mods/tasks/bin/herdr_task/review.py). Approved is
+ *  never done: only GitHub's merge or your Done ends it. */
+export type ReviewState = 'awaiting_approval' | 'approved' | 'changes_requested' | 'draft' | 'closed' | 'merged' | 'unknown' | 'unavailable'
+export interface TaskReview {
+  state: ReviewState
+  /** its words: Awaiting approval, Approved, Changes requested, Draft, Closed without merging, Checking GitHub, GitHub unavailable */
+  text: string
+  pr: number | null
+  url: string | null
+  /** its pull request's head moved since the hand-off */
+  headMoved: boolean
+  /** while GitHub is unavailable: what it was last */
+  was: ReviewState | null
+  /** when it moved to Awaiting review, and GitHub was last read (ms) */
+  since: number | null
+  checked: number | null
+  error: string | null
+  /** GitHub's reviewDecision, or null when its base has no review rule (then: approvals of its current head) */
+  decision: string | null
+  approvers: string[]
+  requesters: string[]
+}
 
 /** A task's one agent: tapping the task opens its chat. */
 export interface TaskAgent {
@@ -312,6 +336,8 @@ export interface Task {
   autoAccept?: { on: true; failed?: string }
   /** SHEP-7: its delivery is Open PR: handed to the person with its pull request open, never merged nor accepted by itself */
   openPr?: true
+  /** SHEP-15: Awaiting review: its pull request's review signal */
+  review?: TaskReview
   /** still Working, its turn over: what Shepherdr itself knows it waits for */
   waitsFor?: 'review'
   age: string
