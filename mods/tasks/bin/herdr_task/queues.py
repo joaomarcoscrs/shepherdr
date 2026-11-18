@@ -6,7 +6,7 @@ import re
 import subprocess
 import sys
 
-from .base import beside_store, ENTRY, Fail, guard, now, STORE
+from .base import beside_store, DONE_FOR_AFTER, ENTRY, Fail, guard, now, STORE
 from .agents import agent_running, live_agents
 from .store import parse_ref, prefixes_in_use, read_list, store_path
 
@@ -75,7 +75,7 @@ def refresh_ext(s, task, force=False, budget=None):
     """Asks again about the other tasks it waits for: another folder's at once, another machine's
     at most every EXT_EVERY (budget: how many machine calls are left this pass, a [n] list)."""
     for x in task.get("after_ext") or []:
-        if x.get("state") == "done":
+        if x.get("state") in DONE_FOR_AFTER:
             continue
         if x.get("machine") and not force:
             if now() - (x.get("checked") or 0) < EXT_EVERY or (budget is not None and budget[0] <= 0):
@@ -94,7 +94,7 @@ def refresh_ext(s, task, force=False, budget=None):
 
 def waiting_ext(task):
     """The other tasks it waits for that aren't done (a removed one holds nothing up), as refs."""
-    return [x["ref"] for x in task.get("after_ext") or [] if x.get("state") not in ("done", "gone")]
+    return [x["ref"] for x in task.get("after_ext") or [] if x.get("state") not in (*DONE_FOR_AFTER, "gone")]
 
 
 def after_refs(s, task):
@@ -143,7 +143,7 @@ def set_after(s, task, ids, ext=()):
 def waiting_for(s, task):
     """The tasks it comes after that aren't done yet (removed ones don't hold it up)."""
     known = {t["id"]: t for t in s.data["tasks"]}
-    return [i for i in task.get("after") or [] if i in known and known[i]["state"] != "done"]
+    return [i for i in task.get("after") or [] if i in known and known[i]["state"] not in DONE_FOR_AFTER]
 
 
 def working(s, task):

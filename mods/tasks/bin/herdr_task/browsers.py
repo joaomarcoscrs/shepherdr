@@ -125,7 +125,7 @@ def browser_pass(report):
         found, t = _task(key)
         if not found:
             continue
-        if t is None or t.get("state") == "done":
+        if t is None or t.get("state") in ("done", "awaiting"):
             _close(bp, key)
             shutil.rmtree(os.path.join(ROOT, name), ignore_errors=True)
             for ext in (".used", ".you", ".view", ".new", ".session", ".task"):

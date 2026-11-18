@@ -118,7 +118,7 @@ def status_of(task, live):
 IN_QUEUE_LINE = "In GitHub's merge queue"
 APPROVAL_LINE = "Merges once it's approved"
 STATUSES = {"todo": "To do", "scheduled": "Scheduled", "queued": "Queued", "working": "Working", "needs": "Needs you",
-            "ready": "Ready", "merging": "Merging", "done": "Done"}
+            "ready": "Ready", "merging": "Merging", "awaiting": "Awaiting review", "done": "Done"}
 
 
 def task_status(task, live):
@@ -128,6 +128,10 @@ def task_status(task, live):
     if st == "scheduled":
         from .when import starts_words
         return "scheduled", None, starts_words(task.get("scheduled_for") or now(), now())
+    if st == "awaiting":
+        # SHEP-15: an Open PR hand-off the person accepted, its pull request not merged yet: its review signal says why.
+        r = task.get("pr_review") or {}
+        return "awaiting", None, r.get("text") or "Checking GitHub"
     if st not in ("running", "ready"):
         return (st if st in STATUSES else "todo"), None, None
     # #995: a question or permission waiting on the chat's card counts as asking, whatever the

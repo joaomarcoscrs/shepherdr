@@ -36,6 +36,7 @@ from .scheduler import ensure_scheduler
 from .proof import evidence, find_proof
 from .when import when_from
 from .delivery import accept_check, handoff_gate, handoff_line, NO_MERGE
+from .review import AWAITING, await_review, mark_done
 from . import branch_update
 
 
@@ -92,6 +93,32 @@ def cmd_list(args):
             print(f"({'; '.join(more)})")
         elif not g["tasks"] and not args.all:
             print("No archived tasks." if args.archived else "No tasks.")
+
+
+def review_show(v):
+    """SHEP-15: show's line on an Open PR hand-off's review: its signal, its pull request, when GitHub was last read."""
+    r, a = v.get("pr_review") or {}, v.get("awaiting") or {}
+    bits = [f"review: {r.get('text') or 'Checking GitHub'}"]
+    if r.get("state") == "unavailable" and r.get("was"):
+        bits.append(f"was {r['was'].replace('_', ' ')}")
+    if r.get("source") == "decision":
+        bits.append(f"GitHub's review decision {r.get('decision')}")
+    elif r.get("source") == "reviews":
+        bits.append("no review rule on GitHub: " + (f"approved at its head by {', '.join('@' + x for x in r['approvers'])}" if r.get("approvers")
+                                                    else "no approval of its head") + (f"; changes asked by {', '.join('@' + x for x in r['requesters'])}" if r.get("requesters") else "")
+                    + (f"; {r['stale_approvals']} approval(s) of an older head not counted" if r.get("stale_approvals") else ""))
+    if r.get("head_moved"):
+        bits.append(f"head moved to {str(r.get('head'))[:7]} since {str(a.get('head') or '')[:7]} was handed off")
+    pr = a.get("pr") or r.get("pr")
+    if pr:
+        bits.append(f"pull request #{pr} {r.get('url') or a.get('url') or ''}".strip())
+    if r.get("ok_at"):
+        bits.append(f"read {minutes((now() - r['ok_at']) // 60000)} ago")
+    if r.get("error"):
+        bits.append(f"last read failed ({r.get('fails')}x): {r['error']}")
+    if a.get("legacy"):
+        bits.append("moved here from an older Done hand-off")
+    return " · ".join(bits)
 
 
 def cmd_add(args):
@@ -298,6 +325,8 @@ def cmd_show(args):
         text.append(f"merges into: {v['base']} (" + ("its space's base branch" if v.get("base_by") == "space" else "set for this task") + ")")
     if v.get("after_refs"):
         text.append("comes after: " + ", ".join(v["after_refs"]))
+    if v.get("state") == AWAITING or (v.get("pr_review") and v.get("handed_off")):
+        text.append(review_show(v))
     if v.get("review_rounds"):
         r = v["review_rounds"]
         text.append(f"review rounds: {r['used']} of {r['of']} used" + (f" ({r['added']} added by the assistant)" if r["added"] else "")
@@ -902,10 +931,14 @@ def cmd_state(args, state):
             if t["state"] == "done":
                 t.pop("auto_accept", None)
             for k in ("reviews", "review", "auto_merge", "merged", "nothing_to_merge", "accepted_at", "accepted_by", "merge_queued",
-                      "handoff", "handed_off"):
+                      "handoff", "handed_off", "awaiting", "pr_review"):
                 t.pop(k, None)
         if state == "done" and t.get("worktree") and merged_here(s, t):
             t["merged"] = True
+        if state == "done" and t["state"] == AWAITING:
+            # SHEP-15: the person's Done ends its Awaiting review (never merged by Herdr); its signal stays as it was.
+            t["done_by"] = "person"
+            mark_done(s, t)
         t["state"] = state
         t[{"done": "done_at", "running": "reopened_at", "todo": "reopened_at"}[state]] = now()
         if state != "done":
@@ -1037,6 +1070,12 @@ RESUME_NUDGE = ("Shepherdr resumed your session because your agent had stopped. 
                 "what is already done with `herdr-task show`, then keep going with the task.")
 
 
+def leave_awaiting(t):
+    """Back at work from Awaiting review (resume, switch): its next ready hands it off again (SHEP-15)."""
+    for k in ("awaiting", "pr_review"):
+        t.pop(k, None)
+
+
 def cmd_resume(args):
     with open_store(args) as s:
         t = s.find(args.id)
@@ -1046,7 +1085,8 @@ def cmd_resume(args):
         if t["state"] in ("todo", "scheduled", "queued"):
             raise Fail(f"{s.ref(t)} hasn't started. Use start.")
         space = bare(args.space) if args.space else (t.get("space") or default_space())
-        if t["state"] == "done":
+        if t["state"] in ("done", AWAITING):
+            leave_awaiting(t)
             t["state"] = "running"
         gone = [k["address"] for k in live_agents(s.key(t))]  # its agents' terminals, none running an agent
         back_to_work(s, t, "resumed")
@@ -1086,7 +1126,8 @@ def cmd_switch(args):
         # A given --space wins: the task moves there (#837); else the old agent's own space.
         space = ((bare(args.space) if args.space else None) or labels.get("herdr.task.space") or labels.get("herdr.space")
                  or t.get("space") or default_space())
-        if t["state"] in ("todo", "scheduled", "queued", "done"):
+        if t["state"] in ("todo", "scheduled", "queued", "done", AWAITING):
+            leave_awaiting(t)
             t["state"] = "running"
             t.setdefault("started", now())
             t.pop("queue", None)
@@ -1353,11 +1394,12 @@ def accept_merge(s, t, args):
         t["handed_off"] = now()
         if merged:
             t["merged"] = True
-        tip = branch_tip(s, t)
-        if merged or (tip and tip == (t.get("handoff") or {}).get("head")):
             finish(s, t, even_if_busy=True)
         else:
-            t["state"], t["done_at"] = "done", now()
+            # SHEP-15: its pull request open, it isn't done: Awaiting review, an ongoing state of its own, until GitHub
+            # says it merged or the person marks it Done (its worktree kept till then; review.py).
+            how = "awaiting"
+            await_review(s, t)
     elif open_pr(t) and not in_base(s, t):
         if (t.get("handoff") or {}).get("blocked"):
             # handed off blocked with no pull request (GitHub out of reach): the person's from here, never merged
@@ -1483,7 +1525,9 @@ def accepted_words(s, t, how, sent=None, started=False):
             "approval": f"{s.ref(t)} accepted: it merges once it's approved.",
             "queue": f"{s.ref(t)} accepted: pull request #{(t.get('pr') or {}).get('number')} is in GitHub's merge queue; done once GitHub merges it.",
             "agent": f"{s.ref(t)} accepted: merge asked of {sent}" + (" (a new agent)" if started else ""),
-            "handoff": f"{s.ref(t)}: handed off to you, not merged ({handoff_line(t)}); done."}[how]
+            "handoff": f"{s.ref(t)}: handed off to you, not merged ({handoff_line(t)}); done.",
+            "awaiting": f"{s.ref(t)}: handed off to you, not merged ({handoff_line(t)}); Awaiting review: Herdr follows "
+                        f"pull request #{(t.get('awaiting') or {}).get('pr')} on GitHub until it merges, or until you mark it done."}[how]
 
 
 def cmd_fix(args):
