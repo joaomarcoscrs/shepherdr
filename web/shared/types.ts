@@ -4,7 +4,7 @@ import type { BrowserNote } from './browser.ts'
 
 /** Status marks: red needs you, green ready, green turning ring merging, amber working, grey ring idle or to do, grey
  * clock queued, grey check done, dashed ring unreachable. */
-export type Status = 'need' | 'ready' | 'merging' | 'work' | 'awaiting' | 'idle' | 'queued' | 'scheduled' | 'todo' | 'done' | 'off'
+export type Status = 'need' | 'ready' | 'merging' | 'work' | 'awaiting' | 'deploying' | 'idle' | 'queued' | 'scheduled' | 'todo' | 'done' | 'off'
 /** A chat's final segment is its role; the task ID may itself contain a machine qualifier. */
 export function taskChatId(chat: string) { const at = chat.lastIndexOf('/'); return at < 0 ? undefined : chat.slice(0, at) }
 
@@ -273,8 +273,46 @@ export interface Report {
  * into main, nothing for you to do (GitHub's checks run, it is rebased or merged); work: its agent is at it; queued:
  * it waits for other tasks to be done, then Shepherdr tells its agent to go; todo: its agent waits for a go, or is
  * starting and not yet at work on its brief; awaiting (SHEP-15): an Open PR hand-off you took, its pull request open on
- * GitHub, ongoing until it merges there or you mark it done (its review in `review`); done: merged */
-export type TaskStatus = 'need' | 'ready' | 'merging' | 'work' | 'awaiting' | 'queued' | 'scheduled' | 'todo' | 'done'
+ * GitHub, ongoing until it merges there or you mark it done (its review in `review`); deploying (SHEP-16): a
+ * roboflow/roboflow hand-off merged, ongoing until its deploys pass on GitHub or you mark it done (in `deploy`); done: merged */
+export type TaskStatus = 'need' | 'ready' | 'merging' | 'work' | 'awaiting' | 'deploying' | 'queued' | 'scheduled' | 'todo' | 'done'
+
+/** SHEP-16: an Awaiting deploy task's deploys, read on GitHub by herdr-task (mods/tasks/bin/herdr_task/deploy.py). Only
+ *  verified runs, an explicit no-deploy section or your Done end it; `herdr-task deploy <id>` previews a dispatch. */
+export type DeployState = 'waiting' | 'unavailable' | 'manual' | 'ready' | 'running' | 'failed' | 'success' | 'none' | 'unknown'
+export interface TaskDeployTarget {
+  key: string
+  label: string
+  /** waiting (for master), ready, submitted (dispatched, no run yet: never passed), running, failed, success, manual, unverified */
+  status: string
+  environment: string | null
+  ref: string | null
+  why: string | null
+  /** its run on GitHub, and whether Herdr dispatched it ("herdr") or someone else ("other") */
+  run: string | null
+  by: string | null
+  /** its workflow's page on GitHub: run it by hand there */
+  workflow: string | null
+}
+export interface TaskDeploy {
+  state: DeployState
+  text: string
+  pr: number | null
+  url: string | null
+  was: DeployState | null
+  landed: boolean
+  /** stacked: the pull request whose merge lands it on master */
+  after: number | null
+  passed: number
+  total: number
+  since: number | null
+  checked: number | null
+  error: string | null
+  plan: string | null
+  planWhy: string | null
+  landingWhy: string | null
+  targets: TaskDeployTarget[]
+}
 
 /** SHEP-15: an awaiting task's review, read on GitHub by herdr-task (mods/tasks/bin/herdr_task/review.py). Approved is
  *  never done: only GitHub's merge or your Done ends it. */
@@ -338,6 +376,8 @@ export interface Task {
   openPr?: true
   /** SHEP-15: Awaiting review: its pull request's review signal */
   review?: TaskReview
+  /** SHEP-16: Awaiting deploy: its deploys */
+  deploy?: TaskDeploy
   /** still Working, its turn over: what Shepherdr itself knows it waits for */
   waitsFor?: 'review'
   age: string

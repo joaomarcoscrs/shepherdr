@@ -30,7 +30,7 @@ import { machinesInOrder, machineOrderOf, chatPane } from "./core/spaces.js";
 // The rules for a task's status, order and words: shared with the web app (core/tasks.js).
 import { RANK, STATUS, RANK_OF, ORDER, GROUP_BY, groupBy, groupNow, machineOf, machineName, refOf, taskKey, autoPrefix, place,
   queueReason, reportOf as report, secondLine, leftOf, order, matches, day, ago, capital, short, autoWhere, fromLine, inSpace, holdingItems,
-  autoAcceptOn, autoAcceptStopped, openPr, AWAITING, reviewOf, reviewTone } from "./core/tasks.js";
+  autoAcceptOn, autoAcceptStopped, openPr, AWAITING, reviewOf, reviewTone, DEPLOYING, deployOf, deployTone } from "./core/tasks.js";
 import { READ_LISTS, taskLists } from "./core/tasklists.js";
 import { SH } from "./core/paths.js";
 import { settle } from "./core/pending.js";
@@ -377,7 +377,7 @@ export default class Tasks extends View {
         if (pins.length) body.push(this.group("pinned", "Pinned", sorted(pins).map((p) => this.row(p, t)), t, { open }));
         // Each space's other work, in status order, under its name: the machine only when two machines have a space
         // of that name.
-        const work = rest.filter((p) => p.section !== "ready" && p.section !== "done" && p.section !== AWAITING);
+        const work = rest.filter((p) => p.section !== "ready" && p.section !== "done" && p.section !== AWAITING && p.section !== DEPLOYING);
         const shownLists = lists.filter((l) => work.some((p) => p.list === l));
         for (const l of shownLists) {
           const twin = shownLists.some((o) => o !== l && placeName(o) === placeName(l) && (o.machine ?? null) !== (l.machine ?? null));
@@ -387,6 +387,9 @@ export default class Tasks extends View {
         // each row saying its space and its review (Awaiting approval, Approved, Changes requested ...).
         const waiting = tasksOf[AWAITING].filter((p) => !isPin(p));
         if (waiting.length) body.push(this.group(AWAITING, STATUS[AWAITING], waiting.map((p) => this.row(p, t)), t, { open }));
+        // Awaiting deploy (SHEP-16): merged, its deploys followed on GitHub (Waiting for master, Ready to deploy, Deploying ...)
+        const deploys = tasksOf[DEPLOYING].filter((p) => !isPin(p));
+        if (deploys.length) body.push(this.group(DEPLOYING, STATUS[DEPLOYING], deploys.map((p) => this.row(p, t)), t, { open }));
         // Done: only its count, a quiet line, until opened (then a group that folds it away again).
         const done = tasksOf.done.filter((p) => !isPin(p));
         if (done.length) body.push(open || this.shut("done:open") ? this.group("done", STATUS.done, done.map((p) => this.row(p, t)), t, { open, done: done.length, onFold: () => this.fold("done:open", false) })
@@ -710,7 +713,8 @@ export default class Tasks extends View {
 
   // A row's status mark: Shepherdr's task dot (dot.js); a Working row's pie shows its % done.
   glyph(p, w) {
-    return taskDot(p.section, { pct: w?.done, tone: p.section === AWAITING ? reviewTone(reviewOf(p.task).state) : null });
+    return taskDot(p.section, { pct: w?.done, tone: p.section === AWAITING ? reviewTone(reviewOf(p.task).state)
+      : p.section === DEPLOYING ? deployTone(deployOf(p.task).state) : null });
   }
 
   // An automation (herdr-task auto), by its name (no id), and on the right when it runs next

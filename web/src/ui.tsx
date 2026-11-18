@@ -419,7 +419,7 @@ export function Dot({ s, halo, p, frozen, tone, className }: { s: Status; halo?:
   const pie = s === 'work' && p !== undefined
   return (
     <span
-      className={clsx('dot', s, s === 'awaiting' && tone && `tone-${tone}`, halo && 'halo', className)}
+      className={clsx('dot', s, (s === 'awaiting' || s === 'deploying') && tone && `tone-${tone}`, halo && 'halo', className)}
       style={pie ? ({ '--p': `${Math.max(4, p)}%` } as CSSProperties) : undefined}
       aria-label={pie ? `${STATUS_WORD[s]}, ${p}% done` : frozen?.progress !== undefined ? `${STATUS_WORD[s]}, ${frozen.progress}% done` : STATUS_WORD[s]}
       role="img"
@@ -541,6 +541,7 @@ const STATUS_WORD: Record<Status, string> = {
   merging: 'Merging',
   work: 'Working',
   awaiting: 'Awaiting review',
+  deploying: 'Awaiting deploy',
   idle: 'Stopped',
   queued: 'Queued',
   scheduled: 'Scheduled',

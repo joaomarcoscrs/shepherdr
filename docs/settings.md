@@ -101,6 +101,27 @@ task values a machine set before (the old machine scope) still apply there until
     time the signal changes. A task an older Accept marked Done at once (handed_off a moment before done_at, never
     merged, its delivery Open PR) moves to Awaiting review once, if its pull request is still open on GitHub; one Done
     by hand later, closed or merged is left as it is.
+  - Awaiting deploy (SHEP-16, `herdr_task/deploy.py`, roboflow/roboflow only): its pull request merged, the task moves
+    to `state: "deploying"` (its own group after Awaiting review) instead of Done; every other repo finishes at the
+    merge as before. The tick reads the pull request's *Github Actions Required to Deploy* section with a strict parser
+    (never a model, never run): a `functions:` line (docs/pr-conventions.md's deploy_only list, each name checked in
+    `app/functions/index.js` where it landed), a workflow's name (API, Hosting, Universe, Admin, Public, Rapid, with
+    API's and Rapid's hosting/functions parts), a workflow Herdr never runs (Rules, Indexes, migrations: a manual step,
+    linked) or an explicit *None*. A missing or empty section, the template's YOUR_ANSWER, or any other line is never
+    "no deploy": *Deploy plan unavailable* or *Needs a manual step*. light-v2-api and the universe/rapid servers named
+    as functions are unclear unless their workflow is listed (the conventions' mapping). A stacked pull request (merged
+    into a feature branch) *Waits for master* until master holds its merge commit, or a pull request from that branch
+    whose head held it merged into master (that merge, squash or not, is the landing). A deploy counts only from a
+    `workflow_dispatch` run on master whose head holds the landing commit and whose title names that target in prod
+    (`[Prod + EU Prod]`, never EU skipped or staging); someone else's run counts and says so. States: *Waiting for
+    master*, *Deploy plan unavailable*, *Needs a manual step*, *Ready to deploy*, *Deploying*, *Deploy failed*,
+    *Deployed* and *No deploy needed* (both done), *GitHub unavailable* after 3 failed reads (the same backoff as
+    Awaiting review). Only verified runs, an explicit none or the person's `herdr-task done` end it. `herdr-task deploy
+    <id>` shows each target with its run and previews the exact dispatch (workflow, `master`, `prod`, inputs, force and
+    skip_eu false); `--yes` (the person's go) re-reads the section, the landing, master's head and each workflow's
+    inputs on master first and refuses when anything is unclear or unverified; a dispatched target is *submitted*
+    until its run (GitHub's run id, else the one run of its title by the same person just after) succeeds. Deploy PR
+    (staging, open branches) is never used. Its Assistant hears `deploying` once and `deploy` when it changes.
   - Accept when ready never takes a hand-off: a space's default doesn't arm it, the menu doesn't offer it, and
     `herdr-task auto-accept` refuses it.
 - Branch updates (SHEP-10, `herdr_task/branch_update.py`): the person asks the Assistant to bring a pull request they
