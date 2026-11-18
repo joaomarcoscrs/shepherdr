@@ -208,10 +208,13 @@ def mark_done(s, t):
 # A task accepted as an Open PR hand-off before this marked Done at once, its pull request still open (ROBO-9). Such a
 # genuine hand-off moves to Awaiting review once, if GitHub says its pull request is still open: Done by the Accept
 # itself (done_at within a moment of handed_off), never merged, its delivery Open PR, its pull request on record. A task
-# made Done by hand, or whose pull request was closed or merged since, is left as it is (read once per scheduler run).
+# made Done by hand, or whose pull request was closed or merged since, is left as it is (asked once: LEGACY_KEY).
 
 LEGACY_WINDOW_MS = 5000
-_legacy_seen = {}
+# When each older hand-off is looked at again, kept on its task list (never on the task): {id: ms}, SETTLED once GitHub
+# said closed or merged. Its list's own data, as its "github" entry: read by the scheduler and the window's tick alike.
+LEGACY_KEY = "awaiting_legacy"
+SETTLED = -1
 
 
 def legacy_candidate(t):
@@ -228,30 +231,34 @@ def legacy_candidate(t):
     return open_pr(t)
 
 
-def legacy_key(folder, t):
-    return f"{folder}#{t.get('id')}"
-
-
-def legacy_due(key):
-    return now() >= _legacy_seen.get(key, 0)
+def legacy_due(data, t):
+    """data: its task list (a Store's data, or the list read without its lock)."""
+    at = ((data or {}).get(LEGACY_KEY) or {}).get(str(t.get("id")), 0)
+    return at != SETTLED and now() >= at
 
 
 def adopt_legacy(s, t, report):
     """One look at an older Done hand-off (legacy_candidate()): its pull request open on GitHub, it moves to Awaiting
-    review (and out of the archive); closed or merged, nothing changes. Returns whether GitHub was asked."""
-    key = legacy_key(s.loc["folder"], t)
-    if not legacy_due(key):
+    review (and out of the archive); closed or merged, nothing changes on it. Returns whether GitHub was asked."""
+    if not legacy_due(s.data, t):
         return False
+    seen = s.data.setdefault(LEGACY_KEY, {})
+    key = str(t["id"])
     h = t["handoff"]
     v, err = read_pr(h["repo"], h["pr"])
+    s.dirty = True
     if v is None:
-        n = int(_legacy_seen.get(key + "#n", 0)) + 1
-        _legacy_seen[key + "#n"] = n
-        _legacy_seen[key] = now() + min(RETRY_MAX, RETRY_FIRST * 2 ** (n - 1))
+        n = int(seen.get(key + "#n", 0)) + 1
+        seen[key + "#n"] = n
+        seen[key] = now() + min(RETRY_MAX, RETRY_FIRST * 2 ** (n - 1))
         return True
-    _legacy_seen[key] = float("inf")
+    seen.pop(key + "#n", None)
     if str(v.get("state") or "").upper() != "OPEN" or v.get("mergedAt"):
+        seen[key] = SETTLED
         return True
+    seen.pop(key, None)
+    if not seen:
+        s.data.pop(LEGACY_KEY, None)
     done_at = t.get("done_at")
     await_review(s, t, since=t.get("handed_off"), legacy=True)
     t["awaiting"]["legacy_done_at"] = done_at

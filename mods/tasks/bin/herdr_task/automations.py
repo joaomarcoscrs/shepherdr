@@ -24,7 +24,7 @@ from .output import say
 from .scheduler import ensure_scheduler, script_hash
 from .commands import begin, space_accept
 from .news import news_pass
-from .tick import end_done_pass, lost_logs_pass, memory_guard, retry_pass, tick_store
+from .tick import awaiting_due, end_done_pass, lost_logs_pass, memory_guard, retry_pass, tick_store
 from .backups import backup_pass
 from .machines import machines_pass
 from .takeover import cli_check_pass
@@ -651,7 +651,8 @@ def one_pass(report):
         feeds = feeds_for(lists)
         for d in lists:
             tasks = d.get("tasks") or []
-            busy = any(t.get("state") in ("queued", "scheduled") or (t.get("worktree") and t.get("state") in ("running", "ready")) for t in tasks)
+            busy = any(t.get("state") in ("queued", "scheduled") or (t.get("worktree") and t.get("state") in ("running", "ready"))
+                       or awaiting_due(d, t) for t in tasks)  # SHEP-15: an Awaiting review read due, an older hand-off to look at
             if not busy and not d.get("automations"):
                 continue
             with Store(locate(d["folder"])) as s:

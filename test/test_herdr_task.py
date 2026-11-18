@@ -6937,7 +6937,6 @@ class DeliveryProfiles(unittest.TestCase):
         self.calls = []
         import herdr_task.review as review
         self.review = review
-        review._legacy_seen.clear()
         # SHEP-15: draft, decision (GitHub's reviewDecision), reviews (REST rows), offline (every read fails)
         self.gh_state = {"login": "joao", "pr": None, "state": "open", "head": None, "assignees": ["someone"], "comments": [],
                          "draft": False, "decision": "", "reviews": [], "offline": False}
@@ -7487,8 +7486,10 @@ class AwaitingReview(unittest.TestCase):
         self.tick_at(self.at(0))
         self.tick_at(self.at(60))
         self.assertEqual(self.task(1), before)
-        # looked at once per scheduler run
+        # asked once, whatever process ticks next (the scheduler or the window's tick): kept on its list, not the task
         self.assertEqual(len(self.reads()), 1)
+        with self.store_mod.Store(self.store_mod.locate(self.folder), write=False) as s:
+            self.assertEqual(s.data["awaiting_legacy"], {"1": self.review.SETTLED})
 
     def test_news_says_it_awaits_review_and_when_the_signal_changes(self):
         self.accepted()
@@ -7518,6 +7519,32 @@ class AwaitingReview(unittest.TestCase):
         self.assertIn("Awaiting review", text)
         self.assertIn("PR #7 · Awaiting approval", text)
         self.assertIn("review: Awaiting approval · no review rule on GitHub: no approval of its head; 1 approval(s) of an older head not counted", text)
+
+    def test_the_scheduler_round_reads_a_list_with_only_awaiting_tasks(self):
+        """The scheduler (automations.one_pass) ticks a list with nothing else at work when an awaiting read is due."""
+        from unittest import mock
+        import herdr_task.automations as au
+        import herdr_task.autopilot as ap
+        import herdr_task.home as home
+        self.accepted()
+        side = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, side, True)
+        patches = [mock.patch.object(au, "STORE", side), mock.patch.object(au, "SEEN", os.path.join(side, ".seen.json")),
+                   mock.patch.object(ap, "autopilot_pass", lambda r: None), mock.patch.object(home, "home_pass", lambda r: None),
+                   mock.patch.object(au, "automations_pass", lambda *a: None)]
+        patches += [mock.patch.object(au, n, lambda *a, **k: None) for n in (
+            "retry_pass", "archive_pass", "news_pass", "end_done_pass", "memory_guard", "backup_pass", "cli_check_pass", "machines_pass")]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        self.clock = self.at(0)
+        au.one_pass({"started": [], "done": [], "attention": [], "fired": []})
+        self.assertEqual(self.signal()["state"], "awaiting_approval")
+        # not due: the round leaves the list alone
+        n = len(self.reads())
+        self.clock = self.at(1)
+        au.one_pass({"started": [], "done": [], "attention": [], "fired": []})
+        self.assertEqual(len(self.reads()), n)
 
     def test_merge_delivery_and_no_pr_cases_are_unchanged(self):
         """joão HQ (Merge): Accept merges as before, never Awaiting review; a hand-off blocked with no pull request is done."""

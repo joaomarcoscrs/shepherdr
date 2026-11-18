@@ -31,7 +31,7 @@ from .takeover import cant_go_on, takeover
 from .ghnews import main_pass, pr_deliver, pr_news
 from .scheduler import SCHEDULER
 from .revive import revive_pass
-from .review import adopt_legacy, AWAITING, due as review_due, legacy_candidate, legacy_due, legacy_key, review_pass, settled_at
+from .review import adopt_legacy, AWAITING, due as review_due, legacy_candidate, legacy_due, review_pass, settled_at
 
 
 PR_WAIT_EVERY = 20000  # how often a pull request whose checks still run is read again (ms)
@@ -324,7 +324,7 @@ def awaiting_pass(s, t, report):
     try:
         if t["state"] == AWAITING:
             review_pass(s, t, report)
-        elif legacy_candidate(t) and legacy_due(legacy_key(s.loc["folder"], t)):
+        elif legacy_candidate(t) and legacy_due(s.data, t):
             n = getattr(s, "legacy_asked", 0)
             if n < LEGACY_BUDGET:
                 s.legacy_asked = n + adopt_legacy(s, t, report)
@@ -408,7 +408,7 @@ def tick_store(s, report):
 
 def awaiting_due(d, t):
     """A list read without its lock: an Awaiting review task due a read, or an older Done hand-off not looked at yet."""
-    return review_due(t) or (legacy_candidate(t) and legacy_due(legacy_key(d.get("folder"), t)))
+    return review_due(t) or (legacy_candidate(t) and legacy_due(d, t))
 
 
 def lost_log(t, a):
