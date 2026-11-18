@@ -11,7 +11,7 @@ import { READ_LISTS, taskLists, fileIn } from "../core/tasklists.js";
 import * as T from "../core/tasks.js";
 import { isHelper, subagentsOf } from "../core/chat-view.js";
 // The core is plain JavaScript; its defaults read as narrow types to TypeScript.
-const { place, refOf, taskKey, autoPrefix, reportOf, secondLine, leftOf, queueReason, machineOf, autoAcceptOn, autoAcceptStopped, openPr, reviewOf } = T as any;
+const { place, refOf, taskKey, autoPrefix, reportOf, secondLine, leftOf, queueReason, machineOf, autoAcceptOn, autoAcceptStopped, openPr, reviewOf, deployOf } = T as any;
 import * as S from "../core/spaces.js";
 const { spacesFromDoc, sidebarOf, assistantOf, isUnread, inOrder, byMachineOrder, machineOrderOf } = S as any;
 import * as N from "../core/notify.js";
@@ -281,6 +281,13 @@ export class Model {
         review: p.section === "awaiting" ? { ...reviewOf(task), since: task.awaiting?.since ?? null, checked: task.pr_review?.ok_at ?? null,
           error: task.pr_review?.error ?? null, decision: task.pr_review?.decision ?? null, approvers: task.pr_review?.approvers ?? [],
           requesters: task.pr_review?.requesters ?? [] } : null,
+        // SHEP-16: a merged roboflow/roboflow hand-off awaiting its deploys (herdr-task deploy.py): its state (core/tasks.js
+        // deployOf()) and each target with its environment, ref, run and GitHub link, the CLI's own record; null otherwise
+        deploy: p.section === "deploying" ? { ...deployOf(task), since: task.deploy?.since ?? null, checked: task.deploy?.ok_at ?? null,
+          error: task.deploy?.error ?? null, plan: task.deploy?.plan?.state ?? null, planWhy: task.deploy?.plan?.why ?? null,
+          landingWhy: task.deploy?.landing?.why ?? null,
+          targets: (task.deploy?.targets ?? []).map((x: any) => ({ key: x.key, label: x.label, status: x.status, environment: x.environment ?? null,
+            ref: x.ref ?? null, why: x.why ?? null, run: x.run?.url ?? null, by: x.run?.by ?? null, workflow: x.workflow_url ?? null })) } : null,
         started: task.started ?? null, ready_at: task.ready_at ?? null, done_at: task.done_at ?? null,
         summary: task.summary ?? null, details: task.details ?? null, pr: task.pr ?? null, prompt: String(task.prompt ?? "").slice(0, 500), why: p.why ?? null,
         worktree: task.worktree ?? list.folder, base: task.base ?? null, start: task.start ?? null, branch: task.branch ?? null,

@@ -11,6 +11,8 @@
 //   scheduled  a small grey calendar (SHEP-38: starts by itself at a time)
 //   awaiting   a ring with a dot inside, colored by its review (SHEP-15): green approved, red changes asked or
 //              closed, amber waiting on a review, grey unknown
+//   deploying  the same ring, colored by its deploys (SHEP-16): green deployed or ready to dispatch, red failed or
+//              needs a manual step, amber running or waiting for master, grey unknown
 import { div, svg } from "gpui-kit";
 import { theme } from "herdr";
 import { terminals } from "./live.js";
@@ -29,8 +31,8 @@ const pie = (pct) => `mods/tasks/pie/${Math.min(100, Math.max(5, Math.round(pct 
 const box = () => div().relative().size(14).flex_none();
 const ring = (color, file = "circle") => svg(`mods/tasks/${file}.svg`).size(14).flex_none().text_color(color);
 
-// s: needs, working, merging, ready, awaiting, queued, scheduled, todo, done, off. pct: the % done (working).
-// tone: an awaiting task's review tone (core/tasks.js reviewTone(): ready, need, work, muted).
+// s: needs, working, merging, ready, awaiting, deploying, queued, scheduled, todo, done, off. pct: the % done (working).
+// tone: an awaiting task's review tone, a deploying one's deploy tone (core/tasks.js reviewTone(), deployTone()).
 export function taskDot(s, { pct = null, halo = false, tone = null } = {}) {
   const t = theme();
   switch (s) {
@@ -44,6 +46,7 @@ export function taskDot(s, { pct = null, halo = false, tone = null } = {}) {
     case "merging": return ring(readyColor(), "merging").spin(1400);
     case "queued": return ring(t.dim, "queued");
     case "scheduled": return ring(t.dim, "scheduled");
+    case "deploying":
     case "awaiting": return ring(tone === "ready" ? readyColor() : tone === "need" ? needColor() : tone === "work" ? amber() : t.dim, "awaiting");
     case "off": return ring(t.dim, "off");
   }

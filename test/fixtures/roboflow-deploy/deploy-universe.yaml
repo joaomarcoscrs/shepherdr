@@ -1,0 +1,17 @@
+name: Deploy Universe
+run-name: ${{ inputs.environment == 'prod' && '[Prod]' || '[Staging]' }} Deploy Universe
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        description: Environment
+        options:
+          - staging
+          - prod
+        default: staging
+      force:
+        description: 'Force deployment? (only use if you know why you need to)'
+        type: boolean
+        required: false
+        default: false

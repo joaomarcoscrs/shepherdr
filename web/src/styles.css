@@ -819,24 +819,30 @@
   }
   /* awaiting review (SHEP-15): handed off and taken, its pull request open on GitHub: a ring with a dot inside, amber
      while a review is awaited, green approved, red changes asked or closed, grey while GitHub is checked or unreachable */
-  .dot.awaiting {
+  /* awaiting deploy (SHEP-16): merged, its deploys followed on GitHub: the same ring, toned by its deploys */
+  .dot.awaiting,
+  .dot.deploying {
     --tone: var(--work);
     box-shadow: inset 0 0 0 1.5px var(--tone);
   }
-  .dot.awaiting::after {
+  .dot.awaiting::after,
+  .dot.deploying::after {
     content: "";
     position: absolute;
     inset: 4.75px;
     border-radius: 50%;
     background: var(--tone);
   }
-  .dot.awaiting.tone-ready {
+  .dot.awaiting.tone-ready,
+  .dot.deploying.tone-ready {
     --tone: var(--ready);
   }
-  .dot.awaiting.tone-need {
+  .dot.awaiting.tone-need,
+  .dot.deploying.tone-need {
     --tone: var(--need);
   }
-  .dot.awaiting.tone-muted {
+  .dot.awaiting.tone-muted,
+  .dot.deploying.tone-muted {
     --tone: var(--muted);
   }
   /* joão HQ's pixel pieces (the window's patches/eq.js), drawn in CSS. The rule: a row of 2px cubes a pixel apart,

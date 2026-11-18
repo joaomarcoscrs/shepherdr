@@ -37,6 +37,7 @@ from .proof import evidence, find_proof
 from .when import when_from
 from .delivery import accept_check, handoff_gate, handoff_line, NO_MERGE
 from .review import AWAITING, await_review, mark_done
+from . import deploy as deploys
 from . import branch_update
 
 
@@ -327,6 +328,8 @@ def cmd_show(args):
         text.append("comes after: " + ", ".join(v["after_refs"]))
     if v.get("state") == AWAITING or (v.get("pr_review") and v.get("handed_off")):
         text.append(review_show(v))
+    if v.get("deploy"):
+        text.extend(deploys.lines(v["deploy"]))
     if v.get("review_rounds"):
         r = v["review_rounds"]
         text.append(f"review rounds: {r['used']} of {r['of']} used" + (f" ({r['added']} added by the assistant)" if r["added"] else "")
@@ -931,7 +934,7 @@ def cmd_state(args, state):
             if t["state"] == "done":
                 t.pop("auto_accept", None)
             for k in ("reviews", "review", "auto_merge", "merged", "nothing_to_merge", "accepted_at", "accepted_by", "merge_queued",
-                      "handoff", "handed_off", "awaiting", "pr_review"):
+                      "handoff", "handed_off", "awaiting", "pr_review", "deploy"):
                 t.pop(k, None)
         if state == "done" and t.get("worktree") and merged_here(s, t):
             t["merged"] = True
@@ -939,6 +942,9 @@ def cmd_state(args, state):
             # SHEP-15: the person's Done ends its Awaiting review (never merged by Herdr); its signal stays as it was.
             t["done_by"] = "person"
             mark_done(s, t)
+        if state == "done" and t["state"] == deploys.DEPLOYING:
+            # SHEP-16: the person ends Awaiting deploy (its deploys as they are, kept on the task)
+            t["done_by"] = "person"
         t["state"] = state
         t[{"done": "done_at", "running": "reopened_at", "todo": "reopened_at"}[state]] = now()
         if state != "done":
@@ -1070,9 +1076,52 @@ RESUME_NUDGE = ("Shepherdr resumed your session because your agent had stopped. 
                 "what is already done with `herdr-task show`, then keep going with the task.")
 
 
+def cmd_deploy(args):
+    """SHEP-16: an Awaiting deploy task's deploys, read again from GitHub now: where its change is, its plan, each target
+    and its run, and exactly what `--yes` would dispatch (nothing is sent without it). --yes: the person's own dispatch
+    (deploy.dispatch(): everything re-validated first; refused when anything is unclear or unverified)."""
+    with open_store(args) as s:
+        t = s.find(args.id)
+        if t["state"] != deploys.DEPLOYING or not t.get("deploy"):
+            raise Fail(f"{s.ref(t)} isn't awaiting deploy (it is {t['state']})." + (" Its deploys as they were: herdr-task show." if t.get("deploy") else ""))
+        only = {x.strip() for x in (args.only or "").split(",") if x.strip()} or None
+        known = {x["key"] for x in t["deploy"].get("targets") or []} | {x["workflow"] for x in t["deploy"].get("targets") or []}
+        if only and t["deploy"].get("targets") and not only <= known:
+            raise Fail(f"--only: {', '.join(sorted(only - known))} isn't one of its targets ({', '.join(sorted(known))}).")
+        sent, why = [], None
+        if args.yes:
+            sent, why = deploys.dispatch(s, t, only)
+        else:
+            deploys.deploy_pass(s, t, {"done": []}, force=True)
+        d = t.get("deploy") or {}
+        pv = deploys.preview(d, only) if t["state"] == deploys.DEPLOYING else {"enabled": False, "why": f"it is {t['state']}", "units": [], "fallback": []}
+        ref = s.ref(t)
+        data = {"ref": ref, "state": t["state"], "deploy": d, "preview": pv, "sent": sent, "why": why}
+    text = [f"{ref} · {'Awaiting deploy' if data['state'] == deploys.DEPLOYING else data['state'].capitalize()}"] + deploys.lines(d)
+    if args.yes:
+        for x in sent:
+            where = f"{x['file']} on {x['ref']} ({x['ref_sha'][:7]}) to {x['inputs'].get('environment')}"
+            text.append(f"Dispatched {where}: " + (f"run {x['url'] or x['run_id']} (submitted, not passed until it succeeds)" if x["ok"] and (x["url"] or x["run_id"])
+                                                   else "submitted; its run is looked for on GitHub" if x["ok"] else f"failed: {x['error']}"))
+        if why:
+            text.append(f"Nothing dispatched: {why}")
+    elif pv["enabled"]:
+        text.append(f"`herdr-task deploy {ref} --yes` would dispatch (nothing was sent):")
+        for u in pv["units"]:
+            text.append(f"  {u['name']} ({u['file']}) on {u['ref']} to {u['environment']}: "
+                        + " ".join(f"{k}={v}" for k, v in u["inputs"].items()) + f" · its run titled \"{u['title']}\"")
+    else:
+        text.append(f"Can't dispatch now: {pv['why']}")
+    if pv["fallback"] and (args.yes and why or not pv["enabled"]):
+        text.append("By hand on GitHub: " + " · ".join(f"{x['label']} {x['url']}" for x in pv["fallback"]))
+    say(args, data, "\n".join(text))
+    if args.yes and (why or any(not x["ok"] for x in sent)):
+        raise SystemExit(1)
+
+
 def leave_awaiting(t):
     """Back at work from Awaiting review (resume, switch): its next ready hands it off again (SHEP-15)."""
-    for k in ("awaiting", "pr_review"):
+    for k in ("awaiting", "pr_review", "deploy"):
         t.pop(k, None)
 
 
@@ -1085,7 +1134,7 @@ def cmd_resume(args):
         if t["state"] in ("todo", "scheduled", "queued"):
             raise Fail(f"{s.ref(t)} hasn't started. Use start.")
         space = bare(args.space) if args.space else (t.get("space") or default_space())
-        if t["state"] in ("done", AWAITING):
+        if t["state"] in ("done", AWAITING, deploys.DEPLOYING):
             leave_awaiting(t)
             t["state"] = "running"
         gone = [k["address"] for k in live_agents(s.key(t))]  # its agents' terminals, none running an agent
@@ -1126,7 +1175,7 @@ def cmd_switch(args):
         # A given --space wins: the task moves there (#837); else the old agent's own space.
         space = ((bare(args.space) if args.space else None) or labels.get("herdr.task.space") or labels.get("herdr.space")
                  or t.get("space") or default_space())
-        if t["state"] in ("todo", "scheduled", "queued", "done", AWAITING):
+        if t["state"] in ("todo", "scheduled", "queued", "done", AWAITING, deploys.DEPLOYING):
             leave_awaiting(t)
             t["state"] = "running"
             t.setdefault("started", now())
@@ -1392,7 +1441,11 @@ def accept_merge(s, t, args):
             return how, error, sent, started
         how = "handoff"
         t["handed_off"] = now()
-        if merged:
+        if merged and deploys.applies(t):
+            # SHEP-16: merged already, roboflow/roboflow: Awaiting deploy until its deploys pass (deploy.py)
+            how = "deploying"
+            deploys.await_deploy(s, t)
+        elif merged:
             t["merged"] = True
             finish(s, t, even_if_busy=True)
         else:
@@ -1527,7 +1580,9 @@ def accepted_words(s, t, how, sent=None, started=False):
             "agent": f"{s.ref(t)} accepted: merge asked of {sent}" + (" (a new agent)" if started else ""),
             "handoff": f"{s.ref(t)}: handed off to you, not merged ({handoff_line(t)}); done.",
             "awaiting": f"{s.ref(t)}: handed off to you, not merged ({handoff_line(t)}); Awaiting review: Herdr follows "
-                        f"pull request #{(t.get('awaiting') or {}).get('pr')} on GitHub until it merges, or until you mark it done."}[how]
+                        f"pull request #{(t.get('awaiting') or {}).get('pr')} on GitHub until it merges, or until you mark it done.",
+            "deploying": f"{s.ref(t)}: handed off to you and merged already ({handoff_line(t)}); Awaiting deploy: Herdr follows "
+                         f"its deploys on GitHub until they pass, or until you mark it done (`herdr-task deploy {s.ref(t)}`)."}[how]
 
 
 def cmd_fix(args):

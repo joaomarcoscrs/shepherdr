@@ -92,6 +92,9 @@ def news_line(s, t, v, event, words=None):
             # SHEP-15: an accepted Open PR hand-off, tracked until its pull request merges (or the person's Done)
             "awaiting": f"{ref} is awaiting review: {review_words(t)} ({title})",
             "review": f"{ref}'s review changed: {review_words(t)} ({title})",
+            # SHEP-16: a roboflow/roboflow hand-off merged, followed until its deploys pass (or the person's Done)
+            "deploying": f"{ref} merged, awaiting deploy: {deploy_words(t)} ({title})",
+            "deploy": f"{ref}'s deploy changed: {deploy_words(t)} ({title})",
             "done": f"{ref} is done" + (": handed off, not merged" if t.get("handed_off") and not t.get("merged") else ": merged" if t.get("merged") else ": nothing to merge" if t.get("nothing_to_merge")
                                         else ": accepted" if t.get("accepted_at") else "")
                     + (" (auto-accept)" if t.get("accepted_by") == "auto" else "") + checked + f" ({title})"}[event]
@@ -110,15 +113,24 @@ def review_words(t):
     return (f"pull request #{pr} " if pr else "") + text + (f" {r.get('url') or a.get('url')}" if (r.get("url") or a.get("url")) else "")
 
 
+def deploy_words(t):
+    """An Awaiting deploy task's state in a few words: "pull request #19756 · Ready to deploy · 0 of 5 passed <url>"."""
+    from .deploy import short
+    d = t.get("deploy") or {}
+    return short(d).replace("PR #", "pull request #") + (f" {d['url']}" if d.get("url") else "")
+
+
 def news_state(s, t, live):
     """What news would say of this task now: {status, why, event, stall}, with live = its running agents."""
     if t["state"] in ("running", "ready"):
         v = view(s, t, live)
     elif t["state"] == "awaiting":
         v = {"status": "awaiting", "needs": None, "why": (t.get("pr_review") or {}).get("text")}
+    elif t["state"] == "deploying":
+        v = {"status": "deploying", "needs": None, "why": (t.get("deploy") or {}).get("text")}
     else:
         v = {"status": t["state"] if t["state"] in STATUSES else "todo", "needs": None, "why": None}
-    event = {"ready": "ready", "done": "done", "needs": "needs-you", "awaiting": "awaiting"}.get(v["status"])
+    event = {"ready": "ready", "done": "done", "needs": "needs-you", "awaiting": "awaiting", "deploying": "deploying"}.get(v["status"])
     if event == "needs-you" and (v["needs"] in ("stopped", "provider") or str(v.get("why") or "").startswith("Couldn't start")):
         event = "failed"
     stall = stall_of(t, v, live) if v["status"] == "working" else None
@@ -191,8 +203,11 @@ def news_pass(report, folder=None):
                 # read still going on (unknown) is no news.
                 review = (t.get("pr_review") or {}).get("state") if v["status"] == "awaiting" else None
                 review = (prev or {}).get("review") if review == "unknown" else review
+                # SHEP-16: an Awaiting deploy task's state, told when it changes (ready, running, failed, ...)
+                dep = (t.get("deploy") or {}).get("state") if v["status"] == "deploying" else None
+                dep = (prev or {}).get("deploy") if dep == "unknown" else dep
                 mine[str(t["id"])] = {"status": cur["status"], "stall": cur["stall"] or (prev or {}).get("stall"),
-                                      **({"needs": v["needs"]} if v.get("needs") else {}), **({"review": review} if review else {})}
+                                      **({"needs": v["needs"]} if v.get("needs") else {}), **({"review": review} if review else {}), **({"deploy": dep} if dep else {})}
                 # Its backup took over (takeover()): told once; on a first look, old news.
                 b = t.get("backup") or {}
                 backup = s.write and b.get("state") == "started" and not b.get("told")
@@ -211,6 +226,8 @@ def news_pass(report, folder=None):
                     lines.append((event, news_line(s, t, v, event)))
                 elif review and (prev or {}).get("status") == "awaiting" and (prev or {}).get("review") != review:
                     lines.append(("review", news_line(s, t, v, "review")))
+                elif dep and (prev or {}).get("status") == "deploying" and (prev or {}).get("deploy") != dep:
+                    lines.append(("deploy", news_line(s, t, v, "deploy")))
                 if stall and stall[0] != (prev or {}).get("stall"):
                     lines.append(("stalled", news_line(s, t, v, "stalled", stall[1])))
                 for ev, text in lines:

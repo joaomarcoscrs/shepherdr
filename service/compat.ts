@@ -40,7 +40,7 @@ const { ago } = T as any;
 export type Row = any;
 export type Space = any;
 
-const SECTION: Record<string, TaskStatus> = { needs: "need", working: "work", merging: "merging", ready: "ready", awaiting: "awaiting", queued: "queued", scheduled: "scheduled", todo: "todo", done: "done" };
+const SECTION: Record<string, TaskStatus> = { needs: "need", working: "work", merging: "merging", ready: "ready", awaiting: "awaiting", deploying: "deploying", queued: "queued", scheduled: "scheduled", todo: "todo", done: "done" };
 const AGENT: Record<string, Status> = { blocked: "need", working: "work", done: "idle", idle: "idle" };
 
 // Autopilot's words and picks: core/autopilot.js, the window's Settings › Autopilot's too
@@ -63,7 +63,7 @@ export const taskId = (r: Row) => (r.machine ? `${r.machine}:${r.ref}` : r.ref);
 export const newsKey = (rows: Row[]) => JSON.stringify(rows.filter((r) => r.space && r.ref).map((r) => [r.space, r.ref, r.section, r.ready_at, r.done_at]));
 
 // a news event's dot: what the task was at that moment
-const NEWS: Record<string, TaskStatus> = { added: "todo", queued: "queued", started: "work", needs: "need", asks: "need", stalled: "need", failed: "need", ready: "ready", merging: "merging", awaiting: "awaiting", review: "awaiting", merged: "done", done: "done", closed: "done" };
+const NEWS: Record<string, TaskStatus> = { added: "todo", queued: "queued", started: "work", needs: "need", asks: "need", stalled: "need", failed: "need", ready: "ready", merging: "merging", awaiting: "awaiting", review: "awaiting", deploying: "deploying", deploy: "deploying", merged: "done", done: "done", closed: "done" };
 type Sent = { cid: string; text: string; files: string[]; at: number };
 const said = (v: string) => v.replace(/\s+/g, " ").trim();
 const base = (p: string) => p.split("/").pop() ?? p;
@@ -387,6 +387,7 @@ export class Compat {
         ...(r.auto_accept ? { autoAccept: { on: true as const, ...(r.auto_accept.failed ? { failed: String(r.auto_accept.failed) } : {}) } } : {}),
         ...(r.open_pr ? { openPr: true as const } : {}),
         ...(r.review ? { review: r.review } : {}),
+        ...(r.deploy ? { deploy: r.deploy } : {}),
         ...(r.done_at ? { doneAt: r.done_at } : {}),
         // it ran (an agent once started): never "hasn't started", its summary when its chat is gone (SHEP-26)
         ...(r.started ? { started: r.started } : {}), ...(r.summary ? { summary: r.summary } : {}), ...(r.details ? { details: r.details } : {}),

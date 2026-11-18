@@ -7,12 +7,13 @@ import { REASONS } from "./needs.js";
 
 // An agent's own status, most urgent first.
 export const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
-export const STATUS = { needs: "Needs you", working: "Working", merging: "Merging", ready: "Ready", awaiting: "Awaiting review", queued: "Queued", scheduled: "Scheduled", todo: "To do", done: "Done" };
-export const RANK_OF = Object.fromEntries(["needs", "ready", "merging", "working", "awaiting", "queued", "scheduled", "todo", "done"].map((id, i) => [id, i]));
+export const STATUS = { needs: "Needs you", working: "Working", merging: "Merging", ready: "Ready", awaiting: "Awaiting review", deploying: "Awaiting deploy", queued: "Queued", scheduled: "Scheduled", todo: "To do", done: "Done" };
+export const RANK_OF = Object.fromEntries(["needs", "ready", "merging", "working", "awaiting", "deploying", "queued", "scheduled", "todo", "done"].map((id, i) => [id, i]));
 // The list's order: its groups, and the filter row's chips.
 // Scheduled (SHEP-38, herdr-task --at/--in): a task that starts by itself at a time, after Queued (it waits longer).
 // Awaiting review (SHEP-15): an Open PR hand-off the person took, its pull request open on GitHub: after Working.
-export const ORDER = ["needs", "ready", "merging", "working", "awaiting", "queued", "scheduled", "todo", "done", "automations"];
+// Awaiting deploy (SHEP-16): a roboflow/roboflow hand-off merged, its deploys not verified yet: after Awaiting review.
+export const ORDER = ["needs", "ready", "merging", "working", "awaiting", "deploying", "queued", "scheduled", "todo", "done", "automations"];
 // How the list can be grouped (the ⋯ menu's Group by; Shepherdr's GROUP_WORDS). "folder" was Space's old key.
 export const GROUP_BY = ["you", "space", "status"];
 // A grouping's key: "folder" was Space's; Machine and Machine › Space are gone (SHEP-98): For you.
@@ -146,7 +147,7 @@ export const AWAITING = "awaiting";
 export const REVIEW = { awaiting_approval: "Awaiting approval", approved: "Approved", changes_requested: "Changes requested",
   draft: "Draft", closed: "Closed without merging", merged: "Merged", unknown: "Checking GitHub", unavailable: "GitHub unavailable" };
 // What --after counts as finished, as herdr-task's DONE_FOR_AFTER: Done, or awaiting review (Done before SHEP-15).
-export const finished = (state) => state === "done" || state === AWAITING;
+export const finished = (state) => state === "done" || state === AWAITING || state === DEPLOYING;
 // The signal's state ("unknown" until GitHub was read) and its words.
 export const reviewOf = (task) => {
   const r = task?.pr_review ?? {};
@@ -163,6 +164,38 @@ export function reviewLine(task) {
   const bits = r.pr ? [`PR #${r.pr}`] : [];
   bits.push(r.state === "unavailable" && r.was ? `${r.text} (was ${String(r.was).replace(/_/g, " ")})` : r.text);
   if (r.headMoved) bits.push("head moved");
+  return bits.join(" · ");
+}
+
+// ---- Awaiting deploy (SHEP-16) -------------------------------------------------------------------------------------
+// herdr-task's deploy.py: a roboflow/roboflow Open PR hand-off whose pull request merged stays ongoing (state
+// "deploying") until the deploys its "Github Actions Required to Deploy" section lists are verified on master, the
+// section says plainly none, or the person marks it Done. The record is task.deploy: { state, text, pr, url, landing,
+// plan, targets: [{ key, label, workflow, file, environment, ref, status, why, run: { url, status, by }, workflow_url }],
+// dispatches, ... }. `herdr-task deploy <id>` shows it and previews a dispatch; only its --yes dispatches.
+export const DEPLOYING = "deploying";
+export const DEPLOY = { waiting: "Waiting for master", unavailable: "Deploy plan unavailable", manual: "Needs a manual step",
+  ready: "Ready to deploy", running: "Deploying", failed: "Deploy failed", success: "Deployed", none: "No deploy needed", unknown: "Checking GitHub" };
+// Its state ("unknown" until GitHub was read), words, and how many of its deploys passed.
+export const deployOf = (task) => {
+  const d = task?.deploy ?? {};
+  const state = DEPLOY[d.state] ? d.state : "unknown";
+  const targets = (d.targets ?? []).filter((x) => x.workflow !== "manual");
+  return { state, text: d.text || DEPLOY[state], pr: d.pr ?? null, url: d.url ?? null, was: d.was ?? null,
+    landed: d.landing?.state === "landed", after: d.landing?.state === "waiting" ? d.landing?.via?.pr ?? null : null,
+    passed: targets.filter((x) => x.status === "success").length, total: targets.length };
+};
+// Its tone: ready (deployed, or ready for the person's dispatch), need (failed, unclear, unavailable), work (running,
+// waiting for master), muted (unknown).
+export const deployTone = (state) => (state === "success" || state === "none" || state === "ready" ? "ready"
+  : state === "failed" || state === "manual" || state === "unavailable" ? "need" : state === "running" || state === "waiting" ? "work" : "muted");
+// A row's second line: "PR #19756 · Deploying · 2 of 6 passed" ("Waiting for master · after #19700").
+export function deployLine(task) {
+  const d = deployOf(task);
+  const bits = d.pr ? [`PR #${d.pr}`] : [];
+  bits.push(d.was ? `${d.text} (was ${(DEPLOY[d.was] ?? d.was).toLowerCase()})` : d.text);
+  if (d.landed && d.total) bits.push(`${d.passed} of ${d.total} passed`);
+  else if (d.after) bits.push(`after #${d.after}`);
   return bits.join(" · ");
 }
 
@@ -196,6 +229,8 @@ export function place(list, task, { live = [], helpers = [], loaded = true, now 
   if (section) return { list, task, live, status, section, needs, why };
   // SHEP-15: an Open PR hand-off awaiting its review: its own section, its signal why (never Needs you, never Done).
   if (st === AWAITING) return { list, task, live: [], status: null, section: AWAITING, needs: null, why: reviewOf(task).text };
+  // SHEP-16: merged, its deploys followed on GitHub: its own section, its deploy state why (never Needs you, never Done).
+  if (st === DEPLOYING) return { list, task, live: [], status: null, section: DEPLOYING, needs: null, why: deployOf(task).text };
   // Cut off by its model's provider (herdr-task tick): Working while Herdr waits to tell it to
   // carry on ("Provider overloaded · Retry in 2m"); Needs you once the tries are used up.
   const retry = st === "running" && task.retry && live.some((a) => a.address === task.retry.address) && !states.includes("blocked") ? task.retry : null;
@@ -307,6 +342,7 @@ export function order(section) {
   if (section === "todo") return (a, b) => a.task.id - b.task.id;
   if (section === "done") return (a, b) => (b.task.done_at ?? 0) - (a.task.done_at ?? 0);
   if (section === AWAITING) return (a, b) => (b.task.awaiting?.since ?? 0) - (a.task.awaiting?.since ?? 0);
+  if (section === DEPLOYING) return (a, b) => (b.task.deploy?.since ?? 0) - (a.task.deploy?.since ?? 0);
   return (a, b) => (b.task.ready_at ?? b.task.started ?? 0) - (a.task.ready_at ?? a.task.started ?? 0);
 }
 
@@ -347,6 +383,7 @@ export function secondLine(p, w, queued = null, now = Date.now()) {
   return section === "needs" || section === "merging" ? p.why : section === "working" ? p.why ?? w?.text ?? null
     : section === "queued" ? queued
     : section === AWAITING ? reviewLine(p.task)
+    : section === DEPLOYING ? deployLine(p.task)
     : section === "scheduled" ? startsLine(p.task.scheduled_for, now)
     // SHEP-7: an Open PR task waits for the person to take its hand-off, never to merge
     : section === "ready" && p.task.handoff ? (`Handed off${p.task.handoff.blocked ? " blocked" : ""}`

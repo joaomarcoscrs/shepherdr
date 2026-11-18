@@ -13,6 +13,7 @@ export const GROUPS: [Task['status'], string][] = [
   ['merging', 'Merging'],
   ['work', 'Working'],
   ['awaiting', 'Awaiting review'],
+  ['deploying', 'Awaiting deploy'],
   ['queued', 'Queued'],
   ['scheduled', 'Scheduled'],
   ['todo', 'To do'],

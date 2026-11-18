@@ -118,7 +118,7 @@ def status_of(task, live):
 IN_QUEUE_LINE = "In GitHub's merge queue"
 APPROVAL_LINE = "Merges once it's approved"
 STATUSES = {"todo": "To do", "scheduled": "Scheduled", "queued": "Queued", "working": "Working", "needs": "Needs you",
-            "ready": "Ready", "merging": "Merging", "awaiting": "Awaiting review", "done": "Done"}
+            "ready": "Ready", "merging": "Merging", "awaiting": "Awaiting review", "deploying": "Awaiting deploy", "done": "Done"}
 
 
 def task_status(task, live):
@@ -132,6 +132,9 @@ def task_status(task, live):
         # SHEP-15: an Open PR hand-off the person accepted, its pull request not merged yet: its review signal says why.
         r = task.get("pr_review") or {}
         return "awaiting", None, r.get("text") or "Checking GitHub"
+    if st == "deploying":
+        # SHEP-16: a roboflow/roboflow hand-off merged, its deploys not verified yet: its deploy state says why.
+        return "deploying", None, (task.get("deploy") or {}).get("text") or "Checking GitHub"
     if st not in ("running", "ready"):
         return (st if st in STATUSES else "todo"), None, None
     # #995: a question or permission waiting on the chat's card counts as asking, whatever the

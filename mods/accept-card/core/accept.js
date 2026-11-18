@@ -91,6 +91,8 @@ export function whereNow(x) {
   if (x.state === "done") return x.accepted_at ? "Already accepted." : "Already done.";
   // SHEP-15: an Open PR hand-off already taken: ongoing, its pull request's review followed on GitHub
   if (x.state === "awaiting") return "Already taken: awaiting review on GitHub.";
+  // SHEP-16: merged, its deploys followed on GitHub
+  if (x.state === "deploying") return "Already taken and merged: awaiting deploy.";
   return `Not ready right now: it's in ${x.status_text ?? x.state}.`;
 }
 

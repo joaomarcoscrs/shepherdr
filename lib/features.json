@@ -651,6 +651,37 @@
       ]
     },
     {
+      "id": "awaiting-deploy",
+      "addon": "tasks",
+      "title": "Awaiting deploy: a merged roboflow/roboflow hand-off, its deploys followed on GitHub until they pass",
+      "core": [
+        "tasks",
+        "accept"
+      ],
+      "herdr": {
+        "mods": [
+          "tasks",
+          "accept-card"
+        ]
+      },
+      "web": {
+        "files": [
+          "plugins/tasks/client.tsx",
+          "src/groups.ts"
+        ]
+      },
+      "forms": {
+        "herdr": "Tasks panel: an Awaiting deploy group (its own chip), each row's dot colored by its deploys and its line PR #n · Deploying · 2 of 6 passed; herdr-task list, show and deploy say the same, deploy previewing the exact dispatch",
+        "desktop": "The task list's Awaiting deploy group, with the same dot and line",
+        "tablet": "Same",
+        "phone": "Same"
+      },
+      "service": [
+        "model.ts",
+        "compat.ts"
+      ]
+    },
+    {
       "id": "assistant",
       "addon": "assistants",
       "title": "Assistant per space",

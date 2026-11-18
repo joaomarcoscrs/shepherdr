@@ -7987,3 +7987,449 @@ class MouseReports(unittest.TestCase):
         self.assertEqual(n.history_lines({"foreground": {"name": "codex"}}, 40), 0)
         self.assertEqual(n.history_lines({"status": {"app": "claude"}}, 40), 40)
         self.assertEqual(n.history_lines(None, 40), 40)
+
+
+class AwaitingDeploy(unittest.TestCase):
+    """SHEP-16: a roboflow/roboflow Open PR hand-off whose pull request merged moves to Awaiting deploy, followed on
+    GitHub until the deploys its section lists are verified on master, its section says plainly none, or the person's
+    Done. AwaitingReview's real task list and worktrees; GitHub is a fake (no workflow is ever dispatched for real: the
+    dispatch is a recorded fixture). The workflows' dispatch headers and the PR template are roboflow/roboflow master's
+    (test/fixtures/roboflow-deploy)."""
+    ROBO, HQ = DeliveryProfiles.ROBO, DeliveryProfiles.HQ
+    setUp_review = AwaitingReview.setUp
+    setUp_auto, run_cmd, task, git = AutoAccept.setUp, Scheduled.run_cmd, Scheduled.task, AutoAccept.git
+    tick_at, status, auto, on_main, work = AutoAccept.tick_at, AutoAccept.status, AutoAccept.auto, AutoAccept.on_main, SpaceAutoAccept.work
+    settings, spaces, briefed, ready, verdict = (DeliveryProfiles.settings, DeliveryProfiles.spaces, DeliveryProfiles.briefed,
+                                                 DeliveryProfiles.ready, DeliveryProfiles.verdict)
+    open_pr_task, add, head, commit = DeliveryProfiles.open_pr_task, DeliveryProfiles.add, DeliveryProfiles.head, DeliveryProfiles.commit
+    accepted, at, ref, done = AwaitingReview.accepted, AwaitingReview.at, AwaitingReview.ref, AwaitingReview.done
+    FIX = os.path.join(ROOT, "test", "fixtures", "roboflow-deploy")
+    MC, MASTER, OLD = "m" * 40, "a" * 40, "0" * 40
+    ROBO9 = ("## Github Actions Required to Deploy\n\nList exactly which deploys this change needs. The Deploy PR workflow reads "
+             "this section as the\ndeploy list, so an example left here is deployed to staging.\n\n<!--\n    Deploy Admin\n-->\n\n"
+             "functions:light-v2-agent,functions:light-v2-asyncTask,functions:light-v2-workflowEvals\n\nDeploy Hosting\n\nAPI\n\n"
+             "### Infrastructure impact\n\nNone.\n")
+    INDEX = ('addfn_httpv2("light.v2.agent", x)\naddfn_pubsubv2(\n  "light.v2.asyncTask", y)\naddfn_httpv2("light.v2.workflowEvals", z)\n'
+             'addfn_httpv2("light.v2.api", a)\naddfn_httpv2("light.v2.query", q)\n')
+
+    def setUp(self):
+        self.setUp_review()
+        from unittest import mock
+        import herdr_task.deploy as deploy
+        self.deploy = deploy
+        self.files = {}
+        for f in os.listdir(self.FIX):
+            with open(os.path.join(self.FIX, f)) as fh:
+                self.files[(".github/" + f) if f.endswith(".md") else (".github/workflows/" + f)] = fh.read()
+        self.files["app/functions/index.js"] = self.INDEX
+        self.fixture = dict(self.files)
+        self.dep = {"base": "master", "body": self.ROBO9, "merged_at": "2026-11-18T12:00:00Z", "master": self.MASTER,
+                    "anc": {(self.MC, self.MASTER)}, "runs": {}, "parents": {}, "posts": [], "return_id": True, "post_error": None,
+                    "offline": False, "next_id": 9000}
+        review_gh = self.review.gh
+
+        def gh(*args, cwd=None):
+            d, st = self.dep, self.gh_state
+            if d["offline"] or st["offline"]:
+                self.calls.append(args)
+                return False, "", "error connecting to api.github.com"
+            if args[:2] == ("pr", "view") and args[-1].startswith("number,state,baseRefName"):
+                self.calls.append(args)
+                merged = st["state"] == "merged"
+                return True, json.dumps({"number": st["pr"], "state": "MERGED" if merged else st["state"].upper(), "baseRefName": d["base"],
+                                         "headRefName": "task/1", "headRefOid": st["head"], "mergeCommit": {"oid": self.MC} if merged else None,
+                                         "mergedAt": d["merged_at"] if merged else None, "body": d["body"],
+                                         "url": f"https://github.com/o/r/pull/{st['pr']}"}), ""
+            if args[:2] == ("pr", "list"):
+                self.calls.append(args)
+                return True, json.dumps(d["parents"].get(args[args.index("--head") + 1], [])), ""
+            if args[0] == "api" and "/compare/" in args[1]:
+                self.calls.append(args)
+                a, b = args[1].split("/compare/")[1].split("...")
+                b = d["master"] if b == "master" else b
+                return True, "identical" if a == b else "ahead" if (a, b) in d["anc"] else "diverged", ""
+            if args[0] == "api" and args[1] == "repos/o/r/commits/master":
+                return True, d["master"], ""
+            if args[0] == "api" and "/contents/" in args[1]:
+                path = args[1].split("/contents/")[1].split("?")[0]
+                return (True, self.files[path], "") if path in self.files else (False, "", "HTTP 404: Not Found")
+            if args[0] == "api" and "/actions/workflows/" in args[1] and "/runs?" in args[1]:
+                self.calls.append(args)
+                f = args[1].split("/actions/workflows/")[1].split("/")[0]
+                return True, "\n".join(json.dumps(r) for r in d["runs"].get(f, [])), ""
+            if args[:3] == ("api", "-X", "POST"):
+                self.calls.append(args)
+                f = args[3].split("/actions/workflows/")[1].split("/")[0]
+                fields = dict(a.split("=", 1) for a in args[4:] if "=" in a)
+                inputs = {k[len("inputs["):-1]: v for k, v in fields.items() if k.startswith("inputs[")}
+                d["posts"].append({"file": f, "ref": fields["ref"], "inputs": inputs})
+                if d["post_error"]:
+                    return False, "", d["post_error"]
+                rid = d["next_id"] = d["next_id"] + 1
+                self.gh_run(f, self.title(f, inputs), d["master"], "queued", rid=rid)
+                return True, (json.dumps({"workflow_run_id": rid, "run_url": "x", "html_url": f"https://github.com/o/r/actions/runs/{rid}"})
+                              if d["return_id"] else ""), ""
+            return review_gh(*args, cwd=cwd)
+        for mod, name, value in ((deploy, "gh", gh), (deploy, "CONFIGS", {"o/r": {**deploy.ROBOFLOW, "repo": "o/r"}}),
+                                 (deploy, "now", lambda: self.clock if self.clock is not None else int(__import__("time").time() * 1000))):
+            p = mock.patch.object(mod, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    # ---- the fake GitHub's runs ----
+
+    def iso(self, ms):
+        import datetime
+        return datetime.datetime.fromtimestamp(ms / 1000, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def title(self, f, inputs):
+        """The run's title as the workflow's run-name makes it (prod, EU not skipped)."""
+        tag = "[Prod + EU Prod]" if inputs.get("environment") == "prod" and inputs.get("skip_eu") != "true" else "[Staging + EU Staging]"
+        sfx = {"both": "", "hosting": " (hosting only)", "functions": " (functions only)"}
+        return {"deploy-function.yaml": f"{tag} Deploy {inputs.get('deploy_only')}",
+                "deploy-api.yaml": f"{tag} Deploy API{sfx.get(inputs.get('deploy_target'), '')}",
+                "deploy-hosting.yaml": f"{tag} Deploy Hosting"}[f]
+
+    def gh_run(self, f, title, head, status="completed", conclusion=None, actor="joao", rid=None, at=None):
+        d = self.dep
+        rid = rid or (d.__setitem__("next_id", d["next_id"] + 1) or d["next_id"])
+        r = {"id": rid, "title": title, "head_sha": head, "head_branch": "master", "status": status, "conclusion": conclusion,
+             "created": self.iso(at or self.clock or 0), "url": f"https://github.com/o/r/actions/runs/{rid}", "actor": actor,
+             "event": "workflow_dispatch"}
+        d["runs"].setdefault(f, []).insert(0, r)
+        return r
+
+    def finish_runs(self, conclusion="success"):
+        for rs in self.dep["runs"].values():
+            for r in rs:
+                if r["status"] != "completed":
+                    r.update(status="completed", conclusion=conclusion)
+
+    def merged(self):
+        """Accepted (Awaiting review), then merged on GitHub: Awaiting deploy at the next tick."""
+        wt = self.accepted()
+        self.gh_state["state"] = "merged"
+        report = self.tick_at(self.at(0))
+        return wt, report
+
+    def rec(self, n=1):
+        return self.task(n).get("deploy") or {}
+
+    def deploy_cmd(self, n=1, yes=False, only=None, ok=True):
+        try:
+            return self.run_cmd(self.commands.cmd_deploy, id=str(n), yes=yes, only=only)
+        except SystemExit:
+            if ok:
+                raise
+            return None
+
+    def targets(self, n=1):
+        return {x["key"]: x["status"] for x in self.rec(n).get("targets") or []}
+
+    # ---- the flow ----
+
+    def test_merged_on_master_waits_for_its_deploys_dispatched_by_the_person_and_verified_on_github(self):
+        wt, report = self.merged()
+        t = self.task(1)
+        self.assertEqual((t["state"], t["merged"], self.rec()["state"]), ("deploying", True, "unknown"))
+        self.assertNotIn(1, report["done"])
+        self.assertFalse(os.path.isdir(wt))  # the merge took its worktree, as before
+        self.assertEqual(self.status(1), ("deploying", "Checking GitHub"))
+        # read: landed on master at its merge commit; ROBO-9's section is the plan, template prose and comments not
+        self.tick_at(self.at(1))
+        d = self.rec()
+        self.assertEqual((d["state"], d["landing"]["state"], d["landing"]["sha"], d["plan"]["state"]), ("ready", "landed", self.MC, "ready"))
+        self.assertEqual(self.targets(), {"function:light-v2-agent": "ready", "function:light-v2-asyncTask": "ready",
+                                          "function:light-v2-workflowEvals": "ready", "hosting": "ready", "api:functions": "ready",
+                                          "api:hosting": "ready"})
+        self.assertNotIn("Deploy Admin", json.dumps(d["targets"]))  # the template's commented example is no target
+        # the preview: exact workflows, ref, environment and inputs; nothing sent
+        out = self.deploy_cmd()
+        self.assertTrue(out["preview"]["enabled"])
+        units = {u["file"]: u for u in out["preview"]["units"]}
+        self.assertEqual(units["deploy-function.yaml"]["inputs"], {"environment": "prod", "force": "false", "skip_eu": "false",
+                                                                   "deploy_only": "functions:light-v2-agent,functions:light-v2-asyncTask,functions:light-v2-workflowEvals"})
+        self.assertEqual(units["deploy-api.yaml"]["inputs"], {"environment": "prod", "force": "false", "skip_eu": "false", "deploy_target": "both"})
+        self.assertEqual(units["deploy-hosting.yaml"]["inputs"], {"environment": "prod", "skip_eu": "false"})
+        self.assertEqual({u["ref"] for u in units.values()}, {"master"})
+        self.assertEqual(self.dep["posts"], [])
+        # someone's newer run of another function, a run of its function before the landing, an EU-skipped one and a
+        # staging one: none counts
+        self.gh_run("deploy-function.yaml", "[Prod + EU Prod] Deploy functions:light-v2-query", self.MASTER, conclusion="success")
+        self.gh_run("deploy-function.yaml", "[Prod + EU Prod] Deploy functions:light-v2-agent", self.OLD, conclusion="success")
+        self.gh_run("deploy-function.yaml", "[Prod — EU SKIPPED] Deploy functions:light-v2-agent", self.MASTER, conclusion="success")
+        self.gh_run("deploy-function.yaml", "[Staging + EU Staging] Deploy functions:light-v2-agent", self.MASTER, conclusion="success")
+        self.tick_at(self.at(7))
+        self.assertEqual(set(self.targets().values()), {"ready"})
+        # the person's --yes: one dispatch per workflow, on master, to prod; submitted is not passed
+        out = self.deploy_cmd(yes=True)
+        self.assertEqual(sorted(p["file"] for p in self.dep["posts"]), ["deploy-api.yaml", "deploy-function.yaml", "deploy-hosting.yaml"])
+        self.assertEqual({(p["ref"], p["inputs"]["environment"]) for p in self.dep["posts"]}, {("master", "prod")})
+        self.assertTrue(all(p["inputs"].get("force", "false") == "false" and p["inputs"].get("skip_eu") == "false" for p in self.dep["posts"]))
+        self.assertTrue(all(x["ok"] and x["run_id"] and x["ref_sha"] == self.MASTER for x in out["sent"]))
+        self.assertEqual(set(self.targets().values()), {"submitted"})
+        self.assertEqual(self.task(1)["state"], "deploying")
+        # a second --yes now sends nothing: every target is submitted or running
+        self.assertIsNone(self.deploy_cmd(yes=True, ok=False))
+        self.assertEqual(len(self.dep["posts"]), 3)
+        # GitHub: queued, then running; the function run fails: failed, its run linked; still deploying
+        self.tick_at(self.at(8))
+        self.assertEqual(set(self.targets().values()), {"running"})
+        self.assertEqual(self.rec()["state"], "running")
+        fn = next(r for r in self.dep["runs"]["deploy-function.yaml"] if r["status"] != "completed")
+        fn.update(status="completed", conclusion="failure")
+        self.tick_at(self.at(9))
+        d = self.rec()
+        self.assertEqual((d["state"], self.targets()["function:light-v2-agent"]), ("running", "failed"))
+        self.assertEqual(next(x for x in d["targets"] if x["key"] == "function:light-v2-agent")["run"]["url"], fn["url"])
+        self.finish_runs()
+        self.tick_at(self.at(10))
+        self.assertEqual((self.rec()["state"], self.targets()["hosting"], self.targets()["api:functions"]), ("failed", "success", "success"))
+        # a retry dispatches only what failed (the three functions' run), then it passes: done
+        self.deploy_cmd(yes=True)
+        self.assertEqual([p["file"] for p in self.dep["posts"][3:]], ["deploy-function.yaml"])
+        self.finish_runs()
+        report = self.tick_at(self.at(12))
+        t = self.task(1)
+        self.assertEqual((t["state"], t["deploy"]["state"], t["deploy"]["text"]), ("done", "success", "Deployed"))
+        self.assertIn(1, report["done"])
+        self.assertTrue(all(x["run"]["by"] == "herdr" for x in t["deploy"]["targets"]))
+
+    def test_a_deploy_someone_else_ran_counts_by_its_title_and_head_and_says_so(self):
+        self.dep["body"] = "## Github Actions Required to Deploy\n\nDeploy Hosting\n\n## Docs\n"
+        self.merged()
+        self.tick_at(self.at(1))
+        self.assertEqual(self.targets(), {"hosting": "ready"})
+        # someone deploys hosting with notice from a newer master holding the landing commit
+        newer = "b" * 40
+        self.dep["anc"].add((self.MC, newer))
+        self.gh_run("frontend-refresh-notice.yaml", "[Prod + EU Prod] Deploy Hosting with Notice · dataset: toast", newer, conclusion="success", actor="ana")
+        self.tick_at(self.at(7))
+        t = self.task(1)
+        self.assertEqual((t["state"], t["deploy"]["targets"][0]["run"]["by"], t["deploy"]["targets"][0]["run"]["actor"]), ("done", "other", "ana"))
+        self.assertEqual(self.dep["posts"], [])
+
+    def test_stacked_pull_request_waits_for_the_merge_that_lands_it_on_master(self):
+        # ROBO-9: merged into a feature branch, not master: waiting, never deployable, nothing dispatched
+        self.dep.update(base="joao/evals/agent-experience-bundle", anc=set())
+        parent = {"number": 19700, "state": "OPEN", "baseRefName": "master", "headRefOid": "f" * 40, "mergeCommit": None, "mergedAt": None,
+                  "url": "https://github.com/o/r/pull/19700"}
+        self.dep["parents"]["joao/evals/agent-experience-bundle"] = [parent]
+        self.dep["anc"].add((self.MC, "f" * 40))
+        self.merged()
+        self.tick_at(self.at(1))
+        d = self.rec()
+        self.assertEqual((d["state"], d["landing"]["state"], d["landing"]["via"]["pr"]), ("waiting", "waiting", 19700))
+        self.assertIn("waits for #19700", d["landing"]["why"])
+        self.assertEqual(set(self.targets().values()), {"waiting"})
+        out = self.deploy_cmd()
+        self.assertFalse(out["preview"]["enabled"])
+        self.assertIsNone(self.deploy_cmd(yes=True, ok=False))
+        self.assertEqual(self.dep["posts"], [])
+        # a run on master now (before the stack landed) deploys old code: never counted
+        self.gh_run("deploy-hosting.yaml", "[Prod + EU Prod] Deploy Hosting", self.MASTER, conclusion="success")
+        # the parent squash-merges into master: its merge commit (not a descendant of the child's) is the landing
+        landed = "c" * 40
+        parent.update(state="MERGED", mergeCommit={"oid": landed}, mergedAt="2026-11-18T14:00:00Z")
+        self.dep.update(master=landed)
+        self.tick_at(self.at(12))
+        d = self.rec()
+        self.assertEqual((d["state"], d["landing"]["sha"], d["landing"]["via"]["pr"]), ("ready", landed, 19700))
+        self.assertEqual(self.targets()["hosting"], "ready")  # the old run still doesn't count
+        self.deploy_cmd(yes=True)
+        self.assertEqual({p["ref"] for p in self.dep["posts"]}, {"master"})
+        self.finish_runs()
+        self.tick_at(self.at(14))
+        self.assertEqual(self.task(1)["state"], "done")
+
+    def test_a_merged_parent_that_never_held_it_is_no_landing(self):
+        self.dep.update(base="feat/x", anc=set())
+        self.dep["parents"]["feat/x"] = [{"number": 5, "state": "MERGED", "baseRefName": "master", "headRefOid": "e" * 40,
+                                          "mergeCommit": {"oid": "d" * 40}, "mergedAt": "x", "url": "u"}]
+        self.merged()
+        self.tick_at(self.at(1))
+        d = self.rec()
+        self.assertEqual((d["state"], d["landing"]["state"]), ("waiting", "waiting"))
+        self.assertIn("nothing merges feat/x into master yet", d["landing"]["why"])
+
+    def test_explicit_none_finishes_and_a_missing_or_unclear_section_never_does(self):
+        self.dep["body"] = "## Github Actions Required to Deploy\n\nNone.\n\n## Docs\n"
+        self.merged()
+        report = self.tick_at(self.at(1))
+        t = self.task(1)
+        self.assertEqual((t["state"], t["deploy"]["state"], t["deploy"]["text"]), ("done", "none", "No deploy needed"))
+        self.assertIn(1, report["done"])
+
+    def test_unavailable_or_unclear_plans_stay_until_the_persons_done(self):
+        for body, state in (("## Description\n\nno deploy section here\n", "unavailable"),
+                            ("## Github Actions Required to Deploy\n\nYOUR_ANSWER\n", "unavailable"),
+                            ("## Github Actions Required to Deploy\n\n<!-- nothing -->\n\n## Docs\n", "unavailable"),
+                            ("## Github Actions Required to Deploy\n\nProbably the API, if the routes moved\n", "manual"),
+                            ("## Github Actions Required to Deploy\n\nDeploy Rules (firestore) before API\n", "manual")):
+            self.dep["body"] = body
+            d = {"repo": "o/r", "pr": 7, "targets": [], "dispatches": []}
+            self.gh_state.update(pr=7, state="merged", head="h" * 40)
+            self.deploy.refresh(d, self.deploy.GitHub("o/r"))
+            self.assertEqual(d["state"], state, body)
+            self.assertFalse(self.deploy.preview(d)["enabled"], body)
+        self.gh_state.update(pr=None, state="open")
+        self.dep["body"] = "## Github Actions Required to Deploy\n\n\n## Docs\n"
+        self.merged()
+        for m in (1, 20, 60):
+            self.tick_at(self.at(m))
+        t = self.task(1)
+        self.assertEqual((t["state"], t["deploy"]["state"]), ("deploying", "unavailable"))
+        self.assertIn("empty", t["deploy"]["plan"]["why"])
+        self.done(1)
+        t = self.task(1)
+        self.assertEqual((t["state"], t["done_by"], t["deploy"]["state"]), ("done", "person", "unavailable"))
+        self.assertEqual(self.dep["posts"], [])
+
+    def test_dispatch_rereads_github_and_refuses_what_changed(self):
+        self.merged()
+        self.tick_at(self.at(1))
+        # the section edited after the plan was read: an unclear line now; --yes re-reads it and sends nothing
+        self.dep["body"] = self.ROBO9.replace("API\n", "API, and maybe universe\n")
+        out = self.deploy_cmd(yes=True, ok=False)
+        self.assertIsNone(out)
+        self.assertEqual(self.dep["posts"], [])
+        self.assertEqual(self.rec()["state"], "manual")
+        self.assertIn("maybe universe", " ".join(self.rec()["plan"]["unclear"]))
+        # put back, but the workflow on master changed its inputs: unverified, never dispatched
+        self.dep["body"] = self.ROBO9
+        self.files[".github/workflows/deploy-hosting.yaml"] = self.files[".github/workflows/deploy-hosting.yaml"].replace(
+            "      skip_eu:\n", "      deploy_everything:\n        type: boolean\n        default: true\n      skip_eu:\n")
+        self.assertIsNone(self.deploy_cmd(yes=True, ok=False))
+        self.assertEqual(self.dep["posts"], [])
+        self.assertEqual(self.targets()["hosting"], "unverified")
+        # master's head no longer holds the landing (a force push): refused
+        self.files[".github/workflows/deploy-hosting.yaml"] = self.fixture[".github/workflows/deploy-hosting.yaml"]
+        self.dep["master"] = "9" * 40
+        self.dep["anc"].add((self.MC, self.MASTER))
+        self.assertIsNone(self.deploy_cmd(yes=True, ok=False))
+        self.assertEqual(self.dep["posts"], [])
+
+    def test_a_dispatch_without_a_run_id_or_with_a_lost_answer_is_never_sent_twice_nor_given_another_run(self):
+        self.dep["body"] = "## Github Actions Required to Deploy\n\nDeploy Hosting\n"
+        self.merged()
+        self.tick_at(self.at(1))
+        # GitHub took it but said nothing back (an older API): submitted; its run is the one of its title by João after it
+        self.dep["return_id"] = False
+        self.clock = self.at(2)
+        self.deploy_cmd(yes=True)
+        self.assertEqual(self.targets()["hosting"], "submitted")
+        self.assertEqual(len(self.dep["posts"]), 1)
+        mine = self.dep["runs"]["deploy-hosting.yaml"][0]
+        mine.update(status="in_progress")
+        # Ana's own Deploy Hosting a moment later: not Herdr's
+        self.gh_run("deploy-hosting.yaml", "[Prod + EU Prod] Deploy Hosting", self.MASTER, status="queued", actor="ana", at=self.at(2.5))
+        self.tick_at(self.at(3))
+        x = self.rec()["dispatches"][-1]
+        self.assertEqual(x["run_id"], mine["id"])
+        # a POST whose answer was lost (no HTTP refusal): submitted; --yes again sends nothing while it is looked for
+        self.dep["runs"].clear()
+        self.dep["post_error"] = "Post https://api.github.com/...: net/http: timeout awaiting response headers"
+        self.dep["return_id"] = True
+        with self.store_mod.Store(self.store_mod.locate(self.folder)) as s:
+            t = s.find(1)
+            t["deploy"]["dispatches"] = []
+            t["deploy"]["targets"][0]["status"] = "ready"
+            s.dirty = True
+        self.assertIsNone(self.deploy_cmd(yes=True, ok=False))
+        self.assertEqual(len(self.dep["posts"]), 2)
+        self.tick_at(self.at(4))
+        self.assertEqual(self.targets()["hosting"], "submitted")
+        self.dep["post_error"] = None
+        self.assertIsNone(self.deploy_cmd(yes=True, ok=False))
+        self.assertEqual(len(self.dep["posts"]), 2)
+
+    def test_github_out_of_reach_backs_off_and_keeps_what_it_was(self):
+        self.merged()
+        self.tick_at(self.at(1))
+        self.dep["offline"] = True
+        for m in (7, 8, 10):
+            self.tick_at(self.at(m))
+        d = self.rec()
+        self.assertEqual((d["text"], d["was"], d["fails"], d["state"]), ("GitHub unavailable", "ready", 3, "ready"))
+        self.assertEqual(d["next"], self.at(14))  # again after 1, 2, 4 minutes
+        self.assertEqual(self.task(1)["state"], "deploying")
+        self.dep["offline"] = False
+        self.tick_at(self.at(60))
+        self.assertEqual((self.rec()["text"], self.rec().get("was")), ("Ready to deploy", None))
+
+    def test_other_repos_finish_at_the_merge_as_before(self):
+        from unittest import mock
+        with mock.patch.object(self.deploy, "CONFIGS", {}):
+            wt, report = self.merged()
+        t = self.task(1)
+        self.assertEqual((t["state"], t["merged"], "deploy" in t), ("done", True, False))
+        self.assertIn(1, report["done"])
+
+    def test_show_list_and_news_say_it(self):
+        self.merged()
+        self.tick_at(self.at(1))
+        with self.store_mod.Store(self.store_mod.locate(self.folder), write=False) as s:
+            t = s.find(1)
+            v = self.commands.view(s, t)
+            news = self.news.news_line(s, t, v, "deploy")
+        self.assertEqual(v["status_text"], "Awaiting deploy")
+        self.assertIn("PR #7 · Ready to deploy · 0 of 6 passed", self.commands.line(v))
+        self.assertIn("Ready to deploy", news)
+        txt = "\n".join(self.deploy.lines(v["deploy"]))
+        for w in ("landed on master at mmmmmmm", "light-v2-agent: not run yet · Deploy Function on master to prod",
+                  "https://github.com/o/r/actions/workflows/deploy-hosting.yaml"):
+            self.assertIn(w, txt)
+
+    # ---- the parts ----
+
+    def test_plan_reads_only_what_the_section_says(self):
+        plan = self.deploy.plan
+        fns = self.deploy.functions_at(self.INDEX)
+        sec = lambda *ls: "\n".join(ls)
+        items = lambda p: [(a, b) for a, b, _ in p["items"]]
+        self.assertEqual(items(plan(sec("`functions:light-v2-agent, functions:light.v2.asyncTask`", "- API (hosting only)"), fns)),
+                         [("function", "light-v2-agent"), ("function", "light-v2-asyncTask"), ("api", "hosting")])
+        for none in ("None.", "N/A", "No deploy needed", "none"):
+            self.assertEqual(plan(none, fns)["state"], "none", none)
+        for unclear in ("None, but API later", "Deploy API if the routes moved", "functions:light-v2-agent=10",
+                        "functions:light-v2-api", "functions:universe-v2-server", "light-v2-agent", "Deploy functions"):
+            self.assertEqual(plan(unclear, fns)["state"], "manual", unclear)
+        self.assertEqual(plan(sec("None", "API"), fns)["state"], "manual")
+        # the conventions' mapping: light-v2-api with the API workflow is the API's
+        p = plan(sec("functions:light-v2-api", "API"), fns)
+        self.assertEqual((p["state"], items(p)), ("ready", [("api", "functions"), ("api", "hosting")]))
+        # a function not registered where it landed: unverified
+        p = plan("functions:light-v2-nope", fns)
+        self.assertEqual((p["state"], p["items"]), ("manual", [("function", "light-v2-nope", False)]))
+        # a workflow Herdr never runs: a manual step
+        self.assertEqual(items(plan("Deploy Rules", fns)), [("manual", "deploy-rules.yaml")])
+        for missing in (None, "", "YOUR_ANSWER"):
+            self.assertEqual(plan(missing, fns)["state"], "unavailable")
+        tpl = self.deploy.template_lines(self.files[".github/pull_request_template.md"])
+        self.assertEqual(plan(self.deploy.deploy_section(self.files[".github/pull_request_template.md"]), fns, tpl)["state"], "unavailable")
+
+    def test_master_workflows_match_what_herdr_sends_and_a_change_unverifies_them(self):
+        chk = self.deploy.check_workflow
+        for key, w in self.deploy.WORKFLOWS.items():
+            self.assertIsNone(chk(key, self.files[".github/workflows/" + w["file"]]), key)
+        fn = self.files[".github/workflows/deploy-function.yaml"]
+        self.assertIn("deploy_only", chk("function", fn.replace("      deploy_only:", "      only:")))
+        self.assertIn("prod", chk("function", fn.replace("          - prod\n", "")))
+        self.assertIn("run titles", chk("function", fn.replace("'[Prod + EU Prod]'", "'[Production]'")))
+        self.assertIn("requires", chk("function", fn.replace("      force:", "      ticket:\n        required: true\n      force:")))
+        self.assertIn("no workflow_dispatch", chk("function", fn.replace("workflow_dispatch", "workflow_call")))
+
+    def test_run_titles_name_the_target_in_prod_only(self):
+        cov = self.deploy.run_covers
+        f = "deploy-function.yaml"
+        self.assertTrue(cov("function", "light-v2-agent", "[Prod + EU Prod] Deploy functions:light-v2-query,functions:light.v2.Agent=50", f))
+        self.assertFalse(cov("function", "light-v2-agent", "[Prod + EU Prod] Deploy functions:light-v2-agentx", f))
+        self.assertFalse(cov("function", "light-v2-agent", "[Prod — EU SKIPPED] Deploy functions:light-v2-agent", f))
+        self.assertFalse(cov("function", "light-v2-agent", "[EU Prod] Deploy functions:light-v2-agent", f))
+        a = "deploy-api.yaml"
+        self.assertTrue(cov("api", "hosting", "[Prod + EU Prod] Deploy API", a))
+        self.assertTrue(cov("api", "hosting", "[Prod + EU Prod] Deploy API (hosting only)", a))
+        self.assertFalse(cov("api", "functions", "[Prod + EU Prod] Deploy API (hosting only)", a))
+        self.assertTrue(cov("hosting", None, "[Prod + EU Prod] Deploy Hosting with Notice · models: modal", "frontend-refresh-notice.yaml"))
+        self.assertFalse(cov("hosting", None, "[Prod + EU Prod] Publish Refresh Notice", "frontend-refresh-notice.yaml"))
+        self.assertFalse(cov("hosting", None, "[Prod + EU Prod] Deploy Hosting", "deploy-admin.yaml"))

@@ -32,6 +32,7 @@ from .ghnews import main_pass, pr_deliver, pr_news
 from .scheduler import SCHEDULER
 from .revive import revive_pass
 from .review import adopt_legacy, AWAITING, due as review_due, legacy_candidate, legacy_due, review_pass, settled_at
+from .deploy import DEPLOYING, deploy_pass, due as deploy_due
 
 
 PR_WAIT_EVERY = 20000  # how often a pull request whose checks still run is read again (ms)
@@ -324,6 +325,8 @@ def awaiting_pass(s, t, report):
     try:
         if t["state"] == AWAITING:
             review_pass(s, t, report)
+        elif t["state"] == DEPLOYING:
+            deploy_pass(s, t, report)
         elif legacy_candidate(t) and legacy_due(s.data, t):
             n = getattr(s, "legacy_asked", 0)
             if n < LEGACY_BUDGET:
@@ -408,7 +411,7 @@ def tick_store(s, report):
 
 def awaiting_due(d, t):
     """A list read without its lock: an Awaiting review task due a read, or an older Done hand-off not looked at yet."""
-    return review_due(t) or (legacy_candidate(t) and legacy_due(d, t))
+    return review_due(t) or deploy_due(t) or (legacy_candidate(t) and legacy_due(d, t))
 
 
 def lost_log(t, a):
@@ -478,7 +481,7 @@ def end_done_pass(report, folder=None, pressed=False):
     worktree goes (tidy_done(), SHEP-161). Cheap when nothing's left: a task is looked at once after
     each time it became Done, and again only while its worktree is still on disk."""
     # SHEP-15: an Awaiting review task's too (its work handed off; resume brings its agent back).
-    ending = lambda t: t.get("state") in ("done", AWAITING) and (t.get("ended_at") or 0) <= (settled_at(t) or 1)
+    ending = lambda t: t.get("state") in ("done", AWAITING, DEPLOYING) and (t.get("ended_at") or 0) <= (settled_at(t) or 1)
     ended = []
     for p in store_files(folder):
         d = read_list(p)

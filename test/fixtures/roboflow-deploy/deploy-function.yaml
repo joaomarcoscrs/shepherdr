@@ -1,0 +1,32 @@
+name: Deploy Function
+run-name: ${{ inputs.environment == 'prod' && (inputs.skip_eu && '[Prod — EU SKIPPED]' || '[Prod + EU Prod]') || inputs.environment == 'staging' && (inputs.skip_eu && '[Staging — EU SKIPPED]' || '[Staging + EU Staging]') || inputs.environment == 'eu-prod' && '[EU Prod]' || inputs.environment == 'eu-staging' && '[EU Staging]' || '[Staging]' }} Deploy ${{ inputs.deploy_only }}
+on:
+  workflow_dispatch:
+    inputs:
+      deploy_only:
+        description: |
+          firebase deploy --only function?
+        required: true
+        default: 'light-v2-query'
+      environment:
+        type: choice
+        description: Environment (prod and staging each deploy US + EU in parallel)
+        options:
+          - staging
+          - prod
+          - eu-staging
+          - eu-prod
+        default: staging
+      force:
+        description: 'Force deployment? (only use if you know why you need to)'
+        type: boolean
+        required: false
+        default: false
+      skip_eu:
+        type: boolean
+        description: 'BREAK-GLASS: skip the EU leg of a prod OR staging deploy (US-only). Requires skip_eu_reason; loudly posted to Slack.'
+        default: false
+      skip_eu_reason:
+        description: 'Required when skip_eu is true: why is EU being skipped? (audited)'
+        required: false
+        default: ''

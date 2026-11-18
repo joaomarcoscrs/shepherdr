@@ -17,7 +17,7 @@ from .shared import cmd_shared_read
 from .commands import (
     cmd_accept, cmd_add, cmd_alert, cmd_auto_accept, cmd_config, cmd_edit, cmd_fix, cmd_list, cmd_merge, cmd_ready,
     cmd_resume, cmd_review, cmd_review_more, cmd_reviewed, cmd_rm, cmd_show, cmd_start, cmd_state, cmd_status,
-    cmd_switch, cmd_unarchive, cmd_where,
+    cmd_switch, cmd_unarchive, cmd_where, cmd_deploy,
 )
 from .tick import cmd_tick
 from .backups import cmd_backup, cmd_restore_spaces
@@ -242,6 +242,11 @@ def main():
     when_opts(c)
     c = cmd("show", cmd_show, "one task")
     c.add_argument("--evidence", action="store_true", help="with what its Accept card shows: commits, changed files, checks and its proof")
+    c = cmd("deploy", cmd_deploy, "SHEP-16: an Awaiting deploy task's deploys, read from GitHub now, and exactly what --yes "
+                                  "would dispatch (workflow, ref, environment, inputs); nothing is sent without --yes")
+    c.add_argument("--yes", action="store_true", help="the person's go: dispatch them now (only when they ask; refused when "
+                                                       "its plan is unclear or anything can't be verified)")
+    c.add_argument("--only", help="comma-separated targets or workflows to dispatch (default: every one ready or failed)")
     c = cmd("start", cmd_start, "start a task's agent (no tab: an hc child of the space's coordinator)")
     agent_opts(c)
     c.add_argument("--space")

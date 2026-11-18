@@ -1,0 +1,38 @@
+name: Deploy Rapid
+run-name: ${{ inputs.environment == 'prod' && (inputs.skip_eu && '[Prod — EU SKIPPED]' || '[Prod + EU Prod]') || inputs.environment == 'staging' && (inputs.skip_eu && '[Staging — EU SKIPPED]' || '[Staging + EU Staging]') || inputs.environment == 'eu-prod' && '[EU Prod]' || inputs.environment == 'eu-staging' && '[EU Staging]' || '[Staging]' }} Deploy Rapid${{ inputs.deploy_target == 'hosting' && ' (hosting only)' || inputs.deploy_target == 'functions' && ' (functions only)' || '' }}${{ inputs.deploy_core_app_hosting && (inputs.deploy_target == 'hosting' || inputs.deploy_target == 'both') && ' + core app hosting' || '' }}
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        description: Environment (prod and staging each deploy US + EU in parallel)
+        options:
+          - staging
+          - prod
+          - eu-staging
+          - eu-prod
+        default: staging
+      deploy_target:
+        type: choice
+        description: What to deploy
+        options:
+          - both
+          - hosting
+          - functions
+        default: both
+      force:
+        type: boolean
+        description: Force deploy (bypass billing increase check)
+        default: false
+      deploy_core_app_hosting:
+        type: boolean
+        description: Also deploy core app hosting (only applies when deploying Rapid hosting; core app bundles Rapid source for embedded views)
+        default: false
+      skip_eu:
+        type: boolean
+        description: 'BREAK-GLASS: skip the EU leg of a prod OR staging deploy (US-only). Requires skip_eu_reason; loudly posted to Slack.'
+        default: false
+      skip_eu_reason:
+        description: 'Required when skip_eu is true: why is EU being skipped? (audited)'
+        required: false
+        default: ''

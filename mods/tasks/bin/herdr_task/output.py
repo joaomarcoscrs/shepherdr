@@ -112,6 +112,9 @@ def line(v):
     extra = v.get("why") or ""
     if v["status"] == "awaiting":
         extra = review_line(v)
+    elif v["status"] == "deploying":
+        from .deploy import short
+        extra = short(v.get("deploy"))
     elif v["status"] in ("ready", "merging") and not extra:
         extra = f"PR #{v['pr']['number']}" if v.get("pr") else v.get("branch") or ""
     elif v["status"] == "queued":

@@ -1,0 +1,26 @@
+name: Deploy Admin
+run-name: ${{ inputs.environment == 'prod' && (inputs.skip_eu && '[Prod — EU SKIPPED]' || '[Prod + EU Prod]') || inputs.environment == 'staging' && (inputs.skip_eu && '[Staging — EU SKIPPED]' || '[Staging + EU Staging]') || inputs.environment == 'eu-prod' && '[EU Prod]' || inputs.environment == 'eu-staging' && '[EU Staging]' || '[Staging]' }} Deploy Admin
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        description: Environment (prod and staging each deploy US + EU in parallel)
+        options:
+          - staging
+          - prod
+          - eu-staging
+          - eu-prod
+        default: staging
+      force:
+        type: boolean
+        description: 'Force deployment? (only use if you know why you need to)'
+        default: false
+      skip_eu:
+        type: boolean
+        description: 'BREAK-GLASS: skip the EU leg of a prod OR staging deploy (US-only). Requires skip_eu_reason; loudly posted to Slack.'
+        default: false
+      skip_eu_reason:
+        description: 'Required when skip_eu is true: why is EU being skipped? (audited)'
+        required: false
+        default: ''
