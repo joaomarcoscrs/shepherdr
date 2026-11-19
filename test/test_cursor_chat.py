@@ -165,7 +165,7 @@ class CursorChat(unittest.TestCase):
         self.assertEqual(p.returncode, 0, err)
         aid = os.path.basename(req)[:-5]
         with open(os.path.join(self.app, "data", "chat-asks", "end", aid)) as f:
-            self.assertEqual(f.read().strip(), "Declined or interrupted in the terminal")
+            self.assertEqual(f.read().strip(), "Rejected in the terminal")
         self.assertFalse(os.path.exists(req))
         recs = self.transcript()
         self.assertEqual([x["outcome"] for x in recs if x["type"] == "permission_done"], ["declined"])
@@ -223,6 +223,145 @@ class CursorChat(unittest.TestCase):
         self.assertEqual(p.returncode, 0, err)
         self.assertEqual([x["reason"] for x in self.transcript() if x["type"] == "turn_end"], ["cancelled"])
         self.assertTrue([x for x in self.sent() if x.get("got", {}).get("method") == "session/cancel"])
+
+    # ---- SHEP-17: permissions that wait together, keys that aren't answers, words sent while it asks ----
+
+    def asks(self, n):
+        """The n card requests waiting now, oldest first: [(id, request)]."""
+        end = time.time() + 15
+        while time.time() < end:
+            hits = sorted(glob.glob(os.path.join(self.app, "data", "chat-asks", "req", "t9.*.json")))
+            if len(hits) >= n:
+                out = []
+                for h in hits:
+                    with open(h) as f:
+                        out.append((os.path.basename(h)[:-5], json.load(f)))
+                return out
+            time.sleep(0.05)
+        self.fail(f"{n} asks never showed")
+
+    def answered(self):
+        """The bridge's answers to Cursor's permission requests: {request id: outcome}."""
+        return {x["got"]["id"]: x["got"]["result"]["outcome"] for x in self.sent()
+                if "got" in x and "result" in x["got"] and "method" not in x["got"] and "outcome" in (x["got"]["result"] or {})}
+
+    def card(self, aid, decision):
+        with open(os.path.join(self.app, "data", "chat-asks", "ans", aid + ".json"), "w") as f:
+            f.write(json.dumps({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}))
+
+    def key(self, p, data, pause=0.4):
+        p.stdin.write(data)
+        p.stdin.flush()
+        time.sleep(pause)   # one read each, as a person's keys come
+
+    def test_two_asks_at_once_each_answered_under_its_own_id(self):
+        """The real case: Cursor asked for a web fetch and a `gh` call in one turn, before either was answered. The
+        second overwrote the first, which was never answered: the turn waited forever. Each is kept now, with its
+        own card, and the terminal's keys answer the oldest one's menu."""
+        p = self.start(env={"HC_TERMINAL_ID": "t9"})
+        self.key(p, "both gh pr view 1\n")
+        (fetch_id, fetch), (shell_id, shell) = self.asks(2)
+        self.assertNotEqual(fetch_id, shell_id)   # asked in the same second, each its own card
+        self.assertEqual((fetch["tool_name"], shell["tool_name"], shell["tool_input"]["command"]), ("WebFetch", "Bash", "gh pr view 1"))
+        self.assertEqual(fetch["tool_input"]["url"], "https://example.com/thread")   # the card reads "Fetch example.com"
+        # the later card answers its own request, though the menu shows the earlier one
+        self.card(shell_id, {"behavior": "allow"})
+        time.sleep(0.8)
+        self.assertEqual(self.answered(), {101: {"outcome": "selected", "optionId": "allow-once"}})
+        # the terminal's 3 rejects the menu's own request: the fetch, never the shell call
+        self.key(p, "3")
+        out, err = p.communicate("", timeout=30)
+        self.assertEqual(p.returncode, 0, err)
+        self.assertEqual(self.answered(), {100: {"outcome": "selected", "optionId": "reject-once"}, 101: {"outcome": "selected", "optionId": "allow-once"}})
+        recs = self.transcript()
+        self.assertIn("FETCH:reject-once SHELL:allow-once", [x for x in recs if x["type"] == "agent"][0]["text"])
+        self.assertEqual(sorted((x["outcome"], x["by"]) for x in recs if x["type"] == "permission_done"), [("allowed", "chat"), ("declined", "terminal")])
+        with open(os.path.join(self.app, "data", "chat-asks", "end", fetch_id)) as f:
+            self.assertEqual(f.read().strip(), "Rejected in the terminal")
+        self.assertIn("Cursor also asks:", out)
+        self.assertIn("Allowed once in the chat: gh pr view 1", out)
+        self.assertEqual(glob.glob(os.path.join(self.app, "data", "chat-asks", "req", "*")), [])
+
+    def test_menu_keys_answer_in_order_and_say_what_always_adds(self):
+        p = self.start(env={"HC_TERMINAL_ID": "t9"})
+        self.key(p, "both hc read t5\n")
+        self.asks(2)
+        self.key(p, "1")    # the fetch, allowed once
+        self.key(p, "2")    # then the shell call's menu: Allow always, what Cursor adds said plainly
+        out, err = p.communicate("", timeout=30)
+        self.assertEqual(p.returncode, 0, err)
+        self.assertEqual(self.answered(), {100: {"outcome": "selected", "optionId": "allow-once"}, 101: {"outcome": "selected", "optionId": "allow-always"}})
+        self.assertIn("2. Allow always \x1b[2m(adds Shell(hc) to Cursor's allowlist, for every such command)", out)
+        self.assertIn("Allowed always (adds Shell(hc) to Cursor's allowlist, for every such command): hc read t5", out)
+        kinds = [x["kind"] for x in self.transcript() if x["type"] == "permission_done"]
+        self.assertEqual(kinds, ["allow_once", "allow_always"])
+
+    def test_a_paste_enter_or_reports_never_answer_and_a_message_waits(self):
+        """A message sent while it asks (hc's paste, then Enter) once rejected the permission and was lost, and a
+        pasted digit could pick an option: now the words wait their turn and only a key of its own answers."""
+        p = self.start(env={"HC_TERMINAL_ID": "t9"})
+        self.key(p, "run touch made.txt\n")
+        ((aid, _),) = self.asks(1)
+        self.key(p, "\x1b[200~say 2\x1b[201~\r")   # hc send "say 2": not an answer, not a reject
+        self.key(p, "\r")                          # Enter alone picks nothing
+        self.key(p, "\x1b[<65;101;61M")             # a wheel report
+        self.key(p, "\x1b[I")                       # a focus report
+        self.key(p, "\x1b[A")                       # an arrow
+        self.key(p, "2 more")                       # words typed: a digit among them is no answer...
+        self.key(p, "\x7f" * 6)                     # ...deleted again
+        self.assertEqual(self.answered(), {})
+        self.assertTrue(os.path.exists(os.path.join(self.app, "data", "chat-asks", "req", aid + ".json")))
+        self.card(aid, {"behavior": "allow"})
+        out, err = p.communicate("", timeout=30)
+        self.assertEqual(p.returncode, 0, err)
+        self.assertEqual(self.answered(), {0: {"outcome": "selected", "optionId": "allow-once"}})
+        recs = self.transcript()
+        # the words went once the turn ended, as the person's next message
+        self.assertEqual([x["text"] for x in recs if x["type"] == "user"], ["run touch made.txt", "say 2"])
+        self.assertEqual([x["text"] for x in recs if x["type"] == "agent"], ["ALLOWED", "2"])
+        self.assertIn("Press 1, 2, 3 to answer", out)
+
+    def test_esc_and_ctrl_c_alone_reject(self):
+        for k in ("\x1b", "\x03"):
+            with self.subTest(key=repr(k)):
+                if os.path.exists(self.acp):
+                    os.remove(self.acp)
+                p = self.start(env={"HC_TERMINAL_ID": "t9"})
+                self.key(p, "run rm -rf build\n")
+                self.asks(1)
+                self.key(p, k)
+                _, err = p.communicate("", timeout=30)
+                self.assertEqual(p.returncode, 0, err)
+                self.assertEqual(self.answered(), {0: {"outcome": "selected", "optionId": "reject-once"}})
+
+    def test_words_written_instead_of_the_card_reach_cursor(self):
+        """The window's chat answers a card with the person's words as a denial's message (cards.js replyWith); Cursor's
+        reject can't carry them, so they go as the next message instead of being lost."""
+        p = self.start(env={"HC_TERMINAL_ID": "t9"})
+        self.key(p, "run rm -rf build\n")
+        ((aid, _),) = self.asks(1)
+        self.card(aid, {"behavior": "deny", "message": "The person didn't use the card and wrote in the chat instead: say not that"})
+        out, err = p.communicate("", timeout=30)
+        self.assertEqual(p.returncode, 0, err)
+        self.assertEqual(self.answered(), {0: {"outcome": "selected", "optionId": "reject-once"}})
+        recs = self.transcript()
+        self.assertEqual([x["text"] for x in recs if x["type"] == "user"], ["run rm -rf build", "say not that"])
+        self.assertIn("Rejected in the chat: rm -rf build", out)
+
+    def test_a_request_cursor_gave_up_on_closes_its_card(self):
+        p = self.start(env={"HC_TERMINAL_ID": "t9"})
+        self.key(p, "drop ls\n", pause=1.5)
+        self.key(p, "say still here\n")
+        out, err = p.communicate("", timeout=30)
+        self.assertEqual(p.returncode, 0, err)
+        self.assertEqual(self.answered(), {200: {"outcome": "cancelled"}})
+        self.assertEqual(glob.glob(os.path.join(self.app, "data", "chat-asks", "req", "*")), [])
+        ends = glob.glob(os.path.join(self.app, "data", "chat-asks", "end", "t9.*"))
+        with open(ends[0]) as f:
+            self.assertEqual(f.read().strip(), "Cursor stopped waiting on it")
+        recs = self.transcript()
+        self.assertEqual([x["outcome"] for x in recs if x["type"] == "permission_done"], ["stale"])
+        self.assertIn("still here", [x["text"] for x in recs if x["type"] == "agent"][-1])
 
     def test_no_cursor_installed(self):
         code, out, _ = self.run_bridge("", env={"HERDR_CURSOR_BIN": "", "PATH": "/nonexistent"})
