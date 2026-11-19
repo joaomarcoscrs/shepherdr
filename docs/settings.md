@@ -81,6 +81,10 @@ task values a machine set before (the old machine scope) still apply there until
     never one. Without it, ready keeps the task Working and tells its agent to run `/jarbas-review local iterate` on
     the pull request; a verdict other than APPROVED, or three tries without any, tell it to stop and hand off with
     `ready --blocked "<why>"`. Herdr publishes no review, requests no reviewer and messages nobody.
+  - To deliver changes to an existing PR, set the task's `--base` to that PR's head branch and push the worktree's
+    commits there using the task's Git remote. When Git records that push, `ready` checks that exactly one open PR
+    in that repository has the same branch and commit, then runs the same assignment and approval on that PR.
+    If the target can't be verified, `ready` stops before assigning or opening a PR.
   - Ready, the row says *Handed off · PR #n*; the card's Hand-off section shows the pull request, the approval for its
     exact head (or that it moved since, or why it's blocked), who it's assigned to and what's next, beside Try it's
     ephemeral environment for a Roboflow PR. Its button is *Take it, no merge*: the pull request is read again (closed,

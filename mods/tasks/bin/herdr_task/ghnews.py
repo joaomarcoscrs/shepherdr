@@ -145,10 +145,14 @@ def pr_news(s, t, v, report):
         return
     lines = [f"GitHub news on pull request #{pr['number']} ({pr.get('url') or ''}), since you said ready:"]
     if news_conflict:
-        base = t.get("base") or "main"
+        base = pr.get("base") or t.get("base") or "main"
         what = "conflicts with" if news_conflict.endswith(":conflict") else "is behind, and must be up to date with,"
-        lines.append(f"- It {what} {base}: rebase onto {base}, resolve any conflicts, run the checks, then run your "
-                     "ready command again.")
+        if t.get("existing_pr"):
+            lines.append(f"- It {what} {base}: merge {base} into the worktree branch, resolve any conflicts, run the checks, "
+                         f"push normally to {pr['branch']}, then run ready again.")
+        else:
+            lines.append(f"- It {what} {base}: rebase onto {base}, resolve any conflicts, run the checks, then run your "
+                         "ready command again.")
     for c in news_checks[:10]:
         name, url = c.get("name") or c.get("context") or "A check", c.get("detailsUrl") or c.get("targetUrl") or ""
         lines.append(f"- Check \"{name}\" failed: {url}")
