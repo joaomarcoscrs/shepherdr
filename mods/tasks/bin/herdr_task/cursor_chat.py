@@ -14,7 +14,9 @@ client a person or the chat types into, as they would into Claude Code:
   data/chat-asks/req/<id>.json, answered in ans/<id>.json). Whichever answers first wins; nothing is allowed unread.
   Several can wait at once (Cursor runs tool calls side by side): each has its own card and is answered under its own
   request id. Only a key pressed on its own answers the menu (a number; Esc or Ctrl+C rejects): a paste, Enter alone,
-  a mouse or focus report never does, and words typed or sent meanwhile wait their turn (SHEP-17).
+  a mouse or focus report never does, and words typed or sent meanwhile wait their turn (SHEP-17). A card's Allow is
+  Cursor's Allow once; its Allow always (only where Cursor offers it and what it adds to the allowlist can be said: the
+  request file's cursor_always) picks that exact option of that request, as the terminal's 2 does (SHEP-18).
 - `--resume <chat id>` loads that chat again (session/load: the conversation goes on); `--model` picks a model and
   `/model <id>` switches it in place; `--force` is Full access (Cursor's own: its deny list still applies).
 - No Auto: Cursor's ACP server ignores Auto-review (`cursor-agent --auto-review acp` and cli-config.json's approvalMode
@@ -36,6 +38,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 
 from . import layout
 
@@ -217,15 +220,74 @@ def report_msg(req):
 WROTE_INSTEAD = "The person didn't use the card and wrote in the chat instead: "
 
 
-def always_scope(ask):
-    """What Allow always adds to Cursor's allowlist, in words: Cursor saves each command its allowlist lacks ("Not in
-    allowlist: gh, jq" -> Shell(gh), Shell(jq): every gh command from then on), a path for a write or a read, a site
-    for a fetch (cursor-agent 2026.11.17's persistAllowlistEntry)."""
-    m = re.search(r"Not in allowlist:\s*([^\n]+)", ask.get("why") or "")
-    if ask.get("kind") == "execute" and m:
-        cmds = [c.strip() for c in m.group(1).split(",") if c.strip()]
-        return "adds " + ", ".join(f"Shell({c})" for c in cmds) + " to Cursor's allowlist, for every such command"
-    return "Cursor saves it in its allowlist and stops asking for it"
+# What a Cursor Allow always adds to its allowlist when it can't be said from the request (the terminal's menu only).
+ALWAYS_UNKNOWN = "what Cursor saves in its allowlist for it isn't shown in this request"
+
+
+def always_scope(ask, option=None):
+    """What Allow always adds to Cursor's allowlist, in words, as cursor-agent 2026.11.17 saves it (its ACP
+    persistAllowlistEntry, requestWebPermission and subagent prompts, each `Kind(value)` in permissions.allow of
+    ~/.cursor/cli-config.json): each command its allowlist lacks for a shell call ("Not in allowlist: gh, jq" ->
+    Shell(gh), Shell(jq): every gh command from then on), the file for a write, an edit or a delete (Write) or a read
+    (Read), the site for a web fetch (WebFetch, its host), the search for a web search (WebSearch), the tool for an
+    MCP call. None when the request doesn't say: the chat's card then offers no Allow always (never a guess)."""
+    kind, why, title = ask.get("kind"), ask.get("why") or "", ask.get("title") or ""
+    v = (ask.get("req") or {}).get("tool_input") or {}
+    name = str((option or {}).get("name") or "")
+    if kind == "execute":
+        m = re.search(r"Not in allowlist:\s*([^\n]+)", why)
+        cmds = [c.strip() for c in m.group(1).split(",") if c.strip()] if m else []
+        return "adds " + ", ".join(f"Shell({c})" for c in cmds) + " to Cursor's allowlist, for every such command" if cmds else None
+    if kind in ("edit", "delete", "move", "read"):
+        m = re.match(r"^(Write|Edit|Delete|Read) `?(.+?)`?$", title)
+        path = (m.group(2) if m else None) or v.get("file_path")
+        if not path:
+            return None
+        if kind == "read" or (m and m.group(1) == "Read"):
+            return f"adds Read({path}) to Cursor's allowlist, for every read of that file"
+        return f"adds Write({path}) to Cursor's allowlist, for every change to that file"
+    if kind == "fetch":
+        m = re.match(r"^Fetch (\S+)", title)
+        host = url_host(v.get("url") or (m.group(1) if m else ""))
+        return f"adds WebFetch({host}) to Cursor's allowlist, for every fetch from that site" if host else None
+    if kind == "search":
+        m = re.match(r"^Web search: (.+)$", title, re.S)
+        term = m.group(1).strip() if m else ""
+        return f"adds WebSearch({term}) to Cursor's allowlist, for that same search" if term else None
+    if kind == "other":
+        # a subagent's web fetch: Cursor names the site in the option itself ("Always allow example.com")
+        m = re.match(r"^Always allow (\S+)$", name)
+        if title == "Allow web fetch?" and m:
+            return f"adds WebFetch({m.group(1)}) to Cursor's allowlist, for every fetch from that site"
+        # an MCP tool: "<server>: <tool>" over its input as JSON (Cursor saves Mcp(<server id>:<tool>))
+        if why.startswith("```json") and re.match(r"^[^:\n]+: \S+$", title):
+            return f"adds this tool ({title}) to Cursor's allowlist, for every call to it"
+    return None
+
+
+def url_host(u):
+    """A URL's host as Cursor's allowlist keeps a site (domain-utils: lower case, no port)."""
+    u = str(u or "").strip()
+    if not u:
+        return None
+    try:
+        h = urllib.parse.urlsplit(u if "://" in u else f"https://{u}").hostname
+    except ValueError:
+        return None
+    return h or None
+
+
+def always_offer(ask):
+    """The chat card's Allow always, for the request file: Cursor's own allow_always option (its exact optionId and
+    name) and what it adds, in words. None when Cursor doesn't offer one or what it adds can't be said."""
+    o = option_for(ask.get("options"), ["allow_always"])
+    oid = o.get("optionId") if o else None
+    if not isinstance(oid, str) or not oid or len(oid) > 200:
+        return None
+    scope = always_scope(ask, o)
+    if not scope:
+        return None
+    return {"option": oid, "name": clip(str(o.get("name") or "Allow always"), 80), "scope": clip(scope, 400)}
 
 
 def how_in_terminal(o):
@@ -657,6 +719,10 @@ class Bridge:
             self.answer(old, [], "Cursor asked it again", stale=True)
         a = {"rpc": m.get("id"), "options": p.get("options") or [], "req": req, "title": title, "why": why,
              "kind": tool.get("kind") or "other", "at": time.time(), "id": None}
+        # Cursor's Allow always, for the card: its exact option and what it adds (only when that can be said)
+        offer = always_offer(a)
+        if offer:
+            req["cursor_always"] = offer
         self.asks.append(a)
         if self.transcript:
             self.transcript.write("permission", call_id=call_id(tool.get("toolCallId")), title=clip(title, 300), detail=clip(why, 300))
@@ -676,7 +742,7 @@ class Bridge:
         lines = [f"\x1b[1;33mCursor asks{f' (1 of {n})' if n > 1 else ''}:\x1b[0m {clip(a['title'], 300)}"] + ([f"  {a['why']}"] if a["why"] else [])
         for i, o in enumerate(a["options"], 1):
             label = o.get("name") or o.get("optionId")
-            scope = always_scope(a) if o.get("kind") == "allow_always" else None
+            scope = (always_scope(a, o) or ALWAYS_UNKNOWN) if o.get("kind") == "allow_always" else None
             lines.append(f"  {i}. {label}" + (f" \x1b[2m({scope})\x1b[0m" if scope else ""))
         keys = ", ".join(str(i) for i in range(1, len(a["options"]) + 1))
         lines.append(f"\x1b[2m  Press {keys or 'Esc'} (Esc or Ctrl+C rejects). A message typed or sent now waits its turn: it never answers this. The chat's card answers it too.\x1b[0m")
@@ -729,7 +795,15 @@ class Bridge:
                         # no decision ("Answer in terminal", or one it can't read): the terminal answers it
                         self.forget(a)
                         continue
-                    if d["behavior"] == "allow":
+                    if d["behavior"] == "allow" and "cursorOption" in d:
+                        # the card's Allow always: only the exact option this request's card offered, still offered
+                        o = self.always_option(a, d.get("cursorOption"))
+                        if o:
+                            self.answer(a, [], None, option=o)
+                        else:
+                            # a card's Allow always that isn't this request's: never allowed (not even once) from here
+                            self.mismatch(a)
+                    elif d["behavior"] == "allow":
                         # the card's Allow is Cursor's Allow once, never always (always changes Cursor's allowlist)
                         self.answer(a, ["allow_once"], None)
                     else:
@@ -748,6 +822,28 @@ class Bridge:
         self.restores = [t for t in self.restores if t > time.time()]
         restore_model_keys(self.cfg, self.cfg_before)
 
+    @staticmethod
+    def always_option(a, oid):
+        """Cursor's allow_always option a card's Allow always names: the one its request offered (cursor_always), still
+        among this request's options. None otherwise (an old card, another request's, one Cursor no longer offers)."""
+        offer = (a.get("req") or {}).get("cursor_always") or {}
+        if not isinstance(oid, str) or not oid or oid != offer.get("option"):
+            return None
+        return next((o for o in a["options"] if o.get("optionId") == oid and o.get("kind") == "allow_always"), None)
+
+    def mismatch(self, a):
+        """A card's answer this request can't take: its card closes saying so, and the terminal's menu answers it."""
+        if a.get("id"):
+            try:
+                p = os.path.join(asks_dir(), "end", a["id"])
+                with open(p + ".tmp", "w") as f:
+                    f.write("Not answered: the card's choice didn't match this request. Answer it in the terminal\n")
+                os.replace(p + ".tmp", p)
+            except OSError:
+                pass
+        self.forget(a)
+        self.say(f"\x1b[2mThe chat's answer didn't match this request: answer it here.\x1b[0m {clip(a['title'], 100)}")
+
     def forget(self, a):
         """Its card's files gone (answered, or left to the terminal)."""
         if a.get("id"):
@@ -758,15 +854,16 @@ class Bridge:
                     pass
             a["id"] = None
 
-    def answer(self, a, kinds, end, words=None, stale=False):
+    def answer(self, a, kinds, end, words=None, stale=False, option=None):
         """Answers one waiting permission, under its own request id, with Cursor's option of the first of kinds
         (none: cancelled). end: how it went, for its card when it wasn't answered there (None: the card answered it
         and says so itself). words: what the person wrote in the chat instead of using the card, which Cursor's reject
-        can't carry: it goes as their next message. stale: Cursor no longer waits on it."""
+        can't carry: it goes as their next message. stale: Cursor no longer waits on it. option: the exact option to
+        pick (one of this request's own), instead of the first of kinds."""
         if a not in self.asks:
             return
         front = a is self.asks[0]
-        o = None if stale else option_for(a["options"], kinds)
+        o = None if stale else option if option is not None and option in a["options"] else option_for(a["options"], kinds)
         outcome = {"outcome": "selected", "optionId": o["optionId"]} if o else {"outcome": "cancelled"}
         self.send({"jsonrpc": "2.0", "id": a["rpc"], "result": {"outcome": outcome}})
         allowed = bool(o) and str(o.get("kind", "")).startswith("allow")
@@ -786,7 +883,7 @@ class Bridge:
         if self.transcript:
             self.transcript.write("permission_done", outcome=result, by=by, option=(o or {}).get("optionId"),
                                   kind=(o or {}).get("kind"), title=clip(a["title"], 300))
-        scope = always_scope(a) if always else None
+        scope = (always_scope(a, o) or ALWAYS_UNKNOWN) if always else None
         word = "No longer asked" if stale else ("Allowed always" if always else "Allowed once") if allowed else "Rejected"
         self.say(f"\x1b[2m{word}{' in the chat' if by == 'chat' else ''}{f' ({scope})' if scope else ''}: {clip(a['title'], 100)}\x1b[0m")
         if words:
@@ -811,7 +908,7 @@ class Bridge:
                 k = int(data)
                 if 1 <= k <= len(a["options"]):
                     o = a["options"][k - 1]
-                    return self.answer(a, [o.get("kind")], how_in_terminal(o))
+                    return self.answer(a, [o.get("kind")], how_in_terminal(o), option=o)
                 return
             if data in ("\x1b", "\x03"):
                 return self.answer(a, ["reject_once", "reject_always"], "Rejected in the terminal")

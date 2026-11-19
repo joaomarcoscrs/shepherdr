@@ -164,3 +164,57 @@ test("a question's previews show on the card and go back with the pick and its n
   expect(d.updatedInput.answers).toEqual({ "Which layout?": "List" });
   expect(d.updatedInput.annotations).toEqual({ "Which layout?": { preview: "- a\n- b", notes: "keep it short" } });
 });
+
+// SHEP-18: Cursor's own Allow always (its bridge's request carries cursor_always) on the web card, last, with what it
+// adds; Allow and Deny keep their numbers, so a page drawn before still means the same.
+const CURSOR = (extra: object = {}) => ({ tool_name: "Bash", tool_input: { command: "gh pr view 1", description: "Not in allowlist: gh" }, cwd: "/x", herdr_agent: "cursor",
+  cursor_always: { option: "allow-always", name: "Allow always", scope: "adds Shell(gh) to Cursor's allowlist, for every such command" }, ...extra });
+const decision = (id: string) => JSON.parse(readFileSync(join(dir, "ans", `${id}.json`), "utf8")).hookSpecificOutput.decision;
+
+test("a Cursor permission offering Allow always: Allow once, Deny, then Allow always with its scope; each answers as picked", async () => {
+  put("c1.100.1", CURSOR());
+  put("c2.100.1", CURSOR());
+  put("c3.100.1", CURSOR());
+  const asks = new Asks();
+  asks.start();
+  const q = new Compat().question(asks.of("c1")[0], "p:sp1");
+  expect(q).toMatchObject({ kind: "Question", always: 2, choices: [{ label: "Allow once" }, { label: "Deny" },
+    { label: "Allow always", description: "adds Shell(gh) to Cursor's allowlist, for every such command." }] });
+  // an alert's buttons never grant it for good: Allow once and Deny only
+  const { quickChoices } = await import("../web/shared/alerts.ts");
+  expect(quickChoices(q)).toEqual([{ label: "Allow once", choice: 0 }, { label: "Deny", choice: 1 }]);
+  await asks.answer("c1.100.1", { choice: 2 });
+  expect(decision("c1.100.1")).toEqual({ behavior: "allow", cursorOption: "allow-always" });
+  expect(readFileSync(join(dir, "end", "c1.100.1"), "utf8")).toBe("Allowed always on the web\n");
+  // Allow (once) and Deny as before: no cursorOption
+  await asks.answer("c2.100.1", { choice: 0 });
+  expect(decision("c2.100.1")).toEqual({ behavior: "allow" });
+  await asks.answer("c3.100.1", { choice: 1 });
+  expect(decision("c3.100.1").behavior).toBe("deny");
+});
+
+test("no Allow always without Cursor's offer: Claude's, an absent or broken cursor_always, a plan; choice 2 there denies", async () => {
+  put("d1.100.1", CURSOR({ herdr_agent: undefined }));                  // Claude Code's hook never carries it
+  put("d2.100.1", CURSOR({ cursor_always: undefined }));                // Cursor offered none, or its scope can't be said
+  put("d3.100.1", CURSOR({ cursor_always: { option: "allow-always", name: "Allow always" } }));   // no scope: none
+  put("d4.100.1", { ...CURSOR(), tool_name: "ExitPlanMode", tool_input: { plan: "1. Do it" } });
+  const asks = new Asks();
+  asks.start();
+  for (const t of ["d1", "d2", "d3"]) {
+    const q = new Compat().question(asks.of(t)[0], "p:sp1");
+    expect(q.always).toBeUndefined();
+    expect(q.choices).toEqual([{ label: "Allow" }, { label: "Deny" }]);
+  }
+  expect(new Compat().question(asks.of("d4")[0], "p:sp1").choices).toEqual([{ label: "Approve" }, { label: "Keep planning" }]);
+  await asks.answer("d1.100.1", { choice: 2 });
+  expect(decision("d1.100.1").behavior).toBe("deny");
+  expect(decision("d1.100.1").cursorOption).toBeUndefined();
+});
+
+test("a Cursor request too long for the card is never allowed always from the web", async () => {
+  put("e1.100.1", CURSOR({ tool_input: { command: Array.from({ length: 2100 }, (_, i) => `echo ${i}`).join("\n") } }));
+  const asks = new Asks();
+  asks.start();
+  await expect(asks.answer("e1.100.1", { choice: 2 })).rejects.toThrow(/terminal/);
+  expect(existsSync(join(dir, "ans", "e1.100.1.json"))).toBe(false);
+});

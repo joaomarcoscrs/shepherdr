@@ -34,8 +34,27 @@ function app(server) {
   return w ? w[0].toUpperCase() + w.slice(1) : String(server);
 }
 
-// { title, detail, cut, kind: "permission" | "question" | "plan", options?, question? }
+// Cursor's own Allow always for a permission its bridge asks (mods/tasks/bin/herdr_task/cursor_chat.py, SHEP-18): the
+// request's cursor_always, { option (Cursor's exact optionId), name ("Allow always"), scope (what it adds to Cursor's
+// allowlist, in words) }, only when Cursor offers it and what it adds can be said. -> { option, label, scope } or null.
+// Claude Code's and Codex's requests never carry it.
+function cursorAlways(req) {
+  const a = req?.herdr_agent === "cursor" ? req?.cursor_always : null;
+  if (!a || typeof a !== "object") return null;
+  const ok = (v, n) => typeof v === "string" && v.trim() && v.length <= n;
+  if (!ok(a.option, 200) || !ok(a.scope, 400)) return null;
+  return { option: a.option, label: ok(a.name, 80) ? a.name.trim() : "Allow always", scope: a.scope.trim() };
+}
+
+// { title, detail, cut, kind: "permission" | "question" | "plan", options?, question?, always? (Cursor's Allow always:
+// cursorAlways) }
 export function words(req) {
+  const w = wordsOf(req);
+  const always = w.kind === "permission" ? cursorAlways(req) : null;
+  return always ? { ...w, always } : w;
+}
+
+function wordsOf(req) {
   const tool = String(req?.tool_name ?? "");
   const v = req?.tool_input && typeof req.tool_input === "object" ? req.tool_input : {};
   const cwd = String(req?.cwd ?? "");
@@ -77,6 +96,12 @@ export function words(req) {
 
 const out = (decision) => JSON.stringify({ hookSpecificOutput: { hookEventName: "PermissionRequest", decision } });
 export const allow = () => out({ behavior: "allow" });
+// Cursor's Allow always (a card's, only where words(req).always offers it): the decision names Cursor's exact option,
+// which its bridge picks only for the request that offered it. An older bridge reads it as Allow (once), never more.
+// A permission card's choices on the web (service/compat.ts question()): 0 Allow (once), 1 Deny, and this one, Cursor's
+// Allow always, where words(req).always offers it. Never renumbered: a page drawn before an update means the same.
+export const ALWAYS_CHOICE = 2;
+export const allowAlways = (req) => { const a = cursorAlways(req); return a ? out({ behavior: "allow", cursorOption: a.option }) : null; };
 export const deny = (message = "The person declined this in the chat.") => out({ behavior: "deny", message });
 // A question's answer goes back as the tool's input with `answers`; Claude then goes on.
 export const answer = (req, label) => out({ behavior: "allow", updatedInput: { ...(req.tool_input ?? {}), answers: { [String(req.tool_input?.questions?.[0]?.question ?? "")]: label } } });
@@ -120,7 +145,7 @@ export function howAnswered(ask, text, where) {
   if (!d) return null;
   const plan = ask.words.kind === "plan";
   if (d.behavior === "deny" && String(d.message ?? "").startsWith(DISMISSED)) return `Dismissed ${where}`;
-  if (d.behavior === "allow") return `${plan ? "Approved" : d.updatedInput ? "Answered" : "Allowed"} ${where}`;
+  if (d.behavior === "allow") return `${plan ? "Approved" : d.updatedInput ? "Answered" : d.cursorOption ? "Allowed always" : "Allowed"} ${where}`;
   if (ask.words.kind === "questions") return `Left to talk over ${where}`;
   return plan ? `Sent back to planning ${where}` : `Denied ${where}`;
 }

@@ -16,7 +16,7 @@ const { senderName, briefLabel, firstUser, firstKeys, newsTimeline, resolveArtif
 import { mentionedIn } from "../core/send.js";
 import * as MEc from "../core/mentions.js";
 import * as SCc from "../core/screens.js";
-import { codexChoice } from "../core/asks.js";
+import { codexChoice, ALWAYS_CHOICE } from "../core/asks.js";
 const { SCREEN } = SCc as any;
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -281,7 +281,12 @@ export class Compat {
     const detail = w.detail ? `${fence}text\n${w.detail}\n${fence}${w.cut ? cut : ""}` : undefined;
     return w.kind === "plan"
       ? { id: a.id, title: w.title, kind: "Plan", to: key, plan: `${w.detail ?? ""}${w.cut ? cut : ""}`, choices: [{ label: "Approve" }, { label: "Keep planning" }], noteRequiredFor: 1 }
-      : { id: a.id, title: w.title, kind: "Question", to: key, ...(detail ? { plan: detail } : {}), choices: [{ label: "Allow" }, { label: "Deny" }] };
+      : w.always
+        // Cursor's own Allow always (SHEP-18), with what it adds, last: Allow and Deny keep their numbers (ALWAYS_CHOICE),
+        // and an alert's buttons never offer it (`always`)
+        ? { id: a.id, title: w.title, kind: "Question", to: key, ...(detail ? { plan: detail } : {}), always: ALWAYS_CHOICE,
+            choices: [{ label: "Allow once" }, { label: "Deny" }, { label: w.always.label, description: `${w.always.scope}.` }] }
+        : { id: a.id, title: w.title, kind: "Question", to: key, ...(detail ? { plan: detail } : {}), choices: [{ label: "Allow" }, { label: "Deny" }] };
   }
   last: Snapshot | null = null;
   /** chat key -> the files its messages show (a chat's images): the only ones /api/file serves for it */
