@@ -98,3 +98,21 @@ describe("one permission, one toast", () => {
     expect(sounds).toEqual([]);
   });
 });
+
+describe("a task's worker shown in a thread", () => {
+  test("its request gets its toast there (the Inbox leaves a shown thread to it), once across its chats", () => {
+    shared.clear(); sounds.length = 0;
+    const thread: any = Object.create(Chat.prototype);
+    Object.assign(thread, { addr: "t7", asks: [], thread: { terminal: "t7" }, machine: null });
+    thread.myPane = () => "p1";
+    const a = ask("t7.100.42", "npm test");
+    thread.askAlert([a]);
+    // its own tab's chat reads the same request: no second toast, no second sound
+    const own: any = Object.create(Chat.prototype);
+    Object.assign(own, { addr: "t7", asks: [], thread: null, machine: null });
+    own.myPane = () => "p1";
+    own.askAlert([a]);
+    expect(toasts()).toEqual([["ask:t7.100.42", "Run: npm test"]]);
+    expect(sounds).toEqual(["blocked"]);
+  });
+});

@@ -783,8 +783,10 @@ export default class Chat extends View {
   // asked at once are two toasts. Each takes the place of its agent's Needs you (key "need:<terminal>") when that was
   // told first (needAlert()), and one sound goes for them all, none when that Needs you sounded already: once per request.
   askAlert(fresh = []) {
-    // A thread's worker alerts from its own tab's chat or the Inbox, not twice.
-    if (this.thread || !fresh.length) return;
+    // Told already (another chat showing the same agent, e.g. its own tab's and a thread): not twice.
+    const key = (a) => `ask:${a.machine ? `${a.machine}/` : ""}${a.id}`;
+    const news = fresh.filter((a) => !toastUp(key(a)));
+    if (!news.length) return;
     const mine = this.myPane();
     const looking = Boolean(mine) && focused()?.pane === mine && window()?.active;
     const k = terminals().find((x) => x.address === this.addr);
@@ -793,9 +795,9 @@ export default class Chat extends View {
     const told = toastUp(need) || Date.now() - (this.needToldAt?.[this.addr] ?? 0) < 15000;
     if (!told && settings()?.sounds?.enabled !== false) playSound("blocked");
     if (looking) return;
-    for (const a of fresh) {
+    for (const a of news) {
       toast({ title: `${toastWho(k)} · Needs you`, body: a.words?.title ?? "", level: "alert",
-        key: `ask:${a.machine ? `${a.machine}/` : ""}${a.id}`, covers: [need], terminal: this.addr,
+        key: key(a), covers: [need], terminal: this.addr,
         ask: { id: a.id, ...(a.machine ? { machine: a.machine } : {}) }, go: this.toastGo(), action: this.toastAction() });
     }
   }
