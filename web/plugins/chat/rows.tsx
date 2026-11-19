@@ -23,7 +23,7 @@ const { WORDS, clock, initialOf, bandActs, bandOrder, imagesLine, fitThumbs, THU
   questionsBelow: (n: number) => string
   clock: (at?: number) => string
   initialOf: (name: string) => string
-  bandActs: (side: 'user' | 'agent', text?: string, o?: { from?: string | null; fork?: boolean; rewind?: boolean }) => string[]
+  bandActs: (side: 'user' | 'agent', text?: string, o?: { from?: string | null; fork?: boolean; rewind?: boolean; reply?: boolean }) => string[]
   bandOrder: (side: 'user' | 'agent', acts: string[], o?: { time?: boolean; react?: boolean }) => string[]
   imagesLine: (n: number) => string
   fitThumbs: (sizes: ({ w: number; h: number } | null)[], width?: number) => { boxes: { w: number; h: number }[]; h: number }
