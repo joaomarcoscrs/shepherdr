@@ -24,7 +24,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, TextareaState, Textarea, Scrollbar, VirtualListScrollHandle, TextView, v_virtual_list, InputState, Input } from "gpui-base";
-import { focused, props, run, theme, home, hc, exec, shared, setShared, watchFolder, window, settings, playSound, notify, appHome, readTextFile, writeTextFile, nextCommand, openOverlay, knownAgents, machines, layout } from "herdr";
+import { focused, props, run, theme, home, hc, exec, shared, setShared, watchFolder, window, settings, playSound, notify, appHome, readTextFile, nextCommand, openOverlay, knownAgents, machines, layout } from "herdr";
 import { agents, panes, terminals, spaces, inRender } from "./live.js";
 import { chatPane, chatLabel } from "./core/spaces.js";
 import * as fs from "fs/promises";
@@ -42,7 +42,8 @@ import { asPerson } from "./core/person.js";
 import { historyLines } from "./core/mouse-leak.js";
 import { AskCards, linkCtl } from "./cards.js";
 import * as strips from "./strips.js";
-import { button, red, green, amber, H, RADIUS, TEXT, toast, toastWho, plainError } from "./ui.js";
+import { button, red, green, amber, H, RADIUS, TEXT, toast, toastUp, toastWho, plainError } from "./ui.js";
+import { answerAsk } from "./answers.js";
 import { openViewer, noteChatArea } from "./artview.js";
 import { KEY_HOLDER, holdKeys, keysElsewhere, dialogHolds, liveHolder } from "./keyholder.js";
 import { SecretCards } from "./secret-card.js";
@@ -179,13 +180,9 @@ const threadOf = (terminal) => Object.entries(threads()).find(([, v]) => v?.term
 // How a card's answer went, for its quiet line ("Allowed in the chat"); null for no decision
 // (the terminal asks instead).
 
-// An answer to a waiting hook (ask-hook.sh prints it as Claude's decision), the one way every
-// copy of a card delivers. First how it went (the hook's end/<id>), for the ask's other copies:
-// they read it once the request is gone.
-async function answerAsk(dir, id, text, how) {
-  if (how) await writeTextFile(`${dir}/end/${id}`, `${how}\n`, null).catch(() => {});
-  await writeTextFile(`${dir}/ans/${id}.json`, text, null).catch(() => {});
-}
+// An answer to a waiting hook (ask-hook.sh prints it as Claude's decision): lib/answers.js, the one way every copy of a
+// card delivers (a permission's toast too), first answer wins; how it went (the hook's end/<id>) goes with it, for the
+// ask's other copies: they read it once the request is gone.
 // Another machine's asks (SHEP-139), as the service reads and answers them (service/asks.ts):
 // each request there still waiting for this terminal ($1) whose hook lives, one line each ("req",
 // its id, its JSON), then how each id given after it ended ("end", its id, the hook's words).
@@ -687,11 +684,11 @@ export default class Chat extends View {
     for (;;) {
       if (!this.addr) { await cx.sleep(3000); continue; }
       if (this.machine) {
-        await this.readRemoteAsks(cx).catch(() => {});
+        await this.askRead(cx).catch(() => {});
         await cx.sleep(3000);
         continue;
       }
-      await this.readAsks(cx);
+      await this.askRead(cx);
       // One watch at a time, as for the log.
       this.askWatch ??= watchFolder(`${this.askDir}/req`).finally(() => { this.askWatch = null; });
       await Promise.race([this.askWatch, cx.sleep(5000)]);
@@ -714,19 +711,19 @@ export default class Chat extends View {
     }
     const kept = this.asks.filter((a) => reqs.has(a.id));
     for (const a of this.asks.filter((a) => !reqs.has(a.id))) this.askEnded(a, ends.get(a.id) || "No longer waiting");
-    let added = false;
+    const fresh = [];
     for (const [id, text] of reqs) {
       if (kept.some((a) => a.id === id)) continue;
       let req = null;
       try { req = JSON.parse(text); } catch {}
       const w = req ? words(req) : { kind: "permission", title: "Claude asks for something the chat can't read", detail: "", unread: true };
       kept.push({ id, req, words: w, machine });
-      added = true;
+      fresh.push(kept[kept.length - 1]);
     }
-    if (added || kept.length !== this.asks.length) {
+    if (fresh.length || kept.length !== this.asks.length) {
       this.asks = kept;
       this.cards.keep(kept.map((a) => a.id));
-      if (added) this.askAlert();
+      if (fresh.length) this.askAlert(fresh);
       cx.notify();
     }
   }
@@ -743,7 +740,7 @@ export default class Chat extends View {
       const how = (await readTextFile(`${this.askDir}/end/${a.id}`).catch(() => null))?.trim();
       this.askEnded(a, how || "No longer waiting");
     }
-    let added = false;
+    const fresh = [];
     for (const id of ids) {
       if (kept.some((a) => a.id === id)) continue;
       const text = await readTextFile(`${this.askDir}/req/${id}.json`).catch(() => null);
@@ -752,29 +749,70 @@ export default class Chat extends View {
       // Unreadable here: it can only be allowed in the terminal.
       const w = req ? words(req) : { kind: "permission", title: "Claude asks for something the chat can't read", detail: "", unread: true };
       kept.push({ id, req, words: w });
-      added = true;
+      fresh.push(kept[kept.length - 1]);
     }
-    if (added || kept.length !== this.asks.length) {
+    if (fresh.length || kept.length !== this.asks.length) {
       this.asks = kept;
       this.cards.keep(kept.map((a) => a.id));
-      if (added) this.askAlert();
+      if (fresh.length) this.askAlert(fresh);
       cx.notify();
     }
   }
 
-  // A new ask: the agent waits on the person, as when it's blocked.
-  askAlert() {
+  // One read of this agent's requests at a time (the loop's and a Needs you's: needAlert()), so a request is added,
+  // and told, once.
+  askRead(cx) {
+    return this.askReading ??= (this.machine ? this.readRemoteAsks(cx) : this.readAsks(cx)).finally(() => { this.askReading = null; });
+  }
+
+  // Where a toast about this chat's agent goes: this chat, in its space and tab (mods/toasts go()); none when it shows
+  // nowhere.
+  toastGo() {
+    const mine = this.myPane();
+    const tab = mine && panes().find((p) => p.pane === mine)?.tab;
+    return tab ? { tab, pane: mine } : undefined;
+  }
+
+  // New asks: the agent waits on the person, as when it's blocked. One toast per request (key "ask:<id>", carrying the
+  // request's id only: mods/toasts reads it and offers its card's choices when they fit), never folded together: two
+  // asked at once are two toasts. Each takes the place of its agent's Needs you (key "need:<terminal>") when that was
+  // told first (needAlert()), and one sound goes for them all, none when that Needs you sounded already: once per request.
+  askAlert(fresh = []) {
     // A thread's worker alerts from its own tab's chat or the Inbox, not twice.
-    if (this.thread) return;
+    if (this.thread || !fresh.length) return;
     const mine = this.myPane();
     const looking = Boolean(mine) && focused()?.pane === mine && window()?.active;
     const k = terminals().find((x) => x.address === this.addr);
     if (assistant(k) && !notifies(k, "need")) return;
-    if (settings()?.sounds?.enabled !== false) playSound("blocked");
+    const need = `need:${this.addr}`;
+    const told = toastUp(need) || Date.now() - (this.needToldAt?.[this.addr] ?? 0) < 15000;
+    if (!told && settings()?.sounds?.enabled !== false) playSound("blocked");
     if (looking) return;
-    const tab = mine && panes().find((p) => p.pane === mine)?.tab;
-    toast({ title: `${toastWho(k)} · Needs you`, body: this.asks[0]?.words.title ?? "", level: "alert",
-      action: tab ? { name: "tab.select", args: { id: tab } } : undefined });
+    for (const a of fresh) {
+      toast({ title: `${toastWho(k)} · Needs you`, body: a.words?.title ?? "", level: "alert",
+        key: `ask:${a.machine ? `${a.machine}/` : ""}${a.id}`, covers: [need], terminal: this.addr,
+        ask: { id: a.id, ...(a.machine ? { machine: a.machine } : {}) }, go: this.toastGo() });
+    }
+  }
+
+  // Blocked: told once per request. A request this chat holds (its card) was told by askAlert(); one the agent made a
+  // moment ago is read first, whichever came first (its status or its request's file), so this Needs you is told only
+  // when no request explains it (a question asked in words, a prompt only its terminal shows).
+  needAlert(cx) {
+    if (this.asks.length) return;
+    const addr = this.addr;
+    cx.timer.after(0, (cx) => cx.spawn(async (cx) => {
+      await this.askRead(cx).catch(() => {});
+      if (this.addr !== addr || this.asks.length || this.status() !== "blocked") return;
+      const k = terminals().find((x) => x.address === addr);
+      const mine = this.myPane();
+      const looking = Boolean(mine) && focused()?.pane === mine && window()?.active;
+      if (settings()?.sounds?.enabled !== false) playSound("blocked");
+      (this.needToldAt ??= {})[addr] = Date.now();
+      if (looking) return;
+      toast({ title: `${toastWho(k)} · Needs you`, body: this.asking() ?? k?.title ?? "", level: "alert",
+        key: `need:${addr}`, terminal: addr, go: this.toastGo() });
+    }));
   }
 
   // An ask closed: its quiet line. Questions have theirs from the log already (log.js "ask").
@@ -4330,13 +4368,15 @@ export default class Chat extends View {
     if (st !== "blocked" && !(st === "done" && !looking)) return;
     // An Assistant follows its space's Notify (notify.js): a new reply only on All, nothing on Off.
     if (assistant(k) && !notifies(k, st === "done" ? "message" : "need")) return;
+    // Needs you: once per request, its own toast when it has one (needAlert()).
+    if (st === "blocked") { this.needAlert(cx); return; }
     if (settings()?.sounds?.enabled !== false) playSound(st);
     if (looking) return;
     const tab = panes().find((p) => p.pane === mine)?.tab;
     toast({
-      title: `${toastWho(k)} · ${st === "blocked" ? "Needs you" : "Finished"}`,
-      body: (st === "blocked" ? this.asking() : null) ?? k.title ?? "",
-      level: st === "blocked" ? "alert" : "success",
+      title: `${toastWho(k)} · Finished`,
+      body: k.title ?? "",
+      level: "success",
       action: tab ? { name: "tab.select", args: { id: tab } } : undefined,
     });
   }
