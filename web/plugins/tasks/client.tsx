@@ -343,7 +343,7 @@ function agentNeeds(snap: Snapshot, chips: string[]): AgentNeed[] {
     const p = snap.places.find((x) => x.id === n.place)
     // why, in the window's words (core/needs.js REASONS, reqReason): a plan, a permission's own words, a question
     const q = n.question
-    const why = q ? (q.kind === 'Plan' ? REASONS.plan : fit(q.title) || (q.choices?.[0]?.label === 'Allow' ? REASONS.permission : REASONS.question))
+    const why = q ? (q.kind === 'Plan' ? REASONS.plan : fit(q.title) || (/^Allow( once)?$/.test(q.choices?.[0]?.label ?? '') ? REASONS.permission : REASONS.question))
       : n.secret ? fit(`Wants the secret ${n.secret.name}`) : REASONS.question
     // an agent's item: its name (a space's agent is its Assistant), where it is: its machine and space
     return { id: n.id, chat: n.chat, who: 'Assistant', why, where: where(p?.machine, p?.name), space: p?.name }

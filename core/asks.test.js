@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { codexChoice, codexQuestions, codexOnScreen, codexSteps, words, howAnswered, allow, dismiss } from "./asks.js";
+import { codexChoice, codexQuestions, codexOnScreen, codexSteps, words, howAnswered, allow, allowAlways, dismiss, ALWAYS_CHOICE } from "./asks.js";
 
 // request_user_input's arguments as Codex 0.163 logs them (a made-up question)
 const ARGS = JSON.stringify({ questions: [
@@ -60,4 +60,30 @@ test("a Codex approval reads as Claude's: its command, allowed or dismissed in t
   expect(howAnswered({ words: w }, dismiss("permission"), "on the web")).toBe("Dismissed on the web");
   // Codex refuses an answer that rewrites its input: a permission's allow has none
   expect(JSON.parse(allow()).hookSpecificOutput.decision).toEqual({ behavior: "allow" });
+});
+
+// SHEP-18: Cursor's own Allow always, only where its bridge's request offers it with what it adds
+test("words() carries Cursor's Allow always only for a Cursor permission whose offer is whole", () => {
+  const base = { tool_name: "Bash", tool_input: { command: "gh pr view 1" }, herdr_agent: "cursor" };
+  const offer = { option: "allow-always", name: "Allow always", scope: "adds Shell(gh) to Cursor's allowlist, for every such command" };
+  expect(words({ ...base, cursor_always: offer }).always).toEqual({ option: "allow-always", label: "Allow always", scope: offer.scope });
+  expect(words({ ...base, cursor_always: { ...offer, name: undefined } }).always.label).toBe("Allow always");
+  for (const bad of [undefined, null, "allow-always", { ...offer, option: "" }, { ...offer, option: 7 }, { ...offer, scope: " " }, { ...offer, option: "x".repeat(201) }])
+    expect(words({ ...base, cursor_always: bad }).always).toBeUndefined();
+  // Claude Code's hook (no herdr_agent), another agent, a plan: never
+  expect(words({ ...base, herdr_agent: undefined, cursor_always: offer }).always).toBeUndefined();
+  expect(words({ ...base, herdr_agent: "codex", cursor_always: offer }).always).toBeUndefined();
+  expect(words({ ...base, tool_name: "ExitPlanMode", tool_input: { plan: "x" }, cursor_always: offer }).always).toBeUndefined();
+});
+
+test("allowAlways() names Cursor's exact option; howAnswered says Allowed always", () => {
+  const req = { tool_name: "Bash", tool_input: { command: "gh" }, herdr_agent: "cursor", cursor_always: { option: "allow-always", scope: "adds Shell(gh)" } };
+  const text = allowAlways(req);
+  expect(JSON.parse(text).hookSpecificOutput).toEqual({ hookEventName: "PermissionRequest", decision: { behavior: "allow", cursorOption: "allow-always" } });
+  expect(allowAlways({ ...req, cursor_always: undefined })).toBeNull();
+  expect(allowAlways({ ...req, herdr_agent: undefined })).toBeNull();
+  const ask = { words: words(req) };
+  expect(howAnswered(ask, text, "in the chat")).toBe("Allowed always in the chat");
+  expect(howAnswered(ask, allow(), "in the chat")).toBe("Allowed in the chat");
+  expect(ALWAYS_CHOICE).toBe(2);
 });

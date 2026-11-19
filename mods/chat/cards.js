@@ -11,7 +11,7 @@
 
 import { div } from "gpui-kit";
 import { InputState } from "gpui-base";
-import { allow, deny, answer, answers, annotationsOf, chatAbout, dismiss, release } from "./core/asks.js";
+import { allow, allowAlways, deny, answer, answers, annotationsOf, chatAbout, dismiss, release } from "./core/asks.js";
 
 // A card's first strip. opts: { who ("Claude", "HERD-12"), asks (false: what follows `who`
 // instead, e.g. "Kept"), dot (its color; default red), links ([ctl] at the right) }.
@@ -58,11 +58,19 @@ export class AskCards {
         fn: (cx) => this.host.reply(ask, answer(ask.req, o.label), cx) }));
     } else {
       const ctls = [];
+      // Cursor's own Allow always (SHEP-18), offered where its terminal menu offers it: then Allow is Allow once
+      const always = !w.unread && w.kind === "permission" && w.always ? allowAlways(ask.req) : null;
       // Always answerable here; only a request the chat couldn't read at all goes to the terminal.
-      if (!w.unread) ctls.push({ id: `ask-allow-${id}`, label: w.kind === "plan" ? "Approve" : "Allow", look: "primary", fn: (cx) => this.host.reply(ask, allow(), cx) });
+      if (!w.unread) ctls.push({ id: `ask-allow-${id}`, label: w.kind === "plan" ? "Approve" : always ? "Allow once" : "Allow", look: "primary", fn: (cx) => this.host.reply(ask, allow(), cx) });
       ctls.push({ id: `ask-deny-${id}`, label: w.kind === "plan" ? "Keep planning" : "Deny", look: "secondary",
         fn: (cx) => this.host.reply(ask, w.kind === "plan" ? deny("The person didn't approve this plan yet. Ask them what to change.") : deny(), cx) });
       out.push({ key: "actions", kind: "controls", align: "start", ctls });
+      // apart from the two, under what it adds for good: a click of its own, never the primary
+      if (always) {
+        out.push({ key: "always-scope", kind: "text", tone: "dim", gap: 8, text: `${w.always.label}: ${w.always.scope}.` });
+        out.push({ key: "always", kind: "controls", align: "start", gap: 4,
+          ctls: [{ id: `ask-always-${id}`, label: w.always.label, look: "secondary", fn: (cx) => this.host.reply(ask, always, cx) }] });
+      }
     }
     return out;
   }

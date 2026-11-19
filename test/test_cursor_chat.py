@@ -39,7 +39,8 @@ class CursorChat(unittest.TestCase):
         self.chats = os.path.join(self.dir, "chats")
         self.app = os.path.join(self.dir, "app")
         self.acp = os.path.join(self.dir, "acp.log")
-        self.env = {**os.environ, "HERDR_CURSOR_BIN": fake, "HERDR_CURSOR_CHATS": self.chats, "FAKE_ACP_LOG": self.acp,
+        self.allow = os.path.join(self.dir, "allowlist")   # the stand-in's cli-config permissions.allow (SHEP-18)
+        self.env = {**os.environ, "HERDR_CURSOR_BIN": fake, "HERDR_CURSOR_CHATS": self.chats, "FAKE_ACP_LOG": self.acp, "FAKE_ACP_ALLOW": self.allow,
                     "HERDR_APP_HOME": self.app, "SHEPHERDR_NO_MIGRATE": "1"}
         self.env.pop("HC_TERMINAL_ID", None)
 
@@ -296,6 +297,124 @@ class CursorChat(unittest.TestCase):
         kinds = [x["kind"] for x in self.transcript() if x["type"] == "permission_done"]
         self.assertEqual(kinds, ["allow_once", "allow_always"])
 
+    # ---- Allow always from the chat's card (SHEP-18) ----
+
+    def saved(self):
+        """What the stand-in Cursor saved in its allowlist (Allow always), in order."""
+        try:
+            with open(self.allow) as f:
+                return f.read().split()
+        except OSError:
+            return []
+
+    def test_card_allow_always_picks_cursors_exact_option_and_saves_as_the_terminal(self):
+        """The card offered only Allow (once): João's "always approve" was only in the terminal. The request now carries
+        Cursor's own Allow always, its exact option and what it adds, and the card's answer picks that option of that
+        request: Cursor saves the same as with the terminal's 2."""
+        p = self.start(env={"HC_TERMINAL_ID": "t9"})
+        self.key(p, "run gh pr view 1\n")
+        [(aid, req)] = self.asks(1)
+        self.assertEqual(req["cursor_always"], {"option": "allow-always", "name": "Allow always",
+                                                "scope": "adds Shell(gh) to Cursor's allowlist, for every such command"})
+        self.card(aid, {"behavior": "allow", "cursorOption": "allow-always"})
+        out, err = p.communicate("", timeout=30)
+        self.assertEqual(p.returncode, 0, err)
+        self.assertEqual(self.answered(), {0: {"outcome": "selected", "optionId": "allow-always"}})
+        self.assertEqual(self.saved(), ["Shell(gh)"])
+        done = [x for x in self.transcript() if x["type"] == "permission_done"]
+        self.assertEqual([(x["outcome"], x["by"], x["option"], x["kind"]) for x in done], [("allowed", "chat", "allow-always", "allow_always")])
+        self.assertIn("Allowed always in the chat (adds Shell(gh) to Cursor's allowlist, for every such command): gh pr view 1", out)
+        self.assertEqual(glob.glob(os.path.join(self.app, "data", "chat-asks", "*", aid + "*")), [])
+        # the terminal's own 2 on the same request saves exactly the same
+        os.remove(self.allow)
+        os.remove(self.acp)
+        q = self.start(env={"HC_TERMINAL_ID": "t9"})
+        self.key(q, "run gh pr view 1\n")
+        self.asks(1)
+        self.key(q, "2")
+        out, err = q.communicate("", timeout=30)
+        self.assertEqual(q.returncode, 0, err)
+        self.assertEqual(self.answered(), {0: {"outcome": "selected", "optionId": "allow-always"}})
+        self.assertEqual(self.saved(), ["Shell(gh)"])
+
+    def test_card_allow_once_saves_nothing(self):
+        p = self.start(env={"HC_TERMINAL_ID": "t9"})
+        self.key(p, "run gh pr view 1\n")
+        [(aid, _)] = self.asks(1)
+        self.card(aid, {"behavior": "allow"})
+        out, err = p.communicate("", timeout=30)
+        self.assertEqual(p.returncode, 0, err)
+        self.assertEqual(self.answered(), {0: {"outcome": "selected", "optionId": "allow-once"}})
+        self.assertEqual(self.saved(), [])
+
+    def test_a_card_always_this_request_didnt_offer_is_never_allowed(self):
+        """Another option's id (Allow once's, one Cursor never sent), or Allow always where Cursor offered none: nothing
+        is allowed from the card, not even once; its card closes saying so and the terminal's menu still answers."""
+        for prompt, oid in (("run gh pr view 1", "allow-once"), ("run gh pr view 1", "allow-always-2"), ("plain gh pr view 1", "allow-always")):
+            with self.subTest(prompt=prompt, option=oid):
+                for f in (self.acp, self.allow):
+                    if os.path.exists(f):
+                        os.remove(f)
+                p = self.start(env={"HC_TERMINAL_ID": "t9"})
+                self.key(p, prompt + "\n")
+                [(aid, req)] = self.asks(1)
+                if prompt.startswith("plain"):
+                    self.assertNotIn("cursor_always", req)    # no Allow always offered: the card has none
+                self.card(aid, {"behavior": "allow", "cursorOption": oid})
+                time.sleep(0.8)
+                self.assertEqual(self.answered(), {})
+                with open(os.path.join(self.app, "data", "chat-asks", "end", aid)) as f:
+                    self.assertIn("didn't match", f.read())
+                self.assertEqual(glob.glob(os.path.join(self.app, "data", "chat-asks", "req", aid + ".json")), [])
+                self.key(p, "1")   # Allow once, in the terminal
+                out, err = p.communicate("", timeout=30)
+                self.assertEqual(p.returncode, 0, err)
+                rid = 300 if prompt.startswith("plain") else 0
+                self.assertEqual(self.answered(), {rid: {"outcome": "selected", "optionId": "allow-once"}})
+                self.assertEqual(self.saved(), [])
+
+    def test_no_card_always_where_what_it_adds_cant_be_said(self):
+        """A shell call whose reason names nothing (Cursor saves nothing then): its terminal menu keeps Allow always,
+        saying it can't tell; the card offers none."""
+        p = self.start(env={"HC_TERMINAL_ID": "t9"})
+        self.key(p, "noreason gh pr view 1\n")
+        [(aid, req)] = self.asks(1)
+        self.assertNotIn("cursor_always", req)
+        self.key(p, "3")
+        out, err = p.communicate("", timeout=30)
+        self.assertEqual(p.returncode, 0, err)
+        self.assertIn("2. Allow always \x1b[2m(what Cursor saves in its allowlist for it isn't shown in this request)", out)
+
+    def test_two_asks_at_once_each_card_always_or_once_its_own(self):
+        """Two at once: the fetch's card allowed always, the shell call's once; each answered under its own request id
+        with its own option, and only the fetch's site saved."""
+        p = self.start(env={"HC_TERMINAL_ID": "t9"})
+        self.key(p, "both gh pr view 1\n")
+        (fetch_id, fetch), (shell_id, shell) = self.asks(2)
+        self.assertEqual(fetch["cursor_always"]["scope"], "adds WebFetch(example.com) to Cursor's allowlist, for every fetch from that site")
+        self.assertEqual(shell["cursor_always"]["scope"], "adds Shell(gh) to Cursor's allowlist, for every such command")
+        self.card(shell_id, {"behavior": "allow"})
+        self.card(fetch_id, {"behavior": "allow", "cursorOption": "allow-always"})
+        out, err = p.communicate("", timeout=30)
+        self.assertEqual(p.returncode, 0, err)
+        self.assertEqual(self.answered(), {100: {"outcome": "selected", "optionId": "allow-always"}, 101: {"outcome": "selected", "optionId": "allow-once"}})
+        self.assertEqual(self.saved(), ["WebFetch(example.com)"])
+        self.assertIn("FETCH:allow-always SHELL:allow-once", [x for x in self.transcript() if x["type"] == "agent"][0]["text"])
+
+    def test_a_late_card_answer_for_a_request_cursor_gave_up_on_does_nothing(self):
+        p = self.start(env={"HC_TERMINAL_ID": "t9"})
+        self.key(p, "drop gh pr view 1\n", pause=1.5)
+        self.assertEqual(glob.glob(os.path.join(self.app, "data", "chat-asks", "req", "*")), [])
+        ends = glob.glob(os.path.join(self.app, "data", "chat-asks", "end", "t9.*"))
+        self.assertEqual(len(ends), 1)
+        aid = os.path.basename(ends[0])
+        self.card(aid, {"behavior": "allow", "cursorOption": "allow-always"})
+        time.sleep(0.8)
+        out, err = p.communicate("", timeout=30)
+        self.assertEqual(p.returncode, 0, err)
+        self.assertEqual([o for o in self.answered().values() if o.get("optionId")], [])
+        self.assertEqual(self.saved(), [])
+
     def test_a_paste_enter_or_reports_never_answer_and_a_message_waits(self):
         """A message sent while it asks (hc's paste, then Enter) once rejected the permission and was lost, and a
         pasted digit could pick an option: now the words wait their turn and only a key of its own answers."""
@@ -394,3 +513,73 @@ class Revive(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AlwaysScope(unittest.TestCase):
+    """What the card says Allow always adds, for each request Cursor's ACP server sends (cursor-agent 2026.11.17's
+    formatOperation, requestWebPermission and subagent prompts), as it saves it; none where the request can't say."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.dont_write_bytecode = True
+        sys.path.insert(0, os.path.join(ROOT, "mods", "tasks", "bin"))
+        from herdr_task import cursor_chat
+        cls.cc = cursor_chat
+
+    def offer(self, tool, options=None):
+        cc = self.cc
+        req = cc.hook_request(tool, "/w", "s")
+        a = {"options": options or [{"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
+                                    {"optionId": "allow-always", "name": "Allow always", "kind": "allow_always"},
+                                    {"optionId": "reject-once", "name": "Reject", "kind": "reject_once"}],
+             "req": req, "title": cc.strip_ticks(tool.get("title")) or req["tool_name"],
+             "why": req["tool_input"].get("description") or req["tool_input"].get("why") or "", "kind": tool.get("kind") or "other"}
+        o = cc.always_offer(a)
+        return o["scope"] if o else None
+
+    def test_each_kind(self):
+        text = lambda t: [{"type": "content", "content": {"type": "text", "text": t}}]
+        cases = [
+            ({"title": "`gh pr view 1 | jq .`", "kind": "execute", "content": text("Not in allowlist: gh, jq")},
+             "adds Shell(gh), Shell(jq) to Cursor's allowlist, for every such command"),
+            ({"title": "`git commit -m x`", "kind": "execute", "content": text("Not in allowlist: git commit")},
+             "adds Shell(git commit) to Cursor's allowlist, for every such command"),
+            ({"title": "Write /w/new.txt", "kind": "edit", "content": [{"type": "diff", "path": "/w/new.txt", "oldText": None, "newText": "hi"}]},
+             "adds Write(/w/new.txt) to Cursor's allowlist, for every change to that file"),
+            ({"title": "Edit `/w/a.py`", "kind": "edit", "content": [{"type": "diff", "path": "/w/a.py", "oldText": "a", "newText": "b"}]},
+             "adds Write(/w/a.py) to Cursor's allowlist, for every change to that file"),
+            ({"title": "Delete `/w/old.txt`", "kind": "edit"}, "adds Write(/w/old.txt) to Cursor's allowlist, for every change to that file"),
+            ({"title": "Read `/etc/hosts`", "kind": "read"}, "adds Read(/etc/hosts) to Cursor's allowlist, for every read of that file"),
+            ({"title": "Fetch https://Docs.Example.com:8443/a?b", "kind": "fetch"},
+             "adds WebFetch(docs.example.com) to Cursor's allowlist, for every fetch from that site"),
+            ({"title": "Web search: cursor acp permissions", "kind": "search"},
+             "adds WebSearch(cursor acp permissions) to Cursor's allowlist, for that same search"),
+            ({"title": "github: create_issue", "kind": "other", "content": text('```json\n{"title": "x"}\n```')},
+             "adds this tool (github: create_issue) to Cursor's allowlist, for every call to it"),
+        ]
+        for tool, want in cases:
+            with self.subTest(title=tool["title"]):
+                self.assertEqual(self.offer(tool), want)
+
+    def test_a_subagent_fetch_names_its_site_in_the_option(self):
+        opts = [{"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
+                {"optionId": "allow-always", "name": "Always allow example.com", "kind": "allow_always"},
+                {"optionId": "reject-once", "name": "Reject", "kind": "reject_once"}]
+        tool = {"title": "Allow web fetch?", "kind": "other", "content": [{"type": "content", "content": {"type": "text", "text": "URL: https://example.com/x"}}]}
+        self.assertEqual(self.offer(tool, opts), "adds WebFetch(example.com) to Cursor's allowlist, for every fetch from that site")
+
+    def test_none_where_it_cant_be_said_or_isnt_offered(self):
+        cases = [
+            {"title": "`echo hi`", "kind": "execute"},                                         # no "Not in allowlist"
+            {"title": "`x`", "kind": "execute", "content": [{"type": "content", "content": {"type": "text", "text": "Parser failed to parse command (possible bypass)"}}]},
+            {"title": "Web search: ", "kind": "search"},                                       # Cursor saves nothing
+            {"title": "Fetch ", "kind": "fetch"},
+            {"title": "Allow web search?", "kind": "other"},                                   # a subagent's: never offered
+            {"title": "Unknown operation", "kind": "other"},
+            {"title": "Something", "kind": "think"},
+        ]
+        for tool in cases:
+            with self.subTest(title=tool["title"]):
+                self.assertIsNone(self.offer(tool))
+        once = [{"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"}, {"optionId": "reject-once", "name": "Reject", "kind": "reject_once"}]
+        self.assertIsNone(self.offer({"title": "`gh x`", "kind": "execute", "content": [{"type": "content", "content": {"type": "text", "text": "Not in allowlist: gh"}}]}, once))

@@ -11,7 +11,7 @@ import * as A from "../core/asks.js";
 import type { Hub } from "./hub.ts";
 import { note as noteUsage } from "./usage.ts";
 
-const { words, allow, deny, answers, annotationsOf, howAnswered, release, chatAbout, dismiss } = A as any;
+const { words, allow, allowAlways, deny, answers, annotationsOf, howAnswered, release, chatAbout, dismiss, ALWAYS_CHOICE } = A as any;
 const dir = () => join(appHome(), "data", "chat-asks");
 const ID = /^[\w.-]+$/;
 const MACHINE = /^[\w.-]+$/;
@@ -181,6 +181,11 @@ export class Asks {
       // never allowed unseen: a request too long for the card is answered where it shows whole, the terminal
       if (w.cut) throw new Error("Too long to show here in full: answer it in the terminal.");
       out = allow();
+    } else if (a.choice === ALWAYS_CHOICE && w.kind === "permission" && w.always) {
+      // Cursor's Allow always, by its exact option for this request (core/asks.js allowAlways)
+      if (w.cut) throw new Error("Too long to show here in full: answer it in the terminal.");
+      out = allowAlways(ask.req);
+      if (!out) throw new Error("This request doesn't offer Allow always here: answer it in the terminal.");
     }
     else out = deny(a.note?.trim() || (w.kind === "plan" ? "The person didn't approve this plan yet. Ask them what to change." : undefined));
     // As the window's answerAsk(): first how it went (end/<id>, for every other copy of the card), then the answer.
