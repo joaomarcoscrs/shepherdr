@@ -17,7 +17,7 @@ from .agents import (
 )
 from .provider import NUDGE, provider_cut, provider_error, PROVIDER_WAITS
 from .sessions import find_lost_logs, refresh_sessions, session_of
-from .github import (already_merged, BEHIND, CHECKS_NEVER, checks_missing, checks_since, drop_branch, expected_checks, finish, github, mergeable_known, merged_here, needs_approval, note_checks, pr_merged, pr_pending, pr_problem,
+from .github import (already_merged, base_pushes, BEHIND, CHECKS_NEVER, checks_missing, checks_since, drop_branch, expected_checks, finish, github, mergeable_known, merged_here, needs_approval, note_checks, pr_merged, pr_pending, pr_problem,
                      pr_view, pr_wait, queue_entry, queue_merge, tidy_done, tidy_due, update_main, watch_main)
 from .launch import default_space
 from .store import locate, read_list, Store, store_files
@@ -114,6 +114,8 @@ def facts(s, t, report):
         if v.get("state") == "MERGED":
             if at_work(s, t) or holds_open(s, t):
                 return
+            if t.get("existing_pr") and open_pr(t) and (t["state"] != "ready" or v.get("headRefOid") != (t.get("handoff") or {}).get("head")):
+                return  # a moved head or a pending hand-off cannot finish the task
             t["merged"] = True
             watch_main(s, t, (v.get("mergeCommit") or {}).get("oid"))
             if t.get("merge_queued"):
@@ -166,6 +168,8 @@ def facts(s, t, report):
             # Checks that should have started never did: it doesn't merge by itself (the person's Accept still can).
             t["attention"], t["attention_at"] = CHECKS_NEVER, now()
             report["attention"].append(t["id"])
+    elif open_pr(t) and (t.get("existing_pr") or (t.get("own") and base_pushes(s, t))):
+        return  # the task's base is the PR's head; reaching it is a push, not a merge
     elif merged_here(s, t) and not at_work(s, t) and not t.get("kept_open"):
         # #989: reopened after its work merged (kept_open, until its agent says ready): its fix goes on.
         t["merged"] = True

@@ -7217,6 +7217,203 @@ class DeliveryProfiles(unittest.TestCase):
         self.assertNotIn("handoff", self.task(1))
 
 
+class ExistingOpenPR(unittest.TestCase):
+    """A real worktree pushes to its explicit base branch, which is already the head of a PR."""
+    ROBO, HQ = DeliveryProfiles.ROBO, DeliveryProfiles.HQ
+    setUp_auto, run_cmd, task, git = DeliveryProfiles.setUp_auto, DeliveryProfiles.run_cmd, DeliveryProfiles.task, DeliveryProfiles.git
+    setUp = DeliveryProfiles.setUp
+    spaces, settings, briefed = DeliveryProfiles.spaces, DeliveryProfiles.settings, DeliveryProfiles.briefed
+    add, head, commit, ready, verdict = DeliveryProfiles.add, DeliveryProfiles.head, DeliveryProfiles.commit, DeliveryProfiles.ready, DeliveryProfiles.verdict
+    target = "joao/fix/existing-pr"
+
+    def worktree(self):
+        import herdr_task.github as github
+        from unittest import mock
+
+        self.spaces()
+        self.remote = os.path.join(self.tmp, "remote.git")
+        self.github_url = "https://github.com/o/r.git"
+        self.git(self.folder, "init", "-q", "--bare", self.remote)
+        self.git(self.folder, "remote", "add", "origin", self.remote)
+        self.git(self.folder, "switch", "-c", self.target)
+        self.commit(self.folder, "original-pr-work")
+        self.git(self.folder, "push", "origin", self.target)
+        self.git(self.folder, "switch", "main")
+        self.add("Update an existing pull request", space=self.ROBO, base=self.target)
+        wt = os.path.join(self.tmp, "worker")
+        branch = "joao/fix/worker-changes"
+        self.git(self.folder, "worktree", "add", "-q", "-b", branch, wt, self.target)
+        with self.store_mod.Store(self.store_mod.locate(self.folder)) as s:
+            s.find(1).update(state="running", started=self.now - 1000, worktree=wt, branch=branch, start=self.head(wt))
+            s.dirty = True
+        self.briefed(1, self.ROBO)
+        self.git(self.folder, "remote", "set-url", "origin", self.github_url)
+        self.gh_state.update(pr=7, head=self.head(wt))
+        self.pulls = [7]
+        self.pr_base, self.head_repo = "main", "o/r"
+        self.listed_base = None
+        orig_gh = github.gh
+
+        def gh(*args, cwd=None):
+            if args[:2] == ("repo", "view"):
+                self.calls.append(args)
+                return True, "o/r", ""
+            if args[:2] == ("api", "repos/o/r/pulls/7"):
+                self.calls.append(args)
+                return True, json.dumps(self.pull(7)), ""
+            if args[:2] == ("api", "--paginate") and args[2].startswith("repos/o/r/pulls?"):
+                self.calls.append(args)
+                rows = [self.pull(n) for n in self.pulls]
+                if self.listed_base:
+                    for row in rows:
+                        row["base"]["ref"] = self.listed_base
+                return True, "\n".join(json.dumps(row) for row in rows), ""
+            return orig_gh(*args, cwd=cwd)
+
+        for mod in (github, self.delivery):
+            p = mock.patch.object(mod, "gh", gh)
+            p.start()
+            self.addCleanup(p.stop)
+        no_open = mock.patch.object(github, "pr_open", side_effect=AssertionError("Tried to open a second PR"))
+        no_open.start()
+        self.addCleanup(no_open.stop)
+        return wt
+
+    def pull(self, number):
+        st = self.gh_state
+        return {"number": number, "state": st["state"], "html_url": f"https://github.com/o/r/pull/{number}",
+                "head": {"ref": self.target, "sha": st["head"], "repo": {"full_name": self.head_repo}},
+                "base": {"ref": self.pr_base, "repo": {"full_name": "o/r"}},
+                "assignees": [{"login": a} for a in st["assignees"]]}
+
+    def push(self, wt, remote="origin"):
+        self.git(self.folder, "remote", "set-url", remote, self.remote)
+        self.git(wt, "push", remote, f"HEAD:refs/heads/{self.target}")
+        self.git(self.folder, "remote", "set-url", remote, self.github_url)
+        self.gh_state["head"] = self.head(wt)
+
+    def test_already_pushed_runs_delivery_and_accepts_to_awaiting(self):
+        wt = self.worktree()
+        self.commit(wt, "first-fix")
+        self.push(wt)
+        with self.assertRaisesRegex(self.Fail, "waits for Jarbas Local"):
+            self.ready(1)
+        self.assertEqual(self.gh_state["assignees"], ["someone", "joao"])
+        self.verdict(self.head(wt))
+        out = self.ready(1)
+        self.assertEqual((out["state"], out["handoff"]["head"]), ("ready", self.head(wt)))
+        self.assertNotIn("nothing_to_merge", self.task(1))
+        self.assertEqual(self.run_cmd(self.commands.cmd_accept, id="1")["accepted"], "awaiting")
+        self.assertEqual(self.task(1)["awaiting"]["pr"], 7)
+        self.assertEqual(self.git(self.remote, "for-each-ref", "--format=%(refname)", "refs/heads"), f"refs/heads/{self.target}")
+
+    def test_head_movement_requires_another_exact_approval(self):
+        wt = self.worktree()
+        self.commit(wt, "first-fix")
+        self.push(wt)
+        old_head = self.head(wt)
+        self.verdict(old_head)
+        self.ready(1)
+        self.gh_state["head"] = "f" * 40
+        with self.assertRaises(SystemExit):
+            self.run_cmd(self.commands.cmd_accept, id="1")
+        with self.assertRaisesRegex(self.Fail, "must match the task's commit"):
+            self.ready(1, blocked="Review couldn't finish")
+        self.assertEqual(self.task(1)["state"], "running")
+        self.commit(wt, "second-fix")
+        self.push(wt)
+        with self.assertRaisesRegex(self.Fail, "waits for Jarbas Local"):
+            self.ready(1)
+        self.assertIsNone(self.task(1)["handoff"].get("verdict"))
+        self.verdict(self.head(wt))
+        self.ready(1)
+        self.assertEqual(self.run_cmd(self.commands.cmd_accept, id="1")["accepted"], "awaiting")
+
+    def test_wrong_or_ambiguous_target_has_no_assignment_or_handoff(self):
+        wt = self.worktree()
+        self.commit(wt, "first-fix")
+        self.push(wt)
+        self.pulls = [7, 8]
+        with self.assertRaisesRegex(self.Fail, "found 2"):
+            self.ready(1, blocked="Ambiguous target")
+        self.pulls = []
+        with self.assertRaisesRegex(self.Fail, "found 0"):
+            self.ready(1)
+        self.pulls = [7]
+        self.head_repo = "fork/r"
+        with self.assertRaisesRegex(self.Fail, "repository and branches"):
+            self.ready(1)
+        self.head_repo = "o/r"
+        self.listed_base = "stale-base"
+        with self.assertRaisesRegex(self.Fail, "expected repository and branches"):
+            self.ready(1)
+        self.listed_base = None
+        for state in ("closed", "merged", ""):
+            with self.subTest(state=state):
+                self.gh_state["state"] = state
+                with self.assertRaises(self.Fail):
+                    self.ready(1)
+        self.assertEqual(self.gh_state["assignees"], ["someone"])
+        self.assertNotIn("pr", self.task(1))
+
+    def test_wrong_push_remote_and_wrong_push_url_are_refused(self):
+        wt = self.worktree()
+        self.commit(wt, "first-fix")
+        self.git(self.folder, "remote", "add", "other", self.remote)
+        self.push(wt, "other")
+        with self.assertRaisesRegex(self.Fail, "needs to be on origin"):
+            self.ready(1)
+        self.git(self.folder, "remote", "remove", "other")
+        self.git(self.folder, "remote", "set-url", "origin", self.remote)
+        # First reset the scratch remote so the next git push records a real update on origin.
+        self.git(self.remote, "update-ref", f"refs/heads/{self.target}", self.task(1)["start"])
+        self.push(wt)
+        self.git(self.folder, "remote", "set-url", "--push", "origin", "git@github.com:wrong/r.git")
+        with self.assertRaisesRegex(self.Fail, "fetch and push URLs"):
+            self.ready(1)
+        self.assertEqual(self.gh_state["assignees"], ["someone"])
+
+    def test_empty_task_that_only_fast_forwards_does_not_adopt(self):
+        wt = self.worktree()
+        self.git(self.folder, "switch", self.target)
+        self.commit(self.folder, "somebody-elses-work")
+        self.push(self.folder)
+        self.git(self.folder, "switch", "main")
+        self.git(wt, "merge", "--ff-only", f"origin/{self.target}")
+        self.assertEqual(self.ready(1)["state"], "ready")
+        self.assertTrue(self.task(1)["nothing_to_merge"])
+        self.assertNotIn("pr", self.task(1))
+        self.assertEqual(self.run_cmd(self.commands.cmd_accept, id="1")["accepted"], "done")
+        self.assertEqual(self.gh_state["assignees"], ["someone"])
+
+    def test_missing_start_cannot_finish_a_detected_existing_pr_update(self):
+        wt = self.worktree()
+        self.commit(wt, "first-fix")
+        self.push(wt)
+        with self.store_mod.Store(self.store_mod.locate(self.folder)) as s:
+            s.find(1).pop("start")
+            s.dirty = True
+        with self.assertRaisesRegex(self.Fail, "verify the task's work"):
+            self.ready(1)
+        self.assertNotIn("pr", self.task(1))
+        self.assertEqual(self.gh_state["assignees"], ["someone"])
+
+    def test_tick_does_not_treat_the_push_as_a_merge(self):
+        from herdr_task.github import own_work
+
+        wt = self.worktree()
+        self.commit(wt, "first-fix")
+        with self.store_mod.Store(self.store_mod.locate(self.folder)) as s:
+            self.assertEqual(own_work(s, s.find(1)), self.head(wt))
+        self.push(wt)
+        self.git(self.folder, "branch", "-f", self.target, f"origin/{self.target}")
+        with self.store_mod.Store(self.store_mod.locate(self.folder)) as s:
+            self.tick.facts(s, s.find(1), {"done": []})
+        self.assertEqual(self.task(1)["state"], "running")
+        with self.assertRaisesRegex(self.Fail, "waits for Jarbas Local"):
+            self.ready(1)
+
+
 class AwaitingReview(unittest.TestCase):
     """SHEP-15: the person's Accept of an Open PR hand-off whose pull request is open moves it to Awaiting review (an
     ongoing state), its review a signal read on GitHub by the tick, until GitHub says it merged or the person marks it

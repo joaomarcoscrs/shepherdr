@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+from urllib.parse import urlencode
 
 from .base import Fail, GH, git, hc_json, now, run, STORE
 from .agents import agent_running, detail, live_agents, live_helpers, mid_turn_agents
@@ -71,6 +72,98 @@ def released(s):
 def remote_of(main):
     names = git(main, "remote")[1].split()
     return "origin" if "origin" in names else (names[0] if names else "origin")
+
+
+def base_pushes(s, task):
+    """Local evidence that this task pushed work to its explicitly selected base branch.
+
+    A task can fast-forward to its base with no work of its own. Require a work commit in the
+    task branch's reflog and a matching push in a remote-tracking reflog. A fetch is not a push.
+    This also works for tasks started before existing PR handoffs were recorded on the task.
+    """
+    base, branch, start = (task.get(k) for k in ("base", "branch", "start"))
+    if not (base and branch and base != branch and task.get("base_set")
+            and task.get("base_by") != "space" and not task.get("pr")):
+        return {}
+    folder = s.loc["folder"]
+    remotes = git(folder, "remote")[1].split()
+    pushed = {}
+    for remote in remotes:
+        ok, out, _ = git(folder, "reflog", "show", "--format=%H%x09%gs", f"refs/remotes/{remote}/{base}")
+        if ok:
+            pushed[remote] = [line.split("\t", 1)[0] for line in out.splitlines() if line.endswith("\tupdate by push")]
+    if not any(pushed.values()):
+        return {}
+    ok, out, _ = git(folder, "reflog", "show", "--format=%H%x09%gs", f"refs/heads/{branch}")
+    if not ok:
+        return {}
+    changes = set()
+    for line in out.splitlines():
+        sha, _, action = line.partition("\t")
+        if (sha != start and action.startswith(("commit", "cherry-pick", "rebase (finish)", "am", "merge "))
+                and not action.endswith(": Fast-forward")):
+            changes.add(sha)
+    matched = {}
+    for remote, tips in pushed.items():
+        for sha in tips:
+            if sha in changes and (not start or git(folder, "merge-base", "--is-ancestor", start, sha)[0]):
+                matched[remote] = sha
+                break
+    return matched
+
+
+def existing_pr_repo(s, remotes):
+    """The selected GitHub repository must agree with both URLs of the repo's task remote."""
+    folder = s.loc["folder"]
+    remote = remote_of(folder)
+    if remotes != [remote]:
+        raise Fail(f"The push to the task's base branch needs to be on {remote}, its task remote.")
+    ok, repo, _ = gh("repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner", cwd=folder)
+    if not ok or not re.fullmatch(r"[\w.-]+/[\w.-]+", repo):
+        raise Fail("Couldn't verify the task repository on GitHub just now.")
+    for flag in ([], ["--push"]):
+        ok, urls, _ = git(folder, "remote", "get-url", "--all", *flag, remote)
+        match = re.fullmatch(r"(?:https://github\.com/|ssh://git@github\.com/|git@github\.com:)([^/\s]+/[^/\s]+)", urls)
+        if not ok or not match or match[1].removesuffix(".git").lower() != repo.lower():
+            raise Fail(f"The fetch and push URLs of {remote} must both point to {repo} for an existing PR hand-off.")
+    return repo
+
+
+def matches_existing_pr(repo, pr, target):
+    """The REST payload confirms both repos, both branches and the pinned PR identity."""
+    head, base = pr.get("head"), pr.get("base")
+    if not isinstance(head, dict) or not isinstance(base, dict):
+        return False
+    return (pr.get("number") == target.get("number") and head.get("ref") == target.get("branch")
+            and base.get("ref") == target.get("base") and pr.get("html_url") == target.get("url")
+            and all(isinstance(end.get("repo"), dict) and str(end["repo"].get("full_name")).lower() == repo.lower()
+                    for end in (head, base)))
+
+
+def existing_pr_target(repo, branch):
+    """Discover one open PR from this repo's exact head branch, then pin its identity for direct reads."""
+    query = urlencode({"state": "open", "head": f"{repo.split('/')[0]}:{branch}", "per_page": 100})
+    ok, out, _ = gh("api", "--paginate", f"repos/{repo}/pulls?{query}", "--jq", ".[]")
+    try:
+        candidates = [json.loads(line) for line in out.splitlines()] if ok else None
+    except ValueError:
+        candidates = None
+    if candidates is None:
+        raise Fail(f"Couldn't verify the open pull request for {branch} on GitHub just now.")
+    if len(candidates) != 1:
+        raise Fail(f"Expected one open pull request for {repo}:{branch}, found {len(candidates)}.")
+    pr = candidates[0]
+    if not isinstance(pr, dict):
+        raise Fail(f"GitHub returned incomplete pull request details for {branch}.")
+    number, base = pr.get("number"), pr.get("base")
+    url = f"https://github.com/{repo}/pull/{number}"
+    target = {"repo": repo, "number": number, "branch": branch,
+              "base": base.get("ref") if isinstance(base, dict) else None, "url": pr.get("html_url")}
+    if (type(number) is not int or number < 1 or not target["base"] or target["base"] == branch
+            or str(target["url"]).lower() != url.lower() or pr.get("state") != "open"
+            or not matches_existing_pr(repo, pr, target)):
+        raise Fail(f"Couldn't verify pull request #{number}'s repository and branches for {branch}.")
+    return target
 
 
 def pr_push(s, task, repo):
@@ -574,7 +667,7 @@ def expected_checks(s, task, sha):
     found = None
     for name in out.split() if ok else []:
         if name.endswith((".yml", ".yaml")):
-            said = workflow_checks(git(main, "show", f"{ref}:{WORKFLOWS}/{name}")[1], task.get("base") or "main")
+            said = workflow_checks(git(main, "show", f"{ref}:{WORKFLOWS}/{name}")[1], pr.get("base") or task.get("base") or "main")
             found = "yes" if "yes" in (found, said) else said or found
     if sha:
         pr["expects"] = {"sha": sha, "is": found}
@@ -680,7 +773,7 @@ def watch_main(s, task, sha=None):
     hours (ghnews.main_pass), so the Assistant hears once if it goes red (as Shepherdr)."""
     if not task.get("pr"):
         return
-    base = task.get("base") or "main"
+    base = task["pr"].get("base") or task.get("base") or "main"
     w = s.data.setdefault("main_watch", {}).setdefault(base, {})
     w.update(repo=task["pr"]["repo"], until=now() + MAIN_WATCH_MS, space=task.get("space") or w.get("space"))
     merged = [m for m in w.get("merged") or [] if now() - (m.get("at") or 0) < 24 * 3600000]

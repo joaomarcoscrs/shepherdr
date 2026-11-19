@@ -11,8 +11,8 @@ other than APPROVED are never one. Herdr itself publishes nothing, requests no r
 import json
 import re
 
-from .base import Fail, now
-from .github import gh
+from .base import Fail, git, now
+from .github import existing_pr_repo, existing_pr_target, gh, matches_existing_pr, remote_of
 
 GATES = ("jarbas-local",)
 GATE_NAMES = {"jarbas-local": "Jarbas Local", "none": "No approval asked"}
@@ -32,7 +32,7 @@ def me():
     return _login["v"]
 
 
-def pr_facts(repo, number):
+def pr_facts(repo, number, target=None):
     """The pull request now: {state: open|closed|merged, head, assignees, url}, or None when GitHub couldn't be asked."""
     ok, out, _ = gh("api", f"repos/{repo}/pulls/{int(number)}")
     try:
@@ -40,6 +40,8 @@ def pr_facts(repo, number):
     except ValueError:
         v = None
     if not isinstance(v, dict):
+        return None
+    if target and not matches_existing_pr(repo, v, target):
         return None
     state = "merged" if v.get("merged_at") or v.get("merged") else str(v.get("state") or "").lower()
     return {"state": state, "head": (v.get("head") or {}).get("sha"), "url": v.get("html_url"),
@@ -117,13 +119,41 @@ def handoff_line(t):
     return "; ".join(bits)
 
 
-def handoff_gate(s, t, dv, wt, summary, blocked=None):
+def existing_handoff(s, t, wt, pushed):
+    """Verify the already-pushed task's target and exact head before assigning or reading approval."""
+    target, branch, start, head = t.get("existing_pr"), t.get("branch"), t.get("start"), t.get("head")
+    if not (branch and start and head and head != start
+            and git(wt, "symbolic-ref", "--quiet", "HEAD")[1] == f"refs/heads/{branch}"
+            and git(wt, "merge-base", "--is-ancestor", start, head)[0]):
+        raise Fail("Couldn't verify the task's work on its worktree branch for the existing PR hand-off.")
+    remote = remote_of(s.loc["folder"])
+    repo = existing_pr_repo(s, list(pushed) if pushed else [remote])
+    if target:
+        if repo.lower() != target["repo"].lower() or t.get("base") != target["branch"]:
+            raise Fail("The task's repository or base branch no longer matches its existing pull request.")
+        if not git(wt, "merge-base", "--is-ancestor", target["work"], head)[0]:
+            raise Fail("The worktree no longer contains the task's work on its existing pull request.")
+    else:
+        if pushed.get(remote) != head:
+            raise Fail(f"The task's commit {head[:7]} needs to be pushed to its base branch before hand-off.")
+        target = existing_pr_target(repo, t["base"])
+        target["work"] = head
+    facts = pr_facts(target["repo"], target["number"], target)
+    if not facts or facts["state"] != "open":
+        raise Fail(f"Couldn't verify pull request #{target['number']} is still open on its expected repository and branches.")
+    if facts["head"] != head:
+        raise Fail(f"Pull request #{target['number']}'s head on GitHub must match the task's commit {head[:7]}.")
+    return target, facts
+
+
+def handoff_gate(s, t, dv, wt, summary, blocked=None, *, pushed=()):
     """Open PR's half of ready, for a worktree task with work of its own: its pull request opened (pushed first) and
     assigned, then its approval read for the exact head it says ready at. Returns why ready is refused (the task stays
     Working, t["handoff"] saying where it stands), or None to hand it off. blocked: the agent's why, handing it off
     though no approval came (its review stopped without one)."""
     from .github import github, github_unreachable, pr_open
     h = dict(t.get("handoff") or {})
+    previous_head = h.get("head")
     h.update(review=dv["review"], at=now())
     for k in ("verdict", "comment", "assigned"):
         h.pop(k, None)  # read again for this head: an older head's verdict never stands for it
@@ -135,18 +165,28 @@ def handoff_gate(s, t, dv, wt, summary, blocked=None):
     s.dirty = True
     ref, head = s.ref(t), t.get("head")
     h["head"] = head
+    if (pushed or t.get("existing_pr")) and previous_head != head:
+        h.pop("tries", None)
     fix = (f" If it can't be sorted out, hand it off as blocked: `herdr-task ready {ref} --blocked \"<why>\"` "
            "(the person gets it as blocked, never merged).")
-    repo = github(s)
-    if not repo:
-        why = github_unreachable(s) or "this repo isn't on GitHub (or gh isn't signed in here)"
-        return None if blocked else f"{ref}'s delivery is Open PR, but Herdr can't open its pull request: {why}.{fix}"
-    try:
-        pr = pr_open(s, t, repo, summary)
-    except Fail as e:
-        return None if blocked else f"{ref}'s delivery is Open PR, but its pull request didn't open: {e}{fix}"
+    if pushed or t.get("existing_pr"):
+        try:
+            target, facts = existing_handoff(s, t, wt, pushed)
+        except Fail as e:
+            return str(e)
+        t["existing_pr"] = target
+        pr, repo = target, target["repo"]
+    else:
+        repo = github(s)
+        if not repo:
+            why = github_unreachable(s) or "this repo isn't on GitHub (or gh isn't signed in here)"
+            return None if blocked else f"{ref}'s delivery is Open PR, but Herdr can't open its pull request: {why}.{fix}"
+        try:
+            pr = pr_open(s, t, repo, summary)
+        except Fail as e:
+            return None if blocked else f"{ref}'s delivery is Open PR, but its pull request didn't open: {e}{fix}"
+        facts = pr_facts(repo, pr["number"])
     h.update(pr=pr["number"], url=pr.get("url"), repo=repo)
-    facts = pr_facts(repo, pr["number"])
     if not facts:
         return None if blocked else f"Couldn't read pull request #{pr['number']} on GitHub just now. Run ready again in a moment."
     if facts["state"] == "merged":
@@ -196,19 +236,21 @@ def accept_check(s, t):
     """Before the person takes an Open PR hand-off (Accept): the pull request read again. Returns (error, merged):
     merged by someone meanwhile is fine (done, merged); closed, or its head moved past what was approved, is refused."""
     h = t.get("handoff") or {}
+    target = t.get("existing_pr")
+    if target and (target["number"] != h.get("pr") or target["repo"] != h.get("repo")
+                   or not t.get("worktree") or git(t["worktree"], "rev-parse", "HEAD")[1] != h.get("head")):
+        return "The existing PR hand-off no longer matches the task's worktree. Its agent says ready again first.", False
     if not h.get("pr") or not h.get("repo"):
         return None, False
-    facts = pr_facts(h["repo"], h["pr"])
+    facts = pr_facts(h["repo"], h["pr"], target) if target else pr_facts(h["repo"], h["pr"])
     if not facts:
         return f"Couldn't read pull request #{h['pr']} on GitHub just now; try again.", False
-    if facts["state"] == "merged":
-        return None, True
-    if facts["state"] != "open":
+    if facts["state"] not in ("open", "merged"):
         return f"Pull request #{h['pr']} was closed since it was handed off.", False
-    if facts["head"] != h.get("head"):
+    if (target or facts["state"] == "open") and facts["head"] != h.get("head"):
         return (f"Pull request #{h['pr']} has moved to {str(facts['head'])[:7]} since {str(h.get('head'))[:7]} was handed off"
                 + (" and approved" if h.get("verdict") == "APPROVED" else "") + ": its agent says ready again first."), False
-    return None, False
+    return None, facts["state"] == "merged"
 
 
 def status(t):
@@ -222,7 +264,8 @@ def status(t):
     out["next"] = dv.get("next") or ""
     out["line"] = gate_line({**h, "review": out["review"]})
     if h.get("pr") and h.get("repo"):
-        facts = pr_facts(h["repo"], h["pr"])
+        target = t.get("existing_pr")
+        facts = pr_facts(h["repo"], h["pr"], target) if target else pr_facts(h["repo"], h["pr"])
         if facts:
             out["state"] = facts["state"]
             out["current"] = facts["head"] == h.get("head")

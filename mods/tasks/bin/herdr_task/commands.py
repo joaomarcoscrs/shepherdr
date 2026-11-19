@@ -21,7 +21,7 @@ from .agents import (
     SUMMARY_MAX, WORKING_AGAIN,
 )
 from .sessions import refresh_sessions
-from .github import (already_merged, checks_missing, github_unreachable, pr_for_branch, checks_since, drop_branch, expected_checks, finish, gh, github, merged_here, needs_approval, note_checks, own_work, pr_adopt, pr_open,
+from .github import (already_merged, base_pushes, checks_missing, github_unreachable, pr_for_branch, checks_since, drop_branch, expected_checks, finish, gh, github, merged_here, needs_approval, note_checks, own_work, pr_adopt, pr_open,
                      pr_pending, pr_problem, pr_view, remote_of, update_main, watch_main)
 from .github import CHECKS_RUNNING as PR_CHECKS_RUNNING
 from .launch import (
@@ -505,21 +505,28 @@ def cmd_ready(args):
         if t["state"] == "done":
             raise Fail(f"{s.ref(t)} is already done.")
         wt = t.get("worktree") if t.get("mode") == "worktree" else None
-        if wt and os.path.isdir(wt):
+        has_worktree = bool(wt and os.path.isdir(wt))
+        if has_worktree:
             if git(wt, "status", "--porcelain", "--untracked-files=no")[1]:
                 raise Fail(f"{wt} has uncommitted changes. Commit them, then run ready again.")
             t["head"] = git(wt, "rev-parse", "HEAD")[1]
             own_work(s, t)
-        refused = review_refusal(s, t, wt)
         dv = delivery_of(t)
-        if not refused and dv["mode"] == "open_pr" and wt and os.path.isdir(wt) and not (t.get("start") and in_base(s, t)):
+        pushed = base_pushes(s, t) if dv["mode"] == "open_pr" and has_worktree and not t.get("existing_pr") else {}
+        existing = dv["mode"] == "open_pr" and bool(pushed or t.get("existing_pr"))
+        refused = review_refusal(s, t, wt, existing=existing)
+        if not refused and existing and not has_worktree:
+            refused = "The worktree is missing. Restore it before handing off the existing pull request."
+        if not refused and dv["mode"] == "open_pr" and has_worktree and (existing or not (t.get("start") and in_base(s, t))):
             # SHEP-7: Open PR: its pull request opened and assigned, and its approval read for this exact head, first
-            refused = handoff_gate(s, t, dv, wt, said or t.get("summary"), blocked or None)
+            refused = handoff_gate(s, t, dv, wt, said or t.get("summary"), blocked or None, pushed=pushed)
         if not refused and t.get("branch_update"):
             # SHEP-10: the pull request read on GitHub (waits while its checks run); its verdict kept for auto-accept
             refused = branch_update.check(s, t)
         if refused:
             # Kept (the task's line says why it waits); refused after the store is saved.
+            if existing:
+                back_to_work(s, t, "its existing pull request needs a verified hand-off")
             s.dirty = True
         else:
             if said:
@@ -548,23 +555,28 @@ def cmd_ready(args):
                 t.pop(k, None)
             # Its agents' turns now: a later turn of theirs takes it back to work (busy_again()).
             t["ready_turns"] = ready_turns(live_agents(s.key(t)))
+            if existing:
+                handoff = t["handoff"], t["state"], t.get("ready_at")
             s.dirty = True
     if refused:
         raise Fail(refused)
     with open_store(args) as s:
         t = s.find(args.id)
+        if existing and (handoff != (t.get("handoff"), t["state"], t.get("ready_at"))
+                         or wt != t.get("worktree") or git(wt, "rev-parse", "HEAD")[1] != handoff[0]["head"]):
+            raise Fail("The existing PR hand-off changed during ready. Run ready again.")
         # Its review is the agent's own, as its brief's Settings block says (herdr-task starts no
         # reviewers). A worktree branch with nothing beyond its base (none of its own, or only its
         # base caught up with: a research or artifact-only task) still waits in Ready for the
         # person's Accept, its summary, details and artifacts on the card (SHEP-96); no pull request,
         # and Accept just marks it done and cleans up its worktree.
-        if wt and t.get("start") and in_base(s, t) and not merged_here(s, t):
+        if not existing and wt and t.get("start") and in_base(s, t) and not merged_here(s, t):
             t["nothing_to_merge"] = True
         else:
             t.pop("nothing_to_merge", None)
         # Its work already in its base (SHEP-59: its pull request squash-merged, or nothing left to
         # merge): done at once, never a second pull request.
-        gone = already_merged(s, t) if wt and t.get("start") and not t.get("nothing_to_merge") else None
+        gone = already_merged(s, t) if not existing and wt and t.get("start") and not t.get("nothing_to_merge") else None
         if gone is not None:
             t["merged"] = True
             if gone:
@@ -575,7 +587,7 @@ def cmd_ready(args):
             how = f"pull request #{gone['number']} is merged" if gone else f"its work is already in {t.get('base') or 'main'}"
             say(args, v, f"{s.ref(t)}: {how}; done.")
             return
-        msg = finalize(s, t)
+        msg = finalize(s, t, existing=t["existing_pr"] if existing else None)
         bu = t.get("branch_update")
         if bu and bu.get("check"):
             c = bu["check"]
@@ -607,7 +619,7 @@ def rounds_used(t):
     return sum(1 for r in t.get("reviews") or [] if r.get("result") in REVIEWED)
 
 
-def review_refusal(s, t, wt):
+def review_refusal(s, t, wt, *, existing=False):
     """Why ready is refused for review (as Shepherdr's: `ready` waits for a review of the final
     commit), or None. Only tasks whose brief taught `reviewed` (review_gate) and whose Settings
     block says Review: on. A worktree task's final commit must be one a round was recorded on; a
@@ -616,7 +628,7 @@ def review_refusal(s, t, wt):
     on, rounds = review_limits(s, t)
     if not on or not t.get("review_gate"):
         return None
-    if wt and t.get("start") and in_base(s, t):
+    if not existing and wt and t.get("start") and in_base(s, t):
         return None  # no commits of its own: nothing to review (nothing to merge)
     if not wt and t.get("folder_start") and unchanged_folder(s, t):
         return None  # in the folder itself, and it changed nothing (#744: a run that only reads)
@@ -851,14 +863,18 @@ def back_to_work(s, t, why, said=WORKING_AGAIN, auto=False):
 READY_BUT = "is ready, but:"  # finalize() couldn't push or open its pull request
 
 
-def finalize(s, t):
+def finalize(s, t, *, existing=None):
     """Ready: on GitHub its pull request opens; then the merge policy in Settings decides who
     merges: auto (now), checks (once its checks pass) or ask (the person). Returns what to say."""
     wt = t.get("worktree")
     local = t.get("mode") != "worktree" or not wt or t.get("nothing_to_merge")
-    repo = github(s) if not local and os.path.isdir(wt) else None
+    if t.get("existing_pr") and open_pr(t) and not existing:
+        raise Fail("Run ready to verify the existing pull request before handing it off.")
+    repo = existing["repo"] if existing else github(s) if not local and os.path.isdir(wt) else None
     failed = None
-    if repo:
+    if existing:
+        pr = t["pr"] = dict(existing)  # handoff_gate verified it; no push or PR creation
+    elif repo:
         # Pushed and opened before it shows Ready: the push lets the task list go while its hooks run
         # (#1007), and a Ready task without its pull request yet could be accepted (merged here) meanwhile.
         try:
@@ -1451,6 +1467,11 @@ def accept_refusal(s, t):
     if busy_again(t, live):
         back_to_work(s, t, "its agent is at work again", auto=True)
         return f"{s.ref(t)} is working again: its agent took up more work after it said ready. Accept it once it says ready again."
+    if open_pr(t):
+        target, pr, handoff = t.get("existing_pr"), t.get("pr") or {}, t.get("handoff") or {}
+        if ((target and (pr.get("number") != target["number"] or handoff.get("pr") != target["number"]))
+                or (not handoff.get("pr") and base_pushes(s, t))):
+            return f"{s.ref(t)} needs to say ready again to verify the existing pull request before Accept."
     # One its agent opened itself, which ready couldn't open again ("already exists"): adopted.
     if (not t.get("pr") and "already exists" in (t.get("attention") or "")
             and (repo := github(s)) and pr_adopt(t, repo)):
