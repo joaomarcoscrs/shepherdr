@@ -210,3 +210,16 @@ test("a file alone (no words, not a picture) still in the box is not taken as se
   expect(holds("❯ /var/files/t1/report.txt", "/var/files/t1/report.txt", true)).toBe(true);
   expect(holds("❯ ", "/var/files/t1/report.txt")).toBe(false);
 });
+
+test("a blocked Cursor chat bridge never gets Esc: its permission waits, and the refused words go back to be held (SHEP-17)", async () => {
+  const calls = [];
+  const blocked = { code: 1, stderr: JSON.stringify({ error: { kind: "blocked", message: "It's waiting on a question." } }) };
+  const io = { sleep: async () => {}, status: () => "blocked", hc: async (args) => { calls.push(args.join(" ")); return args[0] === "send" ? blocked : { code: 0, stdout: "" }; } };
+  const r = await sendBody(io, "t6", "cursor", "2");
+  expect(r.code).toBe(1);
+  expect(calls).toEqual(["send t6 2"]);
+  // Claude Code and Codex keep "Reply instead": Esc, then the words
+  calls.length = 0;
+  await sendBody(io, "t7", "codex", "hi");
+  expect(calls.slice(0, 2)).toEqual(["send t7 hi", "keys t7 esc"]);
+});

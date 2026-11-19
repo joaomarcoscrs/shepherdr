@@ -2884,7 +2884,8 @@ function StickToBottom({ chatKey, children }: { chatKey: string; children: React
  *  id, or the agent of one of the space's tabs */
 function placeholderOf(chatKey: string, chat: Chat | undefined, fallback: string) {
   // a card asks, or the agent asks in its terminal: words written here answer it
-  if (chat?.blocked !== undefined || chat?.messages.some((m) => m.question && m.question.sent === undefined && !m.question.closed)) return WORDS.replyInstead
+  // (Cursor's chat bridge: words wait until it is answered instead, SHEP-17)
+  if (chat?.blocked !== undefined || chat?.messages.some((m) => m.question && m.question.sent === undefined && !m.question.closed)) return chat?.cli === 'cursor' ? WORDS.waitsForAnswer : WORDS.replyInstead
   if (chatKey.startsWith('p:')) return 'Message the Assistant'
   const task = taskChatId(chatKey)
   if (task) return `Message ${task}`

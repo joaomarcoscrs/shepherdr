@@ -1461,6 +1461,9 @@ export default class Chat extends View {
     // The CLI shows its own start screen (a card here): typed words could pick one of its
     // choices, so they wait until it is answered (drainQueue()).
     if (openCard(this.addr)) { this.queue.push(msg); return; }
+    // Cursor's chat bridge asks (a card, or its menu in the terminal): words never answer or reject it there, so they
+    // wait here until it is answered and the turn ends (drainQueue()), never closing it as "Reply instead" (SHEP-17).
+    if (this.kind === "cursor" && (this.asks.length || this.status() === "blocked")) { this.queue.push(msg); cx.notify(); return; }
     // A card asks (a question, a permission, a plan): the words answer it, as typing in the
     // CLI would (cards.js replyWith); the card's buttons still work too.
     if (this.asks.length && msg.text && !msg.files?.length) {
@@ -1485,9 +1488,16 @@ export default class Chat extends View {
         // last time gets only its Enter now, never typed twice)
         r = await sendTyped(this.sendIo(cx), this.addr, this.kind, p.sent, SETTLE, !!msg.stuck);
         msg.stuck = !!r.stuck;
+        // Cursor's bridge began asking meanwhile: the words wait until it is answered (as above), never Esc'd in
+        if (r.code !== 0 && refusal(r).kind === "blocked" && this.kind === "cursor") {
+          this.pending = this.pending.filter((x) => x !== p);
+          this.queue.push(msg);
+          cx.notify();
+          return;
+        }
         // Its own dialog is open in its terminal (a question or a permission with no card
         // here): the words answer it the "Reply instead…" way.
-        if (r.code !== 0 && refusal(r).kind === "blocked" && (this.kind === "claude" || this.kind === "codex" || this.kind === "cursor")) r = await this.replyInstead(p.sent, cx);
+        if (r.code !== 0 && refusal(r).kind === "blocked" && (this.kind === "claude" || this.kind === "codex")) r = await this.replyInstead(p.sent, cx);
       } catch (e) {
         r = { code: 1, stderr: String(e?.message ?? e) };
       }
@@ -4280,7 +4290,7 @@ export default class Chat extends View {
         .child(Textarea.new(this.box).w_full().text_size(13).text_color(t.foreground)
           .when(Boolean(this.boxSpare && this.lineH), (el) => el.mb(-this.lineH)))
         .when(!this.box.value().trim(), (el) => el.child(div().absolute().top(9).left(12).text_size(13).text_color(t.dim)
-          .child(this.asks.length || st === "blocked" ? WORDS.replyInstead : this.placeholder()))))
+          .child(this.asks.length || st === "blocked" ? (this.kind === "cursor" ? WORDS.waitsForAnswer : WORDS.replyInstead) : this.placeholder()))))
       // While recording: the recording row. Else one row, on the right: what the agent runs on
       // (opens the picker), dictation, Send (or Call). Send never turns into Stop: while the
       // agent works it still sends (or queues) and calls; Stop is on the working line above.

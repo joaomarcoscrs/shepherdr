@@ -183,8 +183,9 @@ export const reactionLine = (emoji, text, on = true) => `<hc from="person" ${on 
 // again: its last send stayed in Claude Code's box (sendTyped).
 export async function sendBody(io, addr, kind, body, again = false) {
   let r = await sendTyped(io, addr, kind, body, SETTLE, again);
-  // Cursor's chat bridge too: Esc rejects the permission it waits on, then the words go (SHEP-6)
-  if (r.code !== 0 && refusal(r).kind === "blocked" && (kind === "claude" || kind === "codex" || kind === "cursor")) r = await replyInstead(io, addr, body);
+  // Not Cursor's chat bridge: Esc would reject the permission it waits on (SHEP-17). Its words wait for the answer
+  // instead (service/actions.ts holds them; the window's chat queues them).
+  if (r.code !== 0 && refusal(r).kind === "blocked" && (kind === "claude" || kind === "codex")) r = await replyInstead(io, addr, body);
   if (r.code === 0 && kind === "claude") await steerNow(io, addr);
   return r;
 }

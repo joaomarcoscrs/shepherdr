@@ -3,7 +3,9 @@
 SHEP-6's probe (2026.11.13), shortened. Its argv goes to $FAKE_ACP_LOG as {"argv": ...}, each request it gets too.
 
 Prompts it knows: "say <words>" answers the words; "run <cmd>" calls its shell tool, asking permission first (its
-allowlist is empty), and runs nothing; "hang" works until cancelled. A session/load of "gone" fails; any other
+allowlist is empty), and runs nothing; "both <cmd>" asks for a web fetch and for <cmd> at once, before either is
+answered (as the real one runs tool calls in parallel: SHEP-17), and says how each went; "drop <cmd>" asks, then ends
+its turn without waiting (a request Cursor gave up on); "hang" works until cancelled. A session/load of "gone" fails; any other
 replays one exchange. FAKE_ACP_SIGNED_OUT=1: session/new fails as Cursor does signed out."""
 import json
 import os
@@ -13,7 +15,8 @@ import threading
 
 LOG = os.environ.get("FAKE_ACP_LOG")
 lock = threading.Lock()
-pending = {}
+pending = {}               # request id -> Event, set once the client answers it
+answers = {}               # request id -> the outcome the client sent
 cancelled = threading.Event()
 MODELS = [{"modelId": "default[]", "name": "Auto"}, {"modelId": "composer-2.5[fast=true]", "name": "composer-2.5"},
           {"modelId": "claude-opus-5-5[context=300k,effort=medium,fast=false]", "name": "claude-opus-5-5"}]
@@ -40,6 +43,25 @@ def opts():
     return [{"id": "model", "type": "select", "currentValue": current["model"], "options": [{"value": m["modelId"], "name": m["name"]} for m in MODELS]}]
 
 
+OPTIONS = [{"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
+           {"optionId": "allow-always", "name": "Allow always", "kind": "allow_always"},
+           {"optionId": "reject-once", "name": "Reject", "kind": "reject_once"}]
+
+
+def ask(sid, rid, tool):
+    """A session/request_permission with id rid; -> its threading.Event (set once answered: answers[rid])."""
+    ev = threading.Event()
+    pending[rid] = ev
+    send({"jsonrpc": "2.0", "id": rid, "method": "session/request_permission", "params": {"sessionId": sid, "toolCall": tool,
+          "options": OPTIONS}})
+    return ev
+
+
+def shell_tool(tid, cmd):
+    return {"toolCallId": tid, "title": f"`{cmd}`", "kind": "execute", "status": "pending",
+            "content": [{"type": "content", "content": {"type": "text", "text": f"Not in allowlist: {cmd.split()[0]}"}}]}
+
+
 def prompt(i, p):
     sid = p["sessionId"]
     # the words without the tag hc wraps a message from another agent in (<hc from="t3">...</hc>)
@@ -51,20 +73,31 @@ def prompt(i, p):
         cmd = text[4:]
         tid = "call-1\nfc_1"
         update(sid, {"sessionUpdate": "tool_call", "toolCallId": tid, "title": f"`{cmd}`", "kind": "execute", "status": "pending", "rawInput": {"command": cmd}})
-        ev = threading.Event()
-        pending[0] = ev
-        send({"jsonrpc": "2.0", "id": 0, "method": "session/request_permission", "params": {"sessionId": sid, "toolCall": {
-            "toolCallId": tid, "title": f"`{cmd}`", "kind": "execute", "status": "pending",
-            "content": [{"type": "content", "content": {"type": "text", "text": f"Not in allowlist: {cmd.split()[0]}"}}]},
-            "options": [{"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
-                        {"optionId": "allow-always", "name": "Allow always", "kind": "allow_always"},
-                        {"optionId": "reject-once", "name": "Reject", "kind": "reject_once"}]}})
-        ev.wait(30)
-        picked = pending.pop("answer", {})
+        ask(sid, 0, shell_tool(tid, cmd)).wait(30)
+        picked = answers.pop(0, {})
         ok = picked.get("optionId", "").startswith("allow")
         update(sid, {"sessionUpdate": "tool_call_update", "toolCallId": tid, "status": "completed" if ok else "failed",
                      **({"rawOutput": {"exitCode": 0, "stdout": "ran\n", "stderr": ""}} if ok else {})})
         update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "ALLOWED" if ok else "REFUSED"}})
+    elif text.startswith("both "):
+        cmd = text[5:]
+        url = "https://example.com/thread"
+        web = {"toolCallId": "web_fetch_1", "title": f"Fetch {url}", "kind": "fetch", "status": "pending"}
+        update(sid, {"sessionUpdate": "tool_call", "toolCallId": "web_fetch_1", "title": f"Fetch {url}", "kind": "fetch", "status": "pending", "rawInput": {"url": url}})
+        update(sid, {"sessionUpdate": "tool_call", "toolCallId": "call-2", "title": f"`{cmd}`", "kind": "execute", "status": "pending", "rawInput": {"command": cmd}})
+        # both asked before either is answered, each under its own request id
+        evs = [ask(sid, 100, web), ask(sid, 101, shell_tool("call-2", cmd))]
+        for ev in evs:
+            ev.wait(30)
+        said = []
+        for rid, name in ((100, "FETCH"), (101, "SHELL")):
+            o = answers.pop(rid, {})
+            said.append(f"{name}:{o.get('optionId') or o.get('outcome') or 'none'}")
+        update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " ".join(said)}})
+    elif text.startswith("drop "):
+        cmd = text[5:]
+        ask(sid, 200, shell_tool("call-3", cmd))
+        update(sid, {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "GAVE UP"}})
     elif text == "hang":
         update(sid, {"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "hmm"}})
         cancelled.wait(30)
@@ -80,9 +113,9 @@ def main():
         m = json.loads(line)
         log({"got": m})
         meth, i, p = m.get("method"), m.get("id"), m.get("params") or {}
-        if meth is None and i in (0,):
-            pending["answer"] = (m.get("result") or {}).get("outcome") or {}
-            pending[0].set()
+        if meth is None and i in pending:
+            answers[i] = (m.get("result") or {}).get("outcome") or {}
+            pending.pop(i).set()
         elif meth == "initialize":
             send({"jsonrpc": "2.0", "id": i, "result": {"protocolVersion": 1, "agentCapabilities": {"loadSession": True}, "authMethods": [{"id": "cursor_login"}]}})
         elif meth == "session/new":
