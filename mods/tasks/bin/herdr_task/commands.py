@@ -514,7 +514,7 @@ def cmd_ready(args):
         dv = delivery_of(t)
         pushed = base_pushes(s, t) if dv["mode"] == "open_pr" and has_worktree and not t.get("existing_pr") else {}
         existing = dv["mode"] == "open_pr" and bool(pushed or t.get("existing_pr"))
-        refused = review_refusal(s, t, wt, existing=existing)
+        refused = review_refusal(s, t, wt, existing=True) if existing else review_refusal(s, t, wt)
         if not refused and existing and not has_worktree:
             refused = "The worktree is missing. Restore it before handing off the existing pull request."
         if not refused and dv["mode"] == "open_pr" and has_worktree and (existing or not (t.get("start") and in_base(s, t))):
