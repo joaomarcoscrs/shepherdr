@@ -897,7 +897,8 @@ def task_assistant(parent=None):
         if isinstance(declared, str) and re.fullmatch(r"[a-zA-Z0-9][\w.-]*", declared):
             provider = assistant_command_provider([declared]) or agent_key([declared])
     provider = provider or assistant_command_provider(k.get("argv"))
-    return {"parent": k.get("address") or addr, "agent": provider}
+    return {"parent": k.get("address") or addr, "agent": provider,
+            "space": labels.get("herdr.space") or labels.get("herdr.coordinator.space")}
 
 
 def assistant_command_provider(argv):

@@ -150,8 +150,8 @@ def cmd_add(args):
             # Herdr's own reading of GitHub at ready is its proof; a --set proof=on still asks for an artifact
             t.setdefault("set", {})["proof"] = "off"
         set_opts(t, args)
-        space = bare(args.space) if args.space else caller_space()
         assistant = task_assistant()
+        space = bare(args.space) if args.space else (assistant or {}).get("space") or caller_space()
         capture_assistant(t, assistant, space)
         set_base(s, t, args.base, space, new=True)
         set_branch(s, t, getattr(args, "branch", None))
@@ -425,8 +425,8 @@ def cmd_start(args):
         set_branch(s, t, getattr(args, "branch", None))
         q = t.get("queue") or {}
         saved = t.get("assistant") or {}
-        space = bare(args.space) if args.space else (q.get("space") or saved.get("space") or default_space())
         assistant = task_assistant(args.parent) if t["state"] == "todo" else None
+        space = bare(args.space) if args.space else (q.get("space") or saved.get("space") or (assistant or {}).get("space") or default_space())
         capture_assistant(t, assistant, space, override=bool(args.argv or args.agent))
         parent = args.parent or q.get("parent") or (assistant or saved).get("parent")
         prev = last_agent(t)
@@ -1030,7 +1030,7 @@ def cmd_edit(args):
                 saved = t.get("assistant") or {}
                 assistant = task_assistant()
                 if assistant or saved:
-                    space = saved.get("space") or default_space()
+                    space = saved.get("space") or (assistant or {}).get("space") or default_space()
                     capture_assistant(t, assistant, space)
                     plan = worker_plan(s, t, space, (assistant or saved)["parent"])
             schedule(s, t, at, plan)

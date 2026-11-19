@@ -8544,7 +8544,8 @@ class AssistantTaskProvider(unittest.TestCase):
         task = self.add("From a service", here=True)
         addr = self.caller("codex")
         os.environ.pop("HC_TERMINAL_ID")
-        self.start(task["id"], now=True, space=self.dest, parent=addr)
+        started = self.start(task["id"], now=True, parent=addr)
+        self.assertEqual(started["space"], self.source)
         self.assertEqual(self.worker(task["id"])["agent"], "codex")
         self.assertEqual(self.worker(task["id"])["parent"], addr)
 
