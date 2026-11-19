@@ -188,18 +188,31 @@ export function openSettings(p = {}) {
 // an agent says ("HERD-4 · what", "~ Assistant · what"). Where the shown layout has no toasts
 // float (another layout), Herdr's notify() shows it instead. Kept in shared "toasts", newest last.
 // n: { title, body, level: "info" | "success" | "warning" | "error" | "alert", action: { name,
-// args }, timeout (ms) }. "alert" is an agent saying it can't wait, or needing the person: red.
+// args }, timeout (ms), key, covers, terminal, ask }. "alert" is an agent saying it can't wait, or needing the person: red.
+// One thing, one toast (core/toasts.js withToast, the same rules): a toast with the same `key` takes the old one's place
+// and id, and one that says more about the same thing takes the place of those whose keys it `covers` (a permission's
+// toast, key "ask:<request id>", covers its agent's "Needs you", key "need:<terminal>"). `ask`: { id, machine? }, the
+// waiting request it is about (core/asks.js), only its id: mods/toasts reads the request itself for its choices.
 export const TOASTS = "toasts";
 const hasToasts = (n) => Boolean(n && typeof n === "object")
   && (n.content?.mod === TOASTS || [...(n.children ?? []), ...(n.floating ?? [])].some(hasToasts));
 export function toast(n) {
-  if (!hasToasts(layout())) return notify({ ...n, level: n.level === "alert" ? "error" : n.level ?? "info" });
+  if (!hasToasts(layout())) {
+    // Herdr's own toast has no choices: a request's still goes to its chat (its action).
+    const { key: _k, covers: _c, terminal: _t, ask: _a, ...plainToast } = n;
+    return notify({ ...plainToast, level: n.level === "alert" ? "error" : n.level ?? "info" });
+  }
   const at = Date.now();
-  const id = `${at.toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-  const kept = (shared(TOASTS) ?? []).filter((x) => at - x.at < 120000).slice(-4);
+  const list = shared(TOASTS) ?? [];
+  const same = n.key ? list.find((x) => x.key === n.key) : null;
+  const covered = (x) => Boolean(x.key) && Array.isArray(n.covers) && n.covers.includes(x.key);
+  const id = same?.id ?? `${at.toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  const kept = list.filter((x) => x !== same && !covered(x) && at - x.at < 120000).slice(-4);
   setShared(TOASTS, [...kept, { ...n, level: n.level ?? "info", id, at }]);
   return id;
 }
+// A toast with this key is up now (e.g. "need:<terminal>": its agent's Needs you was told already).
+export const toastUp = (key) => (shared(TOASTS) ?? []).some((x) => x.key === key);
 
 // Who a toast is from, its title's first half ("HERD-4 · what", "~ Assistant · what"): a task's
 // agent by its task (herdr-task names it "herd-4-fix-login"; on another machine "HERD-4 on vm", as

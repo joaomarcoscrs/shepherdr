@@ -149,8 +149,11 @@ async function alert(a) {
   try { req = JSON.parse(await readTextFile(`${ASKS()}/req/${a.id}.json`) ?? ""); } catch {}
   if (settings()?.sounds?.enabled !== false) playSound("blocked");
   const k = terminals().find((x) => x.address === a.terminal);
+  // Its own toast (key "ask:<id>", the request's id only: mods/toasts offers its card's choices when they fit), in
+  // place of its agent's Needs you if that came first; a click elsewhere on it goes to the agent's card.
   toast({ title: `${whoOf(k)} · Needs you`, body: req ? reqReason(req) : REASONS.question, level: "alert",
-    action: { name: "tabs-tasks.inbox", args: {} } });
+    key: `ask:${a.id}`, covers: [`need:${a.terminal}`], terminal: a.terminal, ask: { id: a.id },
+    action: { name: `tabs-tasks.alert-${a.terminal.replace(/\//g, "~")}` } });
 }
 
 // ---- agents' alerts --------------------------------------------------------------------------
