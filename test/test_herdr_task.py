@@ -8651,6 +8651,17 @@ class AssistantTaskProvider(unittest.TestCase):
             self.run_cmd(self.commands.cmd_resume, id=scheduled["id"], space=self.dest)
         self.assertEqual(self.worker(scheduled["id"])["argv"], old)
 
+    def test_legacy_schedule_without_argv_keeps_default_permissions(self):
+        self.write_settings({
+            "everywhere": {"worker": {"agent": "codex", "model": "gpt-5", "perm": "full"}},
+            "spaces": {self.dest: {"folder": self.folder, "worker": {"agent": "claude", "model": "opus", "perm": "manual"}}},
+        })
+        scheduled = self.add("Old schedule without argv", here=True, space=self.dest, agent="codex", in_="1h")
+        self.assertNotIn("argv", self.task(scheduled["id"])["queue"])
+        self.caller("cursor")
+        self.start(scheduled["id"], now=True)
+        self.assertEqual(self.worker(scheduled["id"])["argv"], ["codex", "--no-daemon", "-c", 'service_tier="default"'])
+
     def test_rule_agent_wins_and_background_rules_are_independent(self):
         addr = self.caller("codex")
         with self.store_mod.Store(self.store_mod.locate(self.folder)) as s:

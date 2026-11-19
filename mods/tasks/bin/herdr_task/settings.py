@@ -352,10 +352,11 @@ def worker_pick(s, task, space=None, agent=None):
     if chosen := agent or own or affinity:
         key = WORDS.get(chosen, chosen)
         default = pick.get("argv") or [pick.get("agent") or "claude"]
-        # A layer with a different provider can override the usual worker without overriding
-        # the worker settings for this provider in a less specific layer.
+        # An Assistant can select a provider other than the usual worker. Its compatible
+        # settings may be in a less specific layer. Independent launches keep the usual
+        # worker lookup, including old schedules that have yet to resolve an argv.
         configured, layer_key = {}, "claude"
-        for layer in settings_layers(s, space):
+        for layer in settings_layers(s, space) if task.get("assistant") else ():
             worker = layer.get("worker") or {}
             choice = worker.get("argv") or ([worker["agent"]] if worker.get("agent") else None)
             if choice:
