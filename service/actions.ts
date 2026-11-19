@@ -7,7 +7,7 @@ import { appHome, writable } from "./paths.ts";
 import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { sendBody, steerNow, messageBody, refusal, reactionLine, mentionedIn, taskTag } from "../core/send.js";
-import { kindOf } from "../core/chat-reader.js";
+import { kindOf, nativeCursorTerminal } from "../core/chat-reader.js";
 import { WORDS } from "../core/chat-view.js";
 import { settle } from "../core/pending.js";
 import * as AGa from "../core/agents.js";
@@ -40,6 +40,10 @@ const ADDR = /^([\w.-]+\/)?t[0-9a-z]+$/;
 const REF = /^[A-Z][A-Z0-9]*-\d+$/;
 const MACHINE = /^[\w.-]+$/;
 
+function terminalOnly(hub: Hub, compat: Compat, addr: string) {
+  return nativeCursorTerminal(hub.terminals.get(addr)) || compat.reader?.(addr)?.format === "cursor-native";
+}
+
 /** One page's message to its agent, its files' paths after its words. -> { ok, at } once it is in the agent's terminal
  *  (Claude Code's box clear: core/send.js settleBox), or { waiting } held for the agent's turn; else it throws. */
 async function sendNow(hub: Hub, b: any, compat: Compat, again = false) {
@@ -48,6 +52,7 @@ async function sendNow(hub: Hub, b: any, compat: Compat, again = false) {
   if (!text && !(Array.isArray(b.attachments) && b.attachments.length)) throw new Error("nothing to send");
   const t = hub.terminals.get(a);
   if (!t || t.state !== "live") throw new Error("That agent isn't running.");
+  if (terminalOnly(hub, compat, a)) throw new Error(WORDS.cursorTerminal);
   const io = { hc: asPerson(hub), sleep: (ms: number) => Bun.sleep(ms), status: () => (hub.terminals.get(a) as any)?.status?.state ?? null };
   // files sent with it: their paths after the words, as the window's chat sends them (copied first to another machine)
   const sent: string[] = Array.isArray(b.attachments) ? b.attachments : [];
@@ -64,6 +69,7 @@ async function sendNow(hub: Hub, b: any, compat: Compat, again = false) {
     return landed;
   }));
   const body = [messageBody({ text, quote: typeof b.quote === "string" ? b.quote.slice(0, 2000) : null, tags: typeof b.tags === "string" ? b.tags : "" }), ...files].filter(Boolean).join("\n\n");
+  if (terminalOnly(hub, compat, a)) throw new Error(WORDS.cursorTerminal);
   // held on purpose (Ctrl+Enter, a long press): it goes once the agent stops working
   const st = (hub.terminals.get(a) as any)?.status?.state;
   // Cursor's chat bridge asking: words never answer or reject its permission (SHEP-17), so they wait for it too
@@ -71,7 +77,7 @@ async function sendNow(hub: Hub, b: any, compat: Compat, again = false) {
     const cid = typeof b.cid === "string" ? b.cid.slice(0, 80) : undefined;
     // once it goes: the chat knows it again by its words (its id and files), so the page sees it went in
     const note = () => { if (cid) compat.noteSend?.(a, { cid, text, files: sent, at: Date.now() }); };
-    held.push({ addr: a, kind: kindOf(t) ?? "", body, hub, cid, note });
+    held.push({ addr: a, kind: kindOf(t) ?? "", body, hub, compat, cid, note });
     drain();
     return { ok: true, waiting: true, waitsFor: "turn" };
   }
@@ -86,7 +92,7 @@ async function sendNow(hub: Hub, b: any, compat: Compat, again = false) {
 }
 
 // Messages held until their agent is free, sent in order, each once.
-const held: { addr: string; kind: string; body: string; hub: Hub; cid?: string; now?: boolean; note?: () => void }[] = [];
+const held: { addr: string; kind: string; body: string; hub: Hub; compat: Compat; cid?: string; now?: boolean; note?: () => void }[] = [];
 let draining: ReturnType<typeof setInterval> | null = null, busy = false;
 function drain() {
   draining ??= setInterval(async () => {
@@ -97,15 +103,16 @@ function drain() {
       for (const m of [...held]) {
         const st = (m.hub.terminals.get(m.addr) as any)?.status?.state;
         const alive = m.hub.terminals.get(m.addr)?.state === "live";
-        if (alive && !m.now && (st === "working" || st === "blocked")) continue;
+        const native = terminalOnly(m.hub, m.compat, m.addr);
+        if (alive && !native && !m.now && (st === "working" || st === "blocked")) continue;
         const i = held.indexOf(m);
         if (i < 0) continue;
         held.splice(i, 1);
         // one that can't go now is told to its page (Chat.failed: Not sent, with Retry), never dropped quietly
-        if (alive) m.note?.();
-        const r: any = alive
+        if (alive && !native) m.note?.();
+        const r: any = alive && !native
           ? await sendBody({ hc: asPerson(m.hub), sleep: (ms: number) => Bun.sleep(ms), status: () => (m.hub.terminals.get(m.addr) as any)?.status?.state ?? null }, m.addr, m.kind, m.body).catch((e: Error) => ({ code: 1, stderr: e.message }))
-          : { code: 1, stderr: "That agent isn't running." };
+          : { code: 1, stderr: native ? WORDS.cursorTerminal : "That agent isn't running." };
         if (r.code !== 0 && m.cid) noteFailed(m.addr, m.cid, refusal(r).message, !!r.stuck);
       }
     } finally {
@@ -217,6 +224,10 @@ export async function act(hub: Hub, b: any, compat: Compat): Promise<unknown> {
     if (!a) throw new Error("That chat isn't here any more.");
     return a;
   };
+  if (b?.type === "answer" && b.terminal !== true && typeof b.chat === "string") {
+    const a = compat.addrOf(b.chat);
+    if (a && terminalOnly(hub, compat, a)) throw new Error(WORDS.cursorTerminal);
+  }
   if (b?.type === "answer" && typeof b.question === "string" && b.question.startsWith("scr-")) {
     // a CLI's start screen (service/watch.ts): a tap presses that choice, only on the screen the card was drawn from;
     // "Answer in terminal" just shows the terminal
@@ -246,6 +257,7 @@ export async function act(hub: Hub, b: any, compat: Compat): Promise<unknown> {
   if (b?.type === "react" && typeof b.chat === "string" && typeof b.message === "string" && typeof b.emoji === "string" && b.emoji.length <= 16) {
     // a reaction toggles, as the window's: added unless it is yours already; the agent reads the core's reaction line
     const a = chat(b.chat), r = compat.reader?.(a);
+    if (terminalOnly(hub, compat, a)) throw new Error(WORDS.cursorTerminal);
     const item = r?.conv?.items?.find((x: any) => x.id === b.message);
     if (!item?.text) throw new Error("That message isn't in the chat any more.");
     const mine = (r.conv.reactions.get(b.message) ?? []).some((x: any) => x.by === "you" && x.emoji === b.emoji);
@@ -662,6 +674,7 @@ export async function act(hub: Hub, b: any, compat: Compat): Promise<unknown> {
       // Send now on a message in Claude Code's own queue (#662): its Ctrl+Enter, only while its screen offers it
       const a = addr(b.addr), t = hub.terminals.get(a);
       if (!t || t.state !== "live") throw new Error("That agent isn't running.");
+      if (terminalOnly(hub, compat, a)) throw new Error(WORDS.cursorTerminal);
       const io = { hc: asPerson(hub), sleep: (ms: number) => Bun.sleep(ms), status: () => (hub.terminals.get(a) as any)?.status?.state ?? null };
       if (!(await steerNow(io, a))) throw new Error(WORDS.notNow);
       return { ok: true };

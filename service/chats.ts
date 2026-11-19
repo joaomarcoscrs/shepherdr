@@ -24,11 +24,12 @@ type Followed = { reader: ChatReader; pages: Set<Watcher>; busy: boolean; idleSi
 /** a screen that keeps drawing (a spinner) asks for a read at most this often */
 const NUDGE = 200;
 
-/** "log:<machine>|<kind>|<path>": an ended agent's own log (compat.ts names a finished task's chat so). */
+/** "log:<machine>|<kind>[:<session>]|<path>": an ended agent's own log (compat.ts names a finished task's chat so). */
 function readerFor(io: any, addr: string) {
   if (!addr.startsWith("log:")) return new ChatReader(io, addr);
-  const [m, kind, ...path] = addr.slice(4).split("|");
-  return new ChatReader(io, m ? `${m}/log` : "log").fixed(path.join("|"), kind || "claude");
+  const [m, source, ...path] = addr.slice(4).split("|");
+  const [kind, session] = (source ?? "").split(":");
+  return new ChatReader(io, m ? `${m}/log` : "log").fixed(path.join("|"), kind || "claude", session ?? null);
 }
 
 /** A terminal as the live list has it may lack its foreground program (the log is found by its pid): another

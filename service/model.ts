@@ -291,7 +291,7 @@ export class Model {
         started: task.started ?? null, ready_at: task.ready_at ?? null, done_at: task.done_at ?? null,
         summary: task.summary ?? null, details: task.details ?? null, pr: task.pr ?? null, prompt: String(task.prompt ?? "").slice(0, 500), why: p.why ?? null,
         worktree: task.worktree ?? list.folder, base: task.base ?? null, start: task.start ?? null, branch: task.branch ?? null,
-        lastLog: !worker && last?.log ? { path: last.log, kind: last.agent ?? "claude" } : null,
+        lastLog: !worker && last?.log ? { path: last.log, kind: last.agent ?? "claude", session: last.session } : null,
         // the CLI its agent runs (herdr-task's agent key: claude, codex, cursor)
         cli: last?.agent ?? "claude",
         // its worker's own helper agents (SHEP-54), for the task's detail

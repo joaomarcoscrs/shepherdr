@@ -195,7 +195,7 @@ export class Agents {
     const kind = kindOf(t) ?? "claude";
     const old = { agent: kind, argv: t.foreground?.argv ?? t.argv ?? [], session: sessionOf(kind, reader?.path ?? null) };
     const task = t.labels?.["herdr.task"];
-    // not a task's: Cursor runs in its chat (herdr-task cursor-chat), never its own terminal UI the chat can't read
+    // Assistants use Cursor's chat bridge. Task workers keep Cursor's native terminal and its permissions.
     const built = argvFor({ agent: pick.kind, model: pick.model, effort: pick.effort, fast: pick.speed === "fast", perm: pick.perm ?? current(kind, old.argv, {}, {}).perm }, old, { chat: !task });
     const pane = t.labels?.["herdr.chat"] ?? "";
     if (task) {

@@ -15,6 +15,7 @@ import * as CV from "../core/chat-view.js";
 import * as AG from "../core/agents.js";
 import { layoutScript } from "./layout-scripts.ts";
 import { historyLines } from "../core/mouse-leak.js";
+import { nativeCursorTerminal } from "../core/chat-reader.js";
 
 const { ScreenWatch, starting, cliOf, readScreen, screenText, pressKeys, SCREEN } = SC as any;
 const { LOST, lostMessage, shellWord, WORDS, sessionStarted, sessionFailed } = CV as any;
@@ -52,7 +53,7 @@ export class AgentWatch {
     try {
       for (const w of this.o.watched()) {
         const k: any = this.hub.terminals.get(w.addr);
-        if (!k) continue;
+        if (!k || nativeCursorTerminal(k)) continue;
         if (starting(k) || this.screens.open(w.addr)) await this.screens.tick(w.addr, k).catch(() => undefined);
         if (this.lostCandidate(k)) await this.checkLost(w).catch(() => undefined);
       }
@@ -63,7 +64,7 @@ export class AgentWatch {
   async press(id: string, choice: number): Promise<string | null> {
     const addr = [...this.own.keys(), ...Object.keys(this.o.windowCards() ?? {})].find((a) => this.cardsOf(a).some((c) => c.id === id));
     const card = addr ? this.cardsOf(addr).find((c) => c.id === id) : null;
-    if (!card || card.state !== "open") return SCREEN.gone;
+    if (!card || card.state !== "open" || nativeCursorTerminal(this.hub.terminals.get(card.addr))) return SCREEN.gone;
     if (!card.window) return this.screens.press(card, choice);
     const r = await this.hc(["read", card.addr]);
     const s = r.code === 0 ? readScreen(r.stdout, Infinity) : null;

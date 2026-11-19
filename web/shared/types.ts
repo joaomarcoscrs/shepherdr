@@ -915,6 +915,8 @@ export interface Chat {
   failed?: { cid: string; error: string }[]
   /** finished agent: writing resumes it */
   finished?: boolean
+  /** This CLI's live conversation can be read here. Its input and approvals go through the terminal. */
+  terminalOnly?: boolean
   /** 3.0's first row: the log is read from its start ("Start of conversation"), or earlier pages are left to load
    *  as the chat scrolls up ("Loading earlier…") */
   top?: boolean
