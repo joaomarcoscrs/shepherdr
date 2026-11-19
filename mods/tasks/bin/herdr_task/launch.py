@@ -16,9 +16,9 @@ import sys
 import time
 
 from .base import ASK_HOME, ENTRY, Fail, git, hc_json, now, run, WORKTREES
-from .settings import agent_key, ASSISTANT_TEMPLATES, keep_delivery, trust_roots, bare, BRANCH_PATTERN, branch_pattern_problem, keep_review, notes, notes_part, review_limits, settings_block, settings_for
+from .settings import AGENTS, agent_key, ASSISTANT_TEMPLATES, keep_delivery, trust_roots, bare, BRANCH_PATTERN, branch_pattern_problem, keep_review, notes, notes_part, review_limits, settings_block, settings_for
 from .templates import instructions
-from .agents import detail, LINE_MAX, live_agents, SUMMARY_MAX
+from .agents import agent_running, detail, LINE_MAX, live_agents, SUMMARY_MAX
 from .github import finish, remote_of
 from .browsers import browser_line, browser_path
 from .shared import ALLOW as SHARED_ALLOW, allows as shared_read
@@ -870,6 +870,47 @@ def launch(s, task, argv, space, message=None, parent=None, resume=None, role=No
 
 def is_coordinator(k):
     return (k.get("labels") or {}).get("herdr.role") == "coordinator" or k.get("template") in ASSISTANT_TEMPLATES
+
+
+def task_assistant(parent=None):
+    """The live Assistant asking for a task, or an explicit launch parent when called on its behalf."""
+    addr = os.environ.get("HC_TERMINAL_ID") or parent
+    k = hc_json("get", addr) if addr and not addr.startswith("-") else None
+    if not k or k.get("state") != "live" or not is_coordinator(k):
+        return None
+    labels, fg = k.get("labels") or {}, k.get("foreground") or {}
+    if labels.get("herdr.task") or labels.get("herdr.role") not in (None, "coordinator"):
+        return None
+    if fg.get("name") and not agent_running(k):
+        return None  # a kept terminal can still have its dead Assistant's labels and status
+    # Prefer a recognized foreground program to a label left by the previous program. Some launchers
+    # wrap the CLI (Cursor's chat bridge, for example), so also read Herdr's agent metadata.
+    status = k.get("status")
+    app = status.get("app") if isinstance(status, dict) else None
+    provider = None
+    for argv in (fg.get("argv") or [fg.get("name")], [fg.get("name")], [app]):
+        provider = assistant_command_provider(argv)
+        if provider:
+            break
+    if not provider:
+        declared = labels.get("herdr.agent") or k.get("agent")
+        if isinstance(declared, str) and re.fullmatch(r"[a-zA-Z0-9][\w.-]*", declared):
+            provider = assistant_command_provider([declared]) or agent_key([declared])
+    provider = provider or assistant_command_provider(k.get("argv"))
+    return {"parent": k.get("address") or addr, "agent": provider}
+
+
+def assistant_command_provider(argv):
+    if not argv or not argv[0]:
+        return None
+    key = agent_key(argv)
+    if key in AGENTS or key == "pi":
+        return key
+    # With a shebang the foreground may be python3 /path/to/herdr-task cursor-chat.
+    command = argv[1:] if key.startswith("python") else argv
+    if key == "cursor-chat" or (len(command) > 1 and os.path.basename(command[0]) == "herdr-task" and command[1] == "cursor-chat"):
+        return "cursor"
+    return None
 
 
 def coordinator_tab(addr):

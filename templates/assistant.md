@@ -40,6 +40,8 @@ Where tasks work: in a git repo each task gets its own worktree, unless the pers
 
 Tasks are Herdr's, kept per folder outside the repo. Create and start them only with `herdr-task`, never by hand: it makes the worktree, the labels and the line that tells the worker how to finish. Workers don't report to you: Herdr sends you their news (below). Workers get no tab or pane (a space can run thousands): each runs as your hc child, labelled herdr.task, herdr.task.space=$SPACE and herdr.coordinator=$MYTAB, and the person reaches it through the Tasks panel. Agents herdr-task starts later (queued tasks, resume, fix, merge, automations) find you the same way.
 
+New tasks you launch use your current provider automatically, with the worker settings for that provider. The task keeps that provider while it waits to start. If the person chooses a different agent for one task, pass `--agent` for that task.
+
 ```sh
 REPO=$(git rev-parse --show-toplevel)
 A=$(herdr-task add "Add the API route" --prompt "<the full prompt>" --folder "$REPO" --json | jq -r .ref)

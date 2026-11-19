@@ -14,7 +14,7 @@ from .base import Fail, git, HOME, MAX_RUNNING, WHERE
 # What each agent key starts by default. Unknown keys run as themselves; --argv overrides.
 AGENTS = {"claude": ["claude"], "codex": ["codex", "--no-daemon"], "cursor": ["cursor-agent"]}
 # Cursor Agent's CLI is `cursor-agent`, or `agent` as newer installs and Herdr's agent list call it: both are "cursor".
-WORDS = {"cursor-agent": "cursor", "agent": "cursor"}
+WORDS = {"claude-code": "claude", "cursor-agent": "cursor", "agent": "cursor"}
 # A Cursor worker's permission mode when none is chosen: Auto, its Auto-review (core/settings.js permDefault).
 CURSOR_PERM_DEFAULT = "auto"
 # Other CLIs' modes that ask more than Cursor's Auto-review: Cursor's Ask for them (core/agents.js PERM_ACROSS).
@@ -344,31 +344,63 @@ def argv_for(pick):
 
 def worker_pick(s, task, space=None, agent=None):
     """What a task's agent runs on, {agent, model, effort, fast, perm}: Settings' worker, then the
-    task's own --agent / --model / --effort, then `agent` (start --agent). Another CLI than
-    Settings' starts from its own defaults (models and permissions differ per CLI)."""
+    Assistant's provider, then the task's own --agent and start --agent. Only that provider's
+    worker settings apply; the Assistant's own launch flags are never worker settings."""
     pick = dict(settings_for(s, space)["worker"] or {})
-    for key in (task.get("agent"), agent):
-        if key and key != pick.get("agent"):
-            # Cursor starts on Auto (CURSOR_PERM_DEFAULT) unless Settings' worker asks more often than that: its Ask
-            # then, never more access than chosen (core/agents.js permAcross)
-            asks = key == "cursor" and pick.get("perm") in ASKS_MORE
-            pick = {"agent": key, **({"perm": "manual"} if asks else {})}
+    affinity = (task.get("assistant") or {}).get("agent")
+    own = task.get("agent")
+    if chosen := agent or own or affinity:
+        key = WORDS.get(chosen, chosen)
+        default = pick.get("argv") or [pick.get("agent") or "claude"]
+        # A layer with a different provider can override the usual worker without overriding
+        # the worker settings for this provider in a less specific layer.
+        configured, layer_key = {}, "claude"
+        for layer in settings_layers(s, space):
+            worker = layer.get("worker") or {}
+            choice = worker.get("argv") or ([worker["agent"]] if worker.get("agent") else None)
+            if choice:
+                layer_key = agent_key(choice)
+            if layer_key == key:
+                configured.update({k: v for k, v in worker.items() if v is not None})
+        if not configured and agent_key(default) == key:
+            configured = pick
+        # Same safeguard as an explicit Cursor choice: when no compatible mode was configured,
+        # keep Ask if the default worker was configured to ask more often than Cursor's Auto.
+        if key == "cursor" and not (configured.get("perm") or configured.get("argv")) and pick.get("perm") in ASKS_MORE:
+            configured["perm"] = "manual"
+        pick = {**configured, "agent": key}
     if not pick.get("agent") and not pick.get("argv"):
         pick["agent"] = "claude"
-    for k in ("model", "effort"):
-        if task.get(k):
-            pick[k] = task[k]
+    if not (agent and (own or affinity) and agent_key([agent]) != agent_key([own or affinity])):
+        for k in ("model", "effort"):
+            if task.get(k):
+                pick.pop("argv", None)
+                pick[k] = task[k]
     return pick
 
 
 def worker_argv(s, task, space=None, agent=None):
     """A task's agent when nobody gave an argv: worker_pick's."""
     pick = worker_pick(s, task, space, agent)
-    if pick.get("argv") and not (task.get("model") or task.get("effort")):
-        return argv_for(pick)
-    pick.pop("argv", None)
+    if pick.get("argv"):
+        argv = argv_for(pick)
+        return normalize_agent_argv(argv) if agent or task.get("assistant") else argv
     pick.setdefault("agent", "claude")
     return argv_for(pick) or agent_argv(pick["agent"])
+
+
+def worker_source(task):
+    if task.get("agent"):
+        return "task"
+    if (task.get("assistant") or {}).get("agent"):
+        return "assistant"
+    return None
+
+
+def planned_worker(s, t, space):
+    q = t.get("queue") or {}
+    previous = (t.get("agents") or [{}])[-1]
+    return q.get("argv") or previous.get("argv") or worker_argv(s, t, space)
 
 
 def argv_model(argv):
@@ -393,7 +425,7 @@ def argv_model(argv):
 
 SETTINGS_HEAD = "Settings: (from herdr-task show; where the brief above says otherwise, it wins)"
 SET_BY = {"task": "set by the assistant for this task", "folder": "this folder's setting", "machine": "this machine's setting",
-          "all": "your setting everywhere", "space": "this space's setting"}
+          "all": "your setting everywhere", "space": "this space's setting", "assistant": "same provider as the Assistant that requested this task"}
 MERGE_WORDS = {"ask": "ask the person first: they accept it in the Tasks panel, which merges it",
                "checks": "after checks: once you say ready, Herdr merges it when its checks pass",
                "auto": "on its own: once you say ready, Herdr merges it"}
@@ -617,7 +649,8 @@ def reviewer_command(who, model=None, effort=None, folder=None):
 def task_settings(s, t, space=None, argv=None, live=False):
     """The settings that shape this task's work, each {label, text, value, by}. live: for a brief, so its Reviewer
     line is checked against what Codex says now (sign-in and models), not only the last periodic check."""
-    space = space or t.get("space")
+    q = t.get("queue") or {}
+    space = space or q.get("space") or t.get("space") or (t.get("assistant") or {}).get("space")
     cfg = settings_for(s, space)
     k, sets = cfg["tasks"], t.get("set") or {}
     lines = []
@@ -639,8 +672,8 @@ def task_settings(s, t, space=None, argv=None, live=False):
         on, rev_by = rounds_cfg > 0, by_layer(s, space, "tasks", "review_rounds", rounds_cfg > 0, False)
     here = t.get("mode") != "worktree"
     add("Review", "off" if not on else "on", on, rev_by)
-    # What it runs on: the given argv, else its last agent's, else what it would start with.
-    argv = argv or (t["agents"][-1].get("argv") if t.get("agents") else None) or worker_argv(s, t, space)
+    # What it runs on: the given argv, else its queued plan or last agent, else the effective choice.
+    argv = argv or planned_worker(s, t, space)
     agent = agent_key(argv)
     if on:
         rv = dict(cfg.get("reviewer") or {})
@@ -731,8 +764,14 @@ def task_settings(s, t, space=None, argv=None, live=False):
         "task" if "proof" in sets else by_layer(s, space, "tasks", "proof", proof, True))
     model, effort = argv_model(argv)
     text = agent + (f", model {model}" if model else "") + (f", effort {effort}" if effort else "")
-    a_by = "task" if any(t.get(f) for f in ("agent", "model", "effort")) else \
-        by_layer(s, space, "worker", None, bool(cfg.get("worker")), False)
+    if q.get("argv"):
+        a_by = "task" if q.get("custom") else q.get("worker_by") or worker_source(t)
+    elif t.get("agents") or "worker_by" in t:
+        a_by = t.get("worker_by") or ("task" if t.get("agent") else None)
+    else:
+        a_by = worker_source(t)
+    if not a_by:
+        a_by = "task" if t.get("model") or t.get("effort") else by_layer(s, space, "worker", None, bool(cfg.get("worker")), False)
     add("Agent", text, {"agent": agent, "model": model, "effort": effort}, a_by)
     # Suggested next message (SHEP-186): the reply ends with the words the person would likely send next (templates/worker.md)
     sug = (cfg.get("agents") or {}).get("suggestions") is not False
@@ -788,7 +827,8 @@ def settings_block(s, t, space=None, argv=None, live=False):
     lines = task_settings(s, t, space, argv, live)
     rows = [f"- {x['label']}: {x['text']}" + (f" ({SET_BY[x['by']]})" if x["by"] else "") for x in lines]
     # Codex's sandbox can't start here (SHEP-227, #998): the worker hears it in its brief and tells the person.
-    word = sandbox_word(lines, argv or (t["agents"][-1].get("argv") if t.get("agents") else None) or worker_argv(s, t, space))
+    space = space or (t.get("queue") or {}).get("space") or t.get("space") or (t.get("assistant") or {}).get("space")
+    word = sandbox_word(lines, argv or planned_worker(s, t, space))
     if word:
         rows.append(f"- Sandbox: {word}")
     return "\n".join([SETTINGS_HEAD, *rows])
@@ -868,9 +908,13 @@ def agent_argv(key, argv_json=None):
         argv = [str(x) for x in argv]
     else:
         argv = list(AGENTS.get(key, [key]))
+    return normalize_agent_argv(argv)
+
+
+def normalize_agent_argv(argv):
     # Codex runs its commands outside hc without --no-daemon.
     if agent_key(argv) == "codex" and "--no-daemon" not in argv:
-        argv.append("--no-daemon")
+        return [*argv, "--no-daemon"]
     return argv
 
 

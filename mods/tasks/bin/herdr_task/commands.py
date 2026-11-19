@@ -14,7 +14,7 @@ from . import sandbox
 from .base import Fail, git, guard, now, run, STORE, stop_note, VERSION
 from .settings import (
     agent_argv, agent_key, auto_accept_default, bare, delivery_for, delivery_of, merge_policy, open_pr, review_limits, set_opts, settings_block, settings_for, space_base,
-    task_settings, worker_argv, worktrees_on,
+    task_settings, worker_argv, worker_source, worktrees_on,
 )
 from .agents import (
     agent_log, agent_running, background_jobs, busy_again, detail, fit, LINE_MAX, live_agents, ready_turns, ready_wait, STATUSES,
@@ -26,7 +26,7 @@ from .github import (already_merged, checks_missing, github_unreachable, pr_for_
 from .github import CHECKS_RUNNING as PR_CHECKS_RUNNING
 from .launch import (
     base_ref, brief, caller_labels, caller_space, current_base, default_space, folder_for, handoff, launch, name_tabs,
-    own_path, parent_for, resume_argv, retag_tabs, set_branch, tab_title, task_tabs,
+    own_path, parent_for, resume_argv, retag_tabs, set_branch, tab_title, task_assistant, task_tabs,
 )
 from .store import bare_by_mistake, is_task_list, locate, open_store, prefixes_in_use, read_list, Store, store_files
 from .queues import after_refs, parse_after, queue_reason, set_after
@@ -151,6 +151,8 @@ def cmd_add(args):
             t.setdefault("set", {})["proof"] = "off"
         set_opts(t, args)
         space = bare(args.space) if args.space else caller_space()
+        assistant = task_assistant()
+        capture_assistant(t, assistant, space)
         set_base(s, t, args.base, space, new=True)
         set_branch(s, t, getattr(args, "branch", None))
         set_notes(t, args)
@@ -158,7 +160,9 @@ def cmd_add(args):
             set_after(s, t, *parse_after(s, args.after))
         if at:
             # Started later by the scheduler, with no caller to ask: its space is kept now.
-            schedule(s, t, at, {"space": space or default_space()})
+            space = space or default_space()
+            plan = worker_plan(s, t, space, assistant["parent"]) if assistant else {"space": space}
+            schedule(s, t, at, plan)
         # SHEP-5: its space's Accept when ready, unless this one waits for the person's Accept (--no-auto-accept)
         if getattr(args, "no_auto_accept", False):
             t["accept_default"] = OWN_CHOICE
@@ -215,6 +219,24 @@ def space_accept(t, space, new=False):
 # scheduled_for (ms) and what start would use (queue: argv, space, parent). The scheduler's tick
 # (tick.py's due_pass) queues it once that time comes, also a time passed while the machine was
 # off, and the queue starts it as any queued task (after its --after tasks, when there's room).
+
+def capture_assistant(t, assistant, space, override=False):
+    """Keep the first Assistant's identity and provider for a task's first launch, even after it leaves."""
+    if assistant and not (t.get("assistant") or t.get("started") or t.get("agents")) and t["state"] == "todo":
+        t["assistant"] = {"parent": assistant["parent"], "space": space,
+                          "agent": None if override or t.get("agent") else assistant["agent"]}
+
+
+def worker_plan(s, t, space, parent, agent=None, argv_json=None):
+    plan = {"space": space, "parent": parent}
+    if argv_json:
+        plan.update(argv=agent_argv(None, argv_json), custom=True, worker_by="task")
+    elif agent:
+        plan.update(argv=worker_argv(s, t, space, agent), agent=agent, worker_by="task")
+    else:
+        plan.update(argv=worker_argv(s, t, space), worker_by=worker_source(t))
+    return plan
+
 
 def scheduled_at(args):
     """--at / --in as a moment (ms), or None when neither was given."""
@@ -361,6 +383,8 @@ def begin(s, t, argv, space, parent=None):
     t["state"], t["started"] = "running", now()
     # Its brief teaches `reviewed`: ready waits for a review of its final commit (review_refusal).
     t["review_gate"] = True
+    plan = t.get("queue") or {}
+    t["worker_by"] = "task" if plan.get("custom") else plan.get("worker_by") or worker_source(t)
     for k in ("queue", "queued_at", "attention", "held", "scheduled_for"):
         t.pop(k, None)
     if t.get("mode") == "worktree" and not t.get("worktree") and not worktrees_on(s, space):
@@ -400,11 +424,18 @@ def cmd_start(args):
             t["mode"] = "worktree"
         set_branch(s, t, getattr(args, "branch", None))
         q = t.get("queue") or {}
-        space = bare(args.space) if args.space else (q.get("space") or default_space())
-        argv = agent_argv(None, args.argv) if args.argv else worker_argv(s, t, space, args.agent) if args.agent else \
-            (q.get("argv") or worker_argv(s, t, space))
-        parent = args.parent or q.get("parent")
-        plan = {"argv": argv, "space": space, "parent": parent, **({"custom": True} if args.argv else {})}
+        saved = t.get("assistant") or {}
+        space = bare(args.space) if args.space else (q.get("space") or saved.get("space") or default_space())
+        assistant = task_assistant(args.parent) if t["state"] == "todo" else None
+        capture_assistant(t, assistant, space, override=bool(args.argv or args.agent))
+        parent = args.parent or q.get("parent") or (assistant or saved).get("parent")
+        prev = last_agent(t)
+        if not (args.argv or args.agent) and q.get("argv"):
+            plan = {**q, "space": space, "parent": parent}
+        elif not (args.argv or args.agent) and prev and prev.get("argv") and (t.get("pick_at") or 0) <= (prev.get("at") or 0):
+            plan = {"argv": prev["argv"], "space": space, "parent": parent, "worker_by": t.get("worker_by")}
+        else:
+            plan = worker_plan(s, t, space, parent, args.agent, args.argv)
         if space_accept(t, space):  # SHEP-5: added with no space known, its space's Accept when ready now
             s.dirty = True
         at = scheduled_at(args)
@@ -422,7 +453,8 @@ def cmd_start(args):
             s.dirty = True
             v = view(s, t)
         else:
-            a = begin(s, t, argv, space, parent)
+            t["queue"] = plan
+            a = begin(s, t, plan["argv"], space, plan["parent"])
             v = view(s, t)
     # The scheduler starts queued tasks and tells the Assistant its tasks' news.
     try:
@@ -438,7 +470,7 @@ def cmd_start(args):
     out = {**v, "terminal": a["address"], "space": space, "parent": a.get("parent")}
     text = f"{s.ref(t)} started: {a['address']} in {folder_desc(t, s)}"
     # Codex's sandbox can't start here (SHEP-227, #998): whoever started it hears why and the fix, once per start.
-    broken = sandbox.check() if sandbox.sandboxed(argv) else None
+    broken = sandbox.check() if sandbox.sandboxed(plan["argv"]) else None
     if broken:
         out["sandbox"] = sandbox.notice(broken)
         text += "\n\n" + out["sandbox"]
@@ -984,14 +1016,24 @@ def cmd_edit(args):
             t["pick_at"] = now()
             q = t.get("queue") or {}
             if q.get("argv") and not q.get("custom"):
-                q["argv"] = worker_argv(s, t, q.get("space"))
+                if t.get("agent") != pick[0]:
+                    q.pop("agent", None)
+                q.update(worker_plan(s, t, q.get("space"), q.get("parent"), q.get("agent")))
         set_base(s, t, args.base)
         set_notes(t, args)
         if args.after is not None:
             set_after(s, t, *parse_after(s, args.after))
         at = scheduled_at(args) if (args.at or "").strip() or args.in_ is not None else None
         if at:
-            schedule(s, t, at)
+            plan = None
+            if t["state"] == "todo" and not t.get("queue"):
+                saved = t.get("assistant") or {}
+                assistant = task_assistant()
+                if assistant or saved:
+                    space = saved.get("space") or default_space()
+                    capture_assistant(t, assistant, space)
+                    plan = worker_plan(s, t, space, (assistant or saved)["parent"])
+            schedule(s, t, at, plan)
         elif args.at is not None:
             unschedule(t)  # --at "": back to To do
         if args.here or args.worktree:
@@ -1061,6 +1103,8 @@ def start_again(s, t, space, key=None, argv_json=None, message=None, parent=None
     keep = prev and prev.get("argv") and (t.get("pick_at") or 0) <= (prev.get("at") or 0)
     argv = agent_argv(None, argv_json) if argv_json else worker_argv(s, t, space, key) if key else \
         (prev["argv"] if keep else worker_argv(s, t, space))
+    if key or argv_json or not keep:
+        t["worker_by"] = "task" if key or argv_json else worker_source(t)
     same = prev and agent_key(argv) == prev.get("agent")
     res = resume_argv(argv, prev["session"], folder_for(s, t)) if same and prev.get("session") else None
     if res:
