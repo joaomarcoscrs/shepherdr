@@ -28,6 +28,8 @@ MYTAB=$(hc get $HC_TERMINAL_ID | jq -r '.labels["herdr.tab"] // .labels["herdr.c
 herdr-app ls              # every space, its tabs and their terminals
 ```
 
+Look with one plain command per call (`herdr-task show HAT-1`, `herdr-task list`, `hc read t5 --lines 40`): no `;`, `|`, `&&` or `$(…)` chains, no `echo`, `tail`, `head` or `2>/dev/null` around it. Each extra program is one more your permissions may lack, and an Assistant on Cursor asks the person for each. herdr-task finds the space itself (`resume`, `start`: the task's own); `$HC_TERMINAL_ID` is always set, never guess it from `hc list`.
+
 ## Plan
 
 Split the ask into tasks. Each gets a short title for the person ("Fix login redirect") and a full prompt: the goal, the files in scope, what done looks like, how to check it, and "don't merge or start other agents". Tasks that can't start before others are done say so with `--after`. If the split isn't obvious, show the person the plan first.
