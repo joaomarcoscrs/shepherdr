@@ -66,7 +66,8 @@ async function sendNow(hub: Hub, b: any, compat: Compat, again = false) {
   const body = [messageBody({ text, quote: typeof b.quote === "string" ? b.quote.slice(0, 2000) : null, tags: typeof b.tags === "string" ? b.tags : "" }), ...files].filter(Boolean).join("\n\n");
   // held on purpose (Ctrl+Enter, a long press): it goes once the agent stops working
   const st = (hub.terminals.get(a) as any)?.status?.state;
-  if (b.hold && (st === "working" || st === "blocked")) {
+  // Cursor's chat bridge asking: words never answer or reject its permission (SHEP-17), so they wait for it too
+  if ((b.hold && (st === "working" || st === "blocked")) || (kindOf(t) === "cursor" && st === "blocked")) {
     const cid = typeof b.cid === "string" ? b.cid.slice(0, 80) : undefined;
     // once it goes: the chat knows it again by its words (its id and files), so the page sees it went in
     const note = () => { if (cid) compat.noteSend?.(a, { cid, text, files: sent, at: Date.now() }); };

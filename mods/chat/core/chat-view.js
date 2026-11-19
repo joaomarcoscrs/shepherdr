@@ -17,6 +17,8 @@ export const WORDS = {
   askingInTerminal: "The agent is asking something in the terminal.",
   openTerminal: "Open terminal",
   replyInstead: "Reply instead…",
+  // Cursor's chat bridge (SHEP-17): a message never answers its permission; it goes once that is answered
+  waitsForAnswer: "Answer it first; a message waits till then…",
   showMore: "Show more",
   showLess: "Show less",
   queued: "Queued · Sends when the agent is free",
