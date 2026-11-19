@@ -4,13 +4,44 @@
 // Claude Code: ~/.claude/sessions/<pid>.json names the session its process writes, so the
 // log is ~/.claude/projects/*/<sessionId>.jsonl. Codex keeps its rollout file open, so the
 // file is whatever rollout-*.jsonl its process (or a child) holds. Cursor's chat bridge (herdr-task cursor-chat, SHEP-6)
-// holds its transcript open the same way: cursor-chats/<chat id>.jsonl. All exact: no
-// guessing by folder or time, so two agents in one folder never get mixed up.
+// holds its transcript open the same way: cursor-chats/<chat id>.jsonl. Native Cursor holds its chat
+// database open, and herdr.resume records the matching transcript path.
 
 // Prints the log's path on the agent's machine, or nothing. Args: kind, pid. The processes under pid come
 // from one read of /proc, else one ps (macOS) (GitHub #1013: a pgrep per process read every process each
 // time).
 import { codexQuestions } from "./asks.js";
+
+// The native Cursor file must stay under this user's Cursor data root on the agent's machine.
+const CURSOR_FILE = String.raw`
+cursor_file() {
+  root=${"$"}{CURSOR_CONFIG_DIR:-$HOME/.cursor}
+  root=${"$"}{root%/}
+  case "$1" in "$root"/projects/*) rel=${"$"}{1#"$root"/} ;; *) return 1 ;; esac
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  physical=$(cd -P -- "$root" 2>/dev/null && pwd -P) || return 1
+  parent=$(cd -P -- "${"$"}{1%/*}" 2>/dev/null && pwd -P) || return 1
+  [ "$parent" = "$physical/${"$"}{rel%/*}" ]
+}
+`;
+
+// Args (already shape-checked): foreground pid, label session id, exact label path. Require the
+// foreground to have just one Cursor chat store open. A stale label or an ambiguous store fails closed.
+export const FIND_NATIVE_CURSOR = CURSOR_FILE + String.raw`
+pid="$1"; sid="$2"; log="$3"
+cursor_file "$log" || exit 0
+if [ -d "/proc/$pid/fd" ]; then
+  files=$(for f in /proc/"$pid"/fd/*; do readlink "$f"; done 2>/dev/null)
+else
+  files=$(lsof -p "$pid" -Fn 2>/dev/null | sed -n 's/^n//p')
+fi
+ids=$(printf '%s\n' "$files" | LC_ALL=C awk -v prefix="$physical/chats/" '
+  index($0, prefix) == 1 {
+    n = split(substr($0, length(prefix) + 1), p, "/")
+    if (n == 3 && p[1] ~ /^[0-9a-f]+$/ && p[3] == "store.db" && !seen[p[2]]++) print p[2]
+  }')
+[ "$ids" != "$sid" ] || printf '%s\n' "$log"
+`;
 
 export const FIND = `
 kind="$1"; pid="$2"
@@ -48,8 +79,11 @@ true`;
 //                                     last whole line), going back in growing chunks:
 //                                     "P <start> <end>" (start 0: the very start)
 //   log results <file> <offset>...    the first 64 KB of the lines at those offsets
-export const LOG = String.raw`
+export const LOG = CURSOR_FILE + String.raw`
+native=0
+if [ "$1" = cursor-native ]; then native=1; shift; fi
 mode="$1"; f="$2"
+[ "$native" -eq 0 ] || cursor_file "$f" || { echo "missing"; exit 0; }
 [ -f "$f" ] || { echo "missing"; exit 0; }
 s=$(wc -c < "$f" | tr -d ' ')
 X='
@@ -58,6 +92,15 @@ BEGIN { pos = base; first = base; msgs = 0 }
   off = pos; pos += length($0) + 1
   if (NR == 1 && skip) { first = pos; next }
   line = $0
+  if (native) {
+    if (line !~ /"role"[[:space:]]*:[[:space:]]*"(user|assistant)"/) next
+    msgs++
+    if (count) next
+    gsub(/"image_url"[[:space:]]*:[[:space:]]*"data:[^"]*"/, "\"image_url\":\"\"", line)
+    gsub(/"data"[[:space:]]*:[[:space:]]*"[^"]*"/, "\"data\":\"\"", line)
+    if (length(line) <= 262144) print off "\tJ\t" line
+    next
+  }
   head = substr(line, 1, 400)
   claude = index(head, "\"isSidechain\":false") && index(line, "\"type\":\"user\",\"message\"")
   codex = index(head, "\"type\":\"response_item\"")
@@ -130,7 +173,7 @@ BEGIN { pos = base; first = base; msgs = 0 }
   print off "\tJ\t" line
 }
 END { if (first > pos) first = pos; print "#\t" first "\t" msgs }'
-range() { tail -c +$(($1 + 1)) "$f" | head -c $(($2 - $1)) | LC_ALL=C awk -v base="$1" -v skip="$3" -v count="$4" "$X"; }
+range() { tail -c +$(($1 + 1)) "$f" | head -c $(($2 - $1)) | LC_ALL=C awk -v base="$1" -v skip="$3" -v count="$4" -v native="$native" "$X"; }
 case "$mode" in
 tail)
   o="$3"; [ "$s" -lt "$o" ] && o=0
@@ -147,7 +190,15 @@ page)
   if [ "$e" -ge "$s" ]; then
     e="$s"
     if [ "$s" -gt 0 ] && [ "$(tail -c +"$s" "$f" | head -c 1 | wc -l | tr -d ' ')" = 0 ]; then
-      e=$((s - $(tail -c 1048576 "$f" | LC_ALL=C awk 'END { print length($0) }')))
+      # Enlarge the sample when an unfinished record spans the entire sample.
+      chunk=1048576
+      while :; do
+        lo=$((s - chunk)); [ "$lo" -lt 0 ] && lo=0
+        part=$(tail -c +$((lo + 1)) "$f" | head -c $((s - lo)) | LC_ALL=C awk 'END { print length($0) }')
+        if [ "$part" -lt "$chunk" ] || [ "$lo" -eq 0 ]; then break; fi
+        chunk=$((chunk * 2))
+      done
+      e=$((s - part))
     fi
   fi
   a="$e"; b="$e"; n=0; c=1000000
@@ -635,8 +686,9 @@ export function claudeSwitch(text) {
 }
 
 export class Conversation {
-  constructor(kind) {
+  constructor(kind, format = null) {
     this.kind = kind;
+    this.format = format;
     this.items = [];
     // The Autopilot wake whose turn runs now (its line fills in as it goes: pilotLine()).
     this.pilot = null;
@@ -913,7 +965,10 @@ export class Conversation {
       }
       const l = parse(r.data);
       if (!l || typeof l !== "object") continue;
-      if (this.kind === "codex") this.codex(l, r.off); else if (this.kind === "cursor") this.cursor(l, r.off); else this.claude(l, r.off);
+      if (this.format === "cursor-native") this.nativeCursor(l, r.off);
+      else if (this.kind === "codex") this.codex(l, r.off);
+      else if (this.kind === "cursor") this.cursor(l, r.off);
+      else this.claude(l, r.off);
     }
   }
 
@@ -1070,8 +1125,34 @@ export class Conversation {
     }
   }
 
+  // Native Cursor records messages rather than ACP events. Tools are historical activity only.
+  nativeCursor(l, off) {
+    if (l.role !== "user" && l.role !== "assistant") return;
+    const c = l.message?.content;
+    const blocks = Array.isArray(c) ? c : typeof c === "string" ? [{ type: "text", text: c }] : [];
+    const at = time(l.timestamp ?? l.message?.timestamp);
+    const text = blocks.filter((b) => b?.type === "text" && typeof b.text === "string").map((b) => b.text);
+    if (l.role === "user") {
+      const u = cleanUser(text.map((s) => s.replace(/^\s*<user_query>\s*([\s\S]*?)\s*<\/user_query>\s*$/, "$1")).join("\n\n"));
+      const images = blocks.filter((b) => b?.type === "image" || b?.type === "image_url").length;
+      if (u || images) this.user(`u${off}`, { text: "", ...u, at, images });
+      return;
+    }
+    const said = this.agentText(text.join("\n\n"));
+    if (said) this.push({ kind: "agent", id: `a${off}`, text: said, at, ...this.takeSuggest() });
+    for (const [i, b] of blocks.entries()) {
+      if (b?.type !== "tool_use" || typeof b.name !== "string" || !b.name) continue;
+      const name = clip(b.name, 80);
+      const st = claudeStep(name, b.input && typeof b.input === "object" ? b.input : {});
+      const id = `c${off}:${i}`;
+      this.step(id, off, { kind: st?.kind ?? "tool", line: st?.line ?? `Used ${name}` });
+      this.done(id);
+    }
+  }
+
   // Cursor through herdr-task cursor-chat (SHEP-6): its transcript's records, one a line.
   cursor(l, off) {
+    if (l.herdr !== "cursor") return;
     const at = time(l.at);
     switch (l.type) {
       case "session": case "model":

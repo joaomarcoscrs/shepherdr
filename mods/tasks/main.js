@@ -870,7 +870,7 @@ export default class Tasks extends View {
     const worker = p.live.find((x) => x.role !== "reviewer" && x.status === "blocked") ?? p.live.find((x) => x.role !== "reviewer") ?? p.live[0];
     if (worker) return open(worker.address);
     const last = task.agents?.[task.agents.length - 1];
-    if (last?.address) return open(m ? `${m}/${last.address}` : last.address, { log: last.log ? { path: last.log, kind: last.agent ?? null } : null });
+    if (last?.address) return open(m ? `${m}/${last.address}` : last.address, { log: last.log ? { path: last.log, kind: last.agent ?? null, session: last.session } : null });
     return open(null, { note: p.section === "queued" ? capital(this.queueReason(list, task)) : "This task hasn't started." });
   }
 

@@ -1,6 +1,6 @@
 """`herdr-task cursor-chat`: Cursor Agent as a chat agent (an Assistant), in its terminal (SHEP-6).
 
-Cursor's own terminal UI keeps no log Shepherdr can read and reports no status, so an Assistant on Cursor runs this
+Cursor's own terminal UI does not expose its input and approvals to the chat, so an Assistant on Cursor runs this
 instead: it starts one `cursor-agent acp` (Cursor's Agent Client Protocol server: JSON-RPC over stdio) and is the
 client a person or the chat types into, as they would into Claude Code:
 

@@ -16,6 +16,7 @@ export const WORDS = {
   subOpen: "Open its chat",
   askingInTerminal: "The agent is asking something in the terminal.",
   openTerminal: "Open terminal",
+  cursorTerminal: "Send messages and answer Cursor in the terminal.",
   replyInstead: "Reply instead…",
   // Cursor's chat bridge (SHEP-17): a message never answers its permission; it goes once that is answered
   waitsForAnswer: "Answer it first; a message waits till then…",
@@ -129,7 +130,8 @@ export function clock(at, now = new Date()) {
 
 // The actions under a message, in order: reply and copy; then the CLI's rewind on your own (not a /command, not one
 // another agent sent; rewind: false for a CLI without one, Cursor), or its fork on the agent's (when the CLI is known).
-export function bandActs(side, text, { from = null, fork = true, rewind = true } = {}) {
+export function bandActs(side, text, { from = null, fork = true, rewind = true, reply = true } = {}) {
+  if (!reply) return ["copy"];
   if (side === "user") return ["reply", "copy", ...(/^\//.test(String(text ?? "")) || from || !rewind ? [] : ["rewind"])];
   return ["reply", "copy", ...(fork ? ["fork"] : [])];
 }

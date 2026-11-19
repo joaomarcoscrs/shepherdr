@@ -47,11 +47,11 @@ export const onTerminal = (fn: (chat: string) => void) => void (showTerminal = f
  *  The reactions always show; the rest while the pointer is on the message,
  *  in room that is always kept, so nothing moves. A finger holds the message instead (its own bar). */
 /** cursor: Cursor's chat (herdr-task cursor-chat), which has no rewind and no fork. */
-export function Band({ msg, chat, cli, cursor }: { msg: Message; chat: string; cli?: boolean; cursor?: boolean }) {
+export function Band({ msg, chat, cli, cursor, terminalOnly }: { msg: Message; chat: string; cli?: boolean; cursor?: boolean; terminalOnly?: boolean }) {
   const you = msg.who === 'you'
   const { copied, copy } = useCopy()
-  const acts = bandActs(you ? 'user' : 'agent', msg.text, { fork: cli !== false && !cursor, rewind: !cursor })
-  const react = has('reactions')
+  const acts = bandActs(you ? 'user' : 'agent', msg.text, { fork: cli !== false && !cursor, rewind: !cursor, reply: !terminalOnly })
+  const react = !terminalOnly && has('reactions')
   const pills = msg.reactions?.length ? registry.messageEdge.map(({ View }, i) => <View key={i} msg={msg} chat={{ key: chat } as Chat} />) : null
   const time = clock(msg.at)
   const btn = 'grid size-[22px] shrink-0 place-items-center rounded-[5px] text-fg3 hover:bg-hover hover:text-fg'

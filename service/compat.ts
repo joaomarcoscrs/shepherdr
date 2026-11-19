@@ -7,7 +7,7 @@ import { failedOf } from "./send-once.ts";
 import type { Snapshot, Place, Task, Need, Section, Machine, Chat, Message, Status, TaskStatus, StepKind, ActivityAnswer, Question, Artifact, SettingSection, Job } from "../web/shared/types.ts";
 import * as T from "../core/tasks.js";
 import * as SPc from "../core/spaces.js";
-import { kindOf as kindOfTerm, agentKindOf } from "../core/chat-reader.js";
+import { kindOf as kindOfTerm, agentKindOf, nativeCursorTerminal } from "../core/chat-reader.js";
 import * as CL from "../core/chat-log.js";
 import * as CV from "../core/chat-view.js";
 import { taskArtifacts } from "../core/task-artifacts.js";
@@ -374,7 +374,11 @@ export class Compat {
     const tasks: Task[] = rows.filter((r) => r.section !== "done" || (r.done_at && Date.now() - r.done_at < 7 * 86400000)).map((r) => {
       const id = taskId(r);
       if (r.worker) chats.set(`${id}/worker`, r.worker);
-      else if (r.lastLog) chats.set(`${id}/worker`, `log:${r.machine ?? ""}|${r.lastLog.kind}|${r.lastLog.path}`);
+      else if (r.lastLog) {
+        const { kind, session, path } = r.lastLog;
+        const source = kind === "cursor" && session ? `${kind}:${session}` : kind;
+        chats.set(`${id}/worker`, `log:${r.machine ?? ""}|${source}|${path}`);
+      }
       const t: Task = {
         id, name: r.title, status: SECTION[r.section] ?? "todo", place: placeOf(r), listName: placeName(r), age: r.started ? ago(r.started, false) : "",
         state: r.section, on: r.machine ?? host, created: "", ...(r.folder ? { taskFolder: r.folder } : {}),
@@ -522,6 +526,7 @@ export class Compat {
     const messages: Message[] = [];
     let at = 0;
     const items: any[] = reader.conv?.items ?? [];
+    const nativeCursor = reader.format === "cursor-native" || nativeCursorTerminal(t);
     const machine = reader.machine ?? null;
     const term = (a: string) => (this as any).terminalsOf?.(a) ?? null;
     // an Assistant's chat: its space's tasks (as the window's newsLines(): Herdr's news in place, a start, ready or done
@@ -653,7 +658,7 @@ export class Compat {
       if (!s && q.images) messages.push({ id: `${q.id}:n`, images: q.images, ...mark } as Message);
     }
     // what the agent asks now, as cards at the end of its chat
-    for (const a of addr ? this.asks?.of(addr) ?? [] : []) messages.push({ id: `ask:${a.id}`, who: "agent", at: a.at, question: this.question(a, key) });
+    for (const a of addr && !nativeCursor ? this.asks?.of(addr) ?? [] : []) messages.push({ id: `ask:${a.id}`, who: "agent", at: a.at, question: this.question(a, key) });
     if (codexCard) messages.push({ id: `ask:cq:${codexCard.id}`, who: "agent", at: codexCard.at ?? Date.now(), question: codexQuestion(codexCard, key) });
     for (const a of (this.secrets?.asks() ?? []).filter((x) => x.address === addr)) messages.push({ id: `secret:${a.address}:${a.name}`, who: "agent", at: Date.now(), secret: this.secretAsk(a) } as Message);
     // asks that closed, as the window's quiet lines ("✓ Run: npm test · Allowed in the chat"); a question's own line is
@@ -668,16 +673,17 @@ export class Compat {
         else messages.push(quiet(`se:${c.id}`, c.opened, `${ref ? `${ref} · ` : ""}${SCREEN.ended(c.cli, c.how)}`));
       }
     };
-    if (addr) screens(addr, null);
+    if (addr && !nativeCursor) screens(addr, null);
     // an Assistant's chat: its tasks' workers' asks on their own cards, headed by their task (one per task, its oldest),
     // their secrets, their start screens, and how each closed
     if (space) for (const r of spaceRows.filter((r) => r.worker)) {
       const by = { ref: r.ref, title: r.title, chat: `${taskId(r)}/worker` };
-      const a = (this.asks?.of(r.worker) ?? []).sort((p: any, q: any) => p.at - q.at)[0];
+      const nativeWorker = nativeCursorTerminal(term(r.worker));
+      const a = nativeWorker ? null : (this.asks?.of(r.worker) ?? []).sort((p: any, q: any) => p.at - q.at)[0];
       if (a) messages.push({ id: `ask:${a.id}`, who: "agent", at: a.at, question: { ...this.question(a, key), by } as any });
       else for (const s of (this.secrets?.asks() ?? []).filter((x) => x.address === r.worker)) messages.push({ id: `secret:${s.address}:${s.name}`, who: "agent", at: Date.now(), secret: { ...this.secretAsk(s), by } } as Message);
       for (const e of (this.asks as any)?.endsOf?.(r.worker) ?? []) messages.push(quiet(`ae:${e.id}`, e.at, `${r.ref} · ${e.title} · ${e.how}`));
-      screens(r.worker, r.ref, by);
+      if (!nativeWorker) screens(r.worker, r.ref, by);
     }
     const st = t?.status?.state ?? null;
     // the CLI's own subagents still at work, then its background shells and watchers, above the box (3.0: the helpers
@@ -723,6 +729,6 @@ export class Compat {
       : reader.state === "none" || reader.state === "missing" ? ((t && t.state !== "live") || !t ? "ended" : kind ? "none" : "unsupported")
       : !reader.pinned && (!t || t.state !== "live") && !items.length ? "ended" : null;
     const failed = failedOf(addr);
-    return { key, messages, ...(failed.length ? { failed } : {}), ...head, ...under, ...(note ? { note } : {}), ...(notice ? { notice } : {}), ...(agent ? { agent } : {}), ...(jobs.length ? { jobs } : {}), working: st === "working", cli: reader.kind === "codex" ? "codex" : reader.kind === "cursor" || (!reader.kind && agentKindOf(t) === "cursor") ? "cursor" : "claude", ...(reader.pinned || (t && t.state !== "live") ? { finished: true } : {}) };
+    return { key, messages, ...(nativeCursor ? { terminalOnly: true } : {}), ...(failed.length ? { failed } : {}), ...head, ...under, ...(note ? { note } : {}), ...(notice ? { notice } : {}), ...(agent ? { agent } : {}), ...(jobs.length ? { jobs } : {}), working: st === "working", cli: reader.kind === "codex" ? "codex" : reader.kind === "cursor" || (!reader.kind && agentKindOf(t) === "cursor") ? "cursor" : "claude", ...(reader.pinned || (t && t.state !== "live") ? { finished: true } : {}) };
   }
 }

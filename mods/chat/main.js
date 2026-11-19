@@ -28,9 +28,9 @@ import { focused, props, run, theme, home, hc, exec, shared, setShared, watchFol
 import { agents, panes, terminals, spaces, inRender } from "./live.js";
 import { chatPane, chatLabel } from "./core/spaces.js";
 import * as fs from "fs/promises";
-import { FIND, LOG, Conversation, records, resultText, summary, excerpt, names, pilotLine } from "./core/chat-log.js";
+import { LOG, Conversation, records, resultText, summary, excerpt, names, pilotLine } from "./core/chat-log.js";
 import { BgJobs } from "./core/bg-jobs.js";
-import { ChatReader } from "./core/chat-reader.js";
+import { ChatReader, KINDS, kindOf, nativeCursorTerminal, findChatLog, savedChatLog, chatLogArgs } from "./core/chat-reader.js";
 import { preview } from "./core/recipe.js";
 import { words, howAnswered, codexOnScreen, codexSteps } from "./core/asks.js";
 // The rows' words and rules the web app's chat draws by too (core/chat-view.js).
@@ -77,7 +77,6 @@ const PAGE = 200;
 const KEEP = 2000;
 // The conversation's width at most, in px: lines stay readable in a wide pane.
 const COLUMN = 760;
-const KINDS = { "claude-code": "claude", claude: "claude", codex: "codex" };
 const norm = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
 // The role templates' folder on the machine a command runs on (sh -c prefix: $dir).
 const TEMPLATE = 'dir="$HOME/.config/herdr-core/templates"; ';
@@ -674,7 +673,7 @@ export default class Chat extends View {
   // moment the chat knows its agent (not only once its conversation shows): an agent started
   // from here may ask in its first seconds, and without the flag the hook leaves it to the CLI.
   async flag() {
-    if (this.machine || !this.addr || this.phase === "ended") return;
+    if (this.machine || !this.addr || this.phase === "ended" || this.nativeCursor()) return;
     await exec("sh", ["-c", 'mkdir -p "$1/open" "$1/req" "$1/ans" && touch "$1/open/$2"', "x", this.askDir, this.addr]);
   }
 
@@ -794,6 +793,7 @@ export default class Chat extends View {
 
   // The card's answer goes to the waiting hook; it prints it as Claude's decision.
   reply(ask, text, cx) {
+    if (this.nativeCursor()) return;
     this.asks = this.asks.filter((a) => a !== ask);
     const how = howAnswered(ask, text, "in the chat");
     if (how) this.askEnded(ask, how);
@@ -828,7 +828,8 @@ export default class Chat extends View {
   // read yet is read right after; one gone without an answer from here gets its quiet line.
   workerAsks(cx) {
     const by = this.workerTasks();
-    const listed = (shared("inbox.asks") ?? []).filter((a) => by.has(a.terminal));
+    const native = new Set(terminals().filter(nativeCursorTerminal).map((k) => k.address));
+    const listed = (shared("inbox.asks") ?? []).filter((a) => by.has(a.terminal) && !native.has(a.terminal));
     const ids = new Set(listed.map((a) => a.id));
     for (const id of [...this.answeredAsks]) if (!ids.has(id)) this.answeredAsks.delete(id);
     const gone = [...this.shownAsks.values()].filter((a) => !ids.has(a.id));
@@ -871,6 +872,7 @@ export default class Chat extends View {
 
   // Answered on its card here: the same delivery as the worker's own chat (answerAsk()).
   replyWorker(ask, text, cx) {
+    if (nativeCursorTerminal(terminals().find((k) => k.address === ask.terminal))) return;
     this.answeredAsks.add(ask.id);
     ask.answered = true;
     const how = howAnswered(ask, text, "here");
@@ -924,13 +926,14 @@ export default class Chat extends View {
   // { id, at, strips, owner (its AskCards, for keys), ask, question (a questions card) }.
   timelineCards() {
     const out = [];
-    for (const a of this.asks) out.push({ id: `card:${a.id}`, at: askAt(a.id), strips: this.cards.strips(a, { who: this.cli() }), owner: this.cards, ask: a, question: a.words.kind === "questions" });
+    const native = this.nativeCursor();
+    for (const a of native ? [] : this.asks) out.push({ id: `card:${a.id}`, at: askAt(a.id), strips: this.cards.strips(a, { who: this.cli() }), owner: this.cards, ask: a, question: a.words.kind === "questions" });
     const cq = this.codexCard();
     if (cq) out.push({ id: `card:${cq.id}`, at: cq.at, strips: this.codexCards.strips(cq, { who: "Codex" }), owner: this.codexCards, ask: cq, question: true });
     for (const a of this.sasks ?? []) {
       if (!a.kept) out.push({ id: `card:s:${a.name}`, at: this.seenAt(`s:${a.address}|${a.name}`), strips: this.secretCards.strips(a, { who: this.cli() }) });
     }
-    const own = this.addr && openCard(this.addr);
+    const own = !native && this.addr && openCard(this.addr);
     if (own) out.push({ id: `card:${own.id}`, at: own.opened, strips: screenStrips(own, { who: this.cli(),
       busy: this.screenBusy.has(own.id), error: this.screenErr.get(own.id),
       press: (i, cx) => this.pressScreen(own, i, cx), toTerminal: () => this.toTerminal() }) });
@@ -946,7 +949,7 @@ export default class Chat extends View {
     for (const [addr, x] of this.workerTasks()) {
       // Its secret asks' moments, noted even while a question of its hides them (seenAt()).
       for (const s of this.secretCards.items(addr)) if (!s.kept) this.seenAt(`s:${s.address}|${s.name}`);
-      const card = openCard(addr);
+      const card = !nativeCursorTerminal(terminals().find((k) => k.address === addr)) && openCard(addr);
       if (card) out.push({ id: `card:${card.id}`, at: this.afterNews(x.ref, card.opened), strips: screenStrips(card, { who: x.ref, links: open(card.id, x.ref, x.title, addr),
         busy: this.screenBusy.has(card.id), error: this.screenErr.get(card.id), press: (i, cx) => this.pressScreen(card, i, cx) }) });
     }
@@ -975,11 +978,16 @@ export default class Chat extends View {
   ownTerminal() {
     const live = terminals().find((x) => x.address === this.addr);
     if (!this.t || this.t.address !== this.addr) return live ?? null;
-    return live ? { ...this.t, status: live.status, turn: live.turn, state: live.state } : this.t;
+    return live ? { ...this.t, status: live.status, turn: live.turn, state: live.state,
+      labels: live.labels ?? this.t.labels, foreground: live.foreground ?? this.t.foreground } : this.t;
   }
 
   log(args) {
-    return exec("sh", ["-c", LOG, "log", ...args], { on: this.machine });
+    return exec("sh", ["-c", LOG, ...chatLogArgs(this.format, args)], { on: this.machine });
+  }
+
+  nativeCursor() {
+    return this.format === "cursor-native" || nativeCursorTerminal(this.ownTerminal());
   }
 
   // ---- start screens and lost sessions ------------------------------------------------------
@@ -1034,7 +1042,7 @@ export default class Chat extends View {
   }
 
   pressScreen(card, i, cx) {
-    if (this.screenBusy.has(card.id)) return;
+    if (this.screenBusy.has(card.id) || nativeCursorTerminal(terminals().find((k) => k.address === card.addr))) return;
     this.screenBusy.add(card.id);
     this.screenErr.delete(card.id);
     cx.notify();
@@ -1116,7 +1124,23 @@ export default class Chat extends View {
   // agent started in the same terminal writes another file.
   async locate(cx) {
     if (this.swapping) return;
-    const r = await hc(["get", this.addr, "--json"]);
+    if (this.thread && this.endedLog) {
+      const { path, kind, session } = this.endedLog;
+      const log = savedChatLog(path, kind, session);
+      this.endedLog = null;
+      this.ended = true;
+      if (!log) { this.set("ended", cx); return; }
+      this.path = log.path;
+      this.format = log.format;
+      this.kind = KINDS[kind];
+      this.reset();
+      this.pinned = true;
+      return;
+    }
+    if (this.thread && this.ended) return;
+    const addr = this.addr;
+    const r = await hc(["get", addr, "--json"]);
+    if (this.addr !== addr || this.swapping) return;
     let t = null;
     try { t = JSON.parse(r.stdout || "null"); } catch {}
     // Gone for good (removed after a restart from here), or unreachable for now (another
@@ -1131,11 +1155,7 @@ export default class Chat extends View {
       if (!gone && t && !this.thread && await this.checkLost(this.addr, cx, t)) return;
       // A thread's worker that ended: its conversation stays to read, the box goes (composer()).
       if (this.thread) {
-        // Read once from its own log, when the list gave one (read-only, with Resume).
-        const log = this.endedLog;
-        this.endedLog = null;
-        if (!this.path && log?.path && KINDS[log.kind]) { this.path = log.path; this.kind = KINDS[log.kind]; this.reset(); this.pinned = true; }
-        else if (!this.conv && !this.path) this.set("ended", cx);
+        if (!this.conv && !this.path) this.set("ended", cx);
         if (!this.ended) { this.ended = true; cx.notify(); }
         return;
       }
@@ -1152,16 +1172,25 @@ export default class Chat extends View {
     const pane = this.lastPane ?? (this.slot && this.slotRec()?.pane) ?? null;
     if (!this.thread && !this.inner && !this.swapping && !t.labels?.["herdr.chat"] && pane && !panes().some((p) => p.terminal === this.addr)
       && panes().some((p) => p.pane === pane && p.mod === "chat")) await hc(["label", this.addr, `herdr.chat=${chatLabel(pane)}`]);
-    const kind = KINDS[t.status?.app] ?? KINDS[t.foreground?.name];
+    const kind = kindOf(t);
+    const format = nativeCursorTerminal(t) ? "cursor-native" : null;
     // Back at its shell because the session it resumed is gone: a new agent starts there.
-    if (!kind) { if (!(await this.checkLost(this.addr, cx, t))) this.set("unsupported", cx); return; }
+    if (!kind) {
+      if (this.format === "cursor-native") {
+        this.path = null;
+        this.format = null;
+        this.reset();
+        this.set("unsupported", cx);
+      } else if (!(await this.checkLost(addr, cx, t))) this.set("unsupported", cx);
+      return;
+    }
     this.t = t;
     this.loadFirst(cx, t.labels);
     this.argv = t.foreground?.argv ?? t.argv ?? null;
     const pid = t.foreground?.pid;
-    if (!pid) { if (this.phase !== "ready") this.set("none", cx); return; }
+    if (!pid && !format) { if (this.phase !== "ready") this.set("none", cx); return; }
     // What the agent's own settings say (model, effort, speed), once per process.
-    if (this.dfltFor !== `${kind}|${pid}`) {
+    if (pid && this.dfltFor !== `${kind}|${pid}`) {
       this.dfltFor = `${kind}|${pid}`;
       cx.spawn(async (cx) => { this.dflt = await agent.defaults(kind, this.machine); cx.notify(); });
       cx.spawn(async (cx) => { this.cmds = await slash.commands(kind, this.machine, t.foreground?.cwd ?? t.cwd); cx.notify(); });
@@ -1169,20 +1198,30 @@ export default class Chat extends View {
       cx.spawn(async (cx) => { await this.loadReach(); cx.notify(); });
       if (this.assistant()) cx.spawn(async (cx) => { await this.loadSpaceTasks(); cx.notify(); });
     }
-    const f = await exec("sh", ["-c", FIND, "chat", kind, String(pid)], { on: this.machine });
-    let path = f.stdout.trim().split("\n").pop() ?? "";
+    let path = await findChatLog((script, args) => this.runThere(script, args), t, kind);
+    if (this.addr !== addr || this.swapping) return;
     // Not in its session yet (no report, no turn): perhaps on its own start screen, which
     // shows as a card under an empty chat.
-    if (!path && starting(t)) path = "pending";
+    if (!path && !format && starting(t)) path = "pending";
     if (path === "pending") {
       // A Claude Code that hasn't written its first line yet has no file: an empty chat.
       if (this.phase === "finding") { this.kind = kind; this.conv = new Conversation(kind); this.start = 0; this.set("ready", cx); }
       return;
     }
-    if (!path) { if (this.phase !== "ready") this.set("none", cx); return; }
-    if (path !== this.path || kind !== this.kind) {
+    if (!path) {
+      if (format || this.format) {
+        this.path = null;
+        this.kind = kind;
+        this.format = format;
+        this.reset();
+        this.set("none", cx);
+      } else if (this.phase !== "ready") this.set("none", cx);
+      return;
+    }
+    if (path !== this.path || kind !== this.kind || format !== this.format) {
       this.path = path;
       this.kind = kind;
+      this.format = format;
       this.reset();
       this.pinned = true;
     }
@@ -1196,6 +1235,7 @@ export default class Chat extends View {
     this.wasFocused = false;
     this.machine = addr.includes("/") ? addr.split("/")[0] : null;
     this.path = null;
+    this.format = null;
     this.dfltFor = null;
     this.reset();
     this.phase = "finding";
@@ -1208,7 +1248,7 @@ export default class Chat extends View {
   }
 
   rebuild() {
-    this.conv = new Conversation(this.kind);
+    this.conv = new Conversation(this.kind, this.format);
     this.conv.feed(this.records);
     // A log read from its start (a new agent's first message makes it) may already hold
     // messages sent from here.
@@ -1242,7 +1282,7 @@ export default class Chat extends View {
     if (this.start === null) {
       const r = await this.log(["page", path, "999999999999999", String(PAGE)]);
       if (path !== this.path) return;
-      if (r.stdout.startsWith("missing")) { this.path = null; return; }
+      if (r.stdout.startsWith("missing")) { this.path = null; if (this.ended) this.set("ended", cx); return; }
       const { head, records: recs } = records(r.stdout);
       if (head[0] !== "P") return;
       this.start = Number(head[1]);
@@ -1365,10 +1405,10 @@ export default class Chat extends View {
         await this.flag();
         // Its own start screen, while it has no session (or a card is still open).
         const k = this.ownTerminal();
-        if (k && (starting(k) || openCard(this.addr))) { await this.screens.tick(this.addr, k); cx.notify(); }
+        if (k && !this.nativeCursor() && (starting(k) || openCard(this.addr))) { await this.screens.tick(this.addr, k); cx.notify(); }
         // The first message hc couldn't hand over (startAgent): once the agent is idle with no screen to answer.
         if (this.firstSend && k?.turn > 0) this.firstSend = null;
-        if (this.firstSend && k?.status?.state === "idle" && !openCard(this.addr)) {
+        if (this.firstSend && !this.nativeCursor() && k?.status?.state === "idle" && !openCard(this.addr)) {
           const text = this.firstSend;
           this.firstSend = null;
           const sent = await personHc(["send", this.addr, text]).catch(() => null);
@@ -1401,6 +1441,7 @@ export default class Chat extends View {
   // Enter: now (while the agent works, it takes it mid-turn). Ctrl+Enter while it
   // works: held, and sent by itself once it is free.
   send(cx, hold = false) {
+    if (this.nativeCursor()) return;
     // A picked "#space" goes as its mention, which names its target (core/mentions.js).
     const text = mentions.expandTasks(mentions.expand(this.box.value().trim(), this.picked), this.pickedTasks);
     this.picked = [];
@@ -1443,7 +1484,7 @@ export default class Chat extends View {
 
   // A held message goes once the agent stops working (and isn't asking something).
   drainQueue(cx) {
-    if (!this.queue.length || this.phase !== "ready") return;
+    if (!this.queue.length || this.phase !== "ready" || this.nativeCursor()) return;
     const st = this.status();
     if (st === "working" || st === "blocked" || this.asks.length || openCard(this.addr) || this.pending.some((p) => !p.failed && !p.late)) return;
     const msg = this.queue.shift();
@@ -1454,6 +1495,11 @@ export default class Chat extends View {
   }
 
   deliver(msg, cx) {
+    if (this.nativeCursor()) {
+      this.queue.push(msg);
+      this.saveSoon(cx);
+      return;
+    }
     // /model never reaches the CLI by any way in (held, or sent by another mod): send() says why.
     const mm = !msg.files?.length && /^\/model(?:\s+(\S+))?\s*$/i.exec(msg.text ?? "");
     if (mm) { this.modelCommand(mm[1] ?? null, cx); return; }
@@ -1483,6 +1529,7 @@ export default class Chat extends View {
       let r;
       try {
         const paths = await attach.deliver(msg.files, this.addr, this.machine);
+        if (this.nativeCursor()) throw new Error(WORDS.cursorTerminal);
         p.sent = [body, ...paths].filter(Boolean).join("\n\n");
         // (a message with pictures: its Enter again if Claude Code lost it, sendTyped(); one that stayed in its box
         // last time gets only its Enter now, never typed twice)
@@ -1578,6 +1625,7 @@ export default class Chat extends View {
 
   // A held message sent at once (the agent takes it mid-turn).
   sendQueued(msg, cx) {
+    if (this.nativeCursor()) return;
     this.queue = this.queue.filter((m) => m !== msg);
     if (msg.raw) personHc(["send", this.addr, msg.text]);
     else this.deliver(msg, cx);
@@ -2216,7 +2264,7 @@ export default class Chat extends View {
     const room = right - left, timeW = time ? (time.length > 5 ? 82 : 38) + ACT_GAP : 0;
     const need = bar.acts.length * (ACT + ACT_GAP) + ACT + (bar.pills?.length ?? 0) * (PILL + PILL_EDGE);
     // Reactions off (an add-on): no smiley; the pills already there still show.
-    const order = bandOrder(bar.side, bar.acts, { time: Boolean(time) && need + timeW <= room, react: addonOn("reactions") });
+    const order = bandOrder(bar.side, bar.acts, { time: Boolean(time) && need + timeW <= room, react: this.format !== "cursor-native" && addonOn("reactions") });
     for (const what of order) {
       if (what === "time") add("time", timeW - ACT_GAP, ACT_GAP, { hover: true, text: time });
       // The pills PILL_GAP apart, PILL_EDGE from what comes before or after them.
@@ -2320,6 +2368,7 @@ export default class Chat extends View {
   // Your reaction on (or off) a message: one tag line to the agent, shown at once.
   // While the agent waits on the person (a menu, a question), it waits in the queue instead.
   toggleReaction(id, text, emoji, cx) {
+    if (this.nativeCursor()) return;
     const on = !this.pills(id).some((p) => p.emoji === emoji && p.you);
     const mine = new Map(this.myReacts.get(id) ?? []);
     mine.set(emoji, on);
@@ -2446,6 +2495,7 @@ export default class Chat extends View {
 
   toggleCall(cx) {
     if (this.call) { cx.spawn(async (cx) => { await this.hangup(); cx.notify(); }); return; }
+    if (this.nativeCursor()) return;
     if (this.dict.state === "recording") this.dict.cancel();
     this.call = { phase: "connecting", who: null, muted: false, error: null, started: Date.now() };
     note("feature", { type: "voice-call" });
@@ -2960,6 +3010,7 @@ export default class Chat extends View {
   // ---- the conversation's rows ----------------------------------------------------------------
 
   rows() {
+    const native = this.nativeCursor();
     const out = [];
     // The rows from `from` on are one message's block (spaced()).
     const block = (from, blk) => { for (let k = from; k < out.length; k++) out[k] = { ...out[k], blk }; };
@@ -3049,7 +3100,7 @@ export default class Chat extends View {
         // Its actions in a band row under it (the row above draws them too: band()).
         if (x.text) {
           const bar = { id: `b:${x.id}`, of: x.id, target: x.text, text: x.text, side: "user", at: x.at, pills: this.pills(x.id),
-            acts: bandActs("user", x.text, { from: x.from, rewind: this.kind !== "cursor" }) };
+            acts: bandActs("user", x.text, { from: x.from, rewind: this.kind !== "cursor", reply: !native }) };
           out[out.length - 1] = { ...out[out.length - 1], bar };
           out.push({ kind: "band", id: `ab:${x.id}`, bar });
         }
@@ -3085,7 +3136,7 @@ export default class Chat extends View {
         // under its last row.
         if (!(working && i === items.length - 1) && out.length > first) {
           const bar = { id: `b:${x.id}`, of: x.id, target: x.text, text: x.text, side: "agent", at: x.at, pills: this.pills(x.id),
-            acts: bandActs("agent", x.text, { fork: Boolean(this.kind) && agent.canFork(this.kind) }) };
+            acts: bandActs("agent", x.text, { fork: Boolean(this.kind) && agent.canFork(this.kind), reply: !native }) };
           out[out.length - 1] = { ...out[out.length - 1], bar };
           out.push({ kind: "band", id: `ab:${x.id}`, bar });
         }
@@ -4223,12 +4274,16 @@ export default class Chat extends View {
   }
 
   composer(t, st, cx = null) {
-    if (this.call) return this.callComposer(t);
     // A thread whose worker ended: read-only now.
     if (this.thread && this.ended) return div().flex_none().w_full().max_w(COLUMN + 28).mx_auto().px(14).pt(8)
       .child(h_flex().w_full().h(36).px(12).gap(8).items_center().rounded(10).border_1().border_color(t.border)
         .text_size(12.5).text_color(t.dim).child(div().size(6).flex_none().rounded(3).bg(t.dim)).child(div().flex_1().child(WORDS.ended))
         .when(Boolean(this.taskKey), (el) => el.child(this.button("chat-resume", this.resuming ? WORDS.resuming : "Resume",null, "primary", t, (cx) => this.resumeTask(cx)))));
+    if (this.nativeCursor()) return div().flex_none().w_full().max_w(COLUMN + 28).mx_auto().px(14).pt(8)
+      .child(h_flex().w_full().px(12).py(6).gap(8).items_center().rounded(10).border_1().border_color(t.border)
+        .text_size(12.5).text_color(t.dim).child(div().flex_1().child(WORDS.cursorTerminal))
+        .child(this.button("chat-cursor-terminal", WORDS.openTerminal, "mods/workspace-chrome/terminal.svg", "primary", t, () => this.toTerminal())));
+    if (this.call) return this.callComposer(t);
     // An open card, or the agent's own dialog in its terminal, doesn't lock the box: words
     // written there answer it ("Reply instead…").
     const ready = this.phase === "ready" || this.phase === "fresh";

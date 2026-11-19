@@ -58,8 +58,8 @@ function Bubble({ msg, chat, from, out, last, pics, images, writing }: { msg: Me
   const you = msg.who === 'you'
   // an artifact's card on its own is held, reacted to and replied to as a whole, like a bubble
   const art = isArtifact(msg)
-  const canReact = has('reactions') && !msg.waiting && !out && !!(msg.text || msg.file || art)
-  const replies = canReply(msg, out)
+  const canReact = !chat.terminalOnly && has('reactions') && !msg.waiting && !out && !!(msg.text || msg.file || art)
+  const replies = !chat.terminalOnly && canReply(msg, out)
   const picked = usePicked(msg.id, chat.key)
   const selecting = useUI((u) => u.selecting === msg.id)
   const text = useRef<HTMLDivElement>(null)
@@ -106,7 +106,7 @@ function Bubble({ msg, chat, from, out, last, pics, images, writing }: { msg: Me
     />
   ) : null
   // its band: what you just sent gets one once it's in the conversation; the agent's newest waits while it writes
-  const band = msg.text && !msg.card && !art && !out && !writing && !msg.waiting ? <Band msg={msg} chat={chat.key} cli={chat.cli !== ''} cursor={chat.cli === 'cursor'} /> : null
+  const band = msg.text && !msg.card && !art && !out && !writing && !msg.waiting ? <Band msg={msg} chat={chat.key} cli={chat.cli !== ''} cursor={chat.cli === 'cursor'} terminalOnly={chat.terminalOnly} /> : null
   const unit = (anchor: ReactNode, quoted?: boolean) => (
     <div
       data-msg={msg.id}
@@ -2920,7 +2920,7 @@ function ChatView({ chatKey, placeholder, unreachable }: { chatKey: string; plac
   const shown = chat?.notice ? chat : !chat && !chatKey.startsWith('p:') ? ({ key: chatKey, cli: '', messages: [], notice: 'opening' } as Chat) : null
   if (shown) return <div className="flex min-h-0 flex-1 flex-col"><Notice chat={shown} resume={() => act({ type: 'task-resume', chat: chatKey } as never)} /></div>
   return (
-    <DropFiles chatKey={chatKey}>
+    <DropFiles chatKey={chatKey} disabled={chat?.terminalOnly}>
       <FindBar chatKey={chatKey} />
       <StickToBottom key={chatKey} chatKey={chatKey}>
         {unreachable ? (
@@ -2932,13 +2932,18 @@ function ChatView({ chatKey, placeholder, unreachable }: { chatKey: string; plac
         ) : null}
         <Messages chat={chat ?? { key: chatKey, cli: 'Claude Code', messages: [] }} from={from} />
       </StickToBottom>
-      {chat?.finished && taskChatId(chatKey) ? <Ended chatKey={chatKey} /> : <Composer chatKey={chatKey} placeholder={placeholderOf(chatKey, chat, placeholder)} cli={chat?.cli ?? 'Claude Code'} suggest={suggestionOf(chat, suggestionsOn(snap?.settings))} />}
+      {chat?.finished && taskChatId(chatKey) ? <Ended chatKey={chatKey} /> : chat?.terminalOnly ? (
+        <div className="mx-auto flex w-full max-w-read items-center gap-3 px-5 pt-2 pb-[max(env(safe-area-inset-bottom),--spacing(3))] text-[0.8125rem] text-fg2 phone:text-[0.9375rem]">
+          <p className="min-w-0 flex-1 text-pretty">{WORDS.cursorTerminal}</p>
+          {has('terminal') ? <Primary soft onClick={() => openTerminal(chatKey)}>{WORDS.openTerminal}</Primary> : null}
+        </div>
+      ) : <Composer chatKey={chatKey} placeholder={placeholderOf(chatKey, chat, placeholder)} cli={chat?.cli ?? 'Claude Code'} suggest={suggestionOf(chat, suggestionsOn(snap?.settings))} />}
     </DropFiles>
   )
 }
 
 /** files dragged onto a chat attach to its message box; while they hover, the chat dims softly under a quiet note */
-function DropFiles({ chatKey, children }: { chatKey: string; children: ReactNode }) {
+function DropFiles({ chatKey, children, disabled }: { chatKey: string; children: ReactNode; disabled?: boolean }) {
   const [over, setOver] = useState(false)
   // enter and leave fire for every child the drag crosses: count them, so the highlight doesn't flicker
   const depth = useRef(0)
@@ -2949,13 +2954,13 @@ function DropFiles({ chatKey, children }: { chatKey: string; children: ReactNode
       // drawer, sheet or menu over the chat covers them all, whatever their z
       className="isolate relative flex min-h-0 flex-1 flex-col"
       onDragEnter={(e) => {
-        if (!draggingFiles(e.dataTransfer)) return
+        if (disabled || !draggingFiles(e.dataTransfer)) return
         e.preventDefault()
         depth.current++
         setOver(true)
       }}
       onDragOver={(e) => {
-        if (!draggingFiles(e.dataTransfer)) return
+        if (disabled || !draggingFiles(e.dataTransfer)) return
         e.preventDefault()
         e.dataTransfer.dropEffect = 'copy'
       }}
@@ -2971,7 +2976,7 @@ function DropFiles({ chatKey, children }: { chatKey: string; children: ReactNode
         e.preventDefault()
         depth.current = 0
         setOver(false)
-        attach(chatKey, dropped(e.dataTransfer))
+        if (!disabled) attach(chatKey, dropped(e.dataTransfer))
       }}
     >
       {children}

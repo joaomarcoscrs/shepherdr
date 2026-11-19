@@ -4,31 +4,78 @@
 // script on the agent's machine (null: here).
 // Shared core: the source is core/chat-reader.js.
 
-import { FIND, LOG, Conversation, records, resultText } from "./chat-log.js";
+import { FIND, FIND_NATIVE_CURSOR, LOG, Conversation, records, resultText } from "./chat-log.js";
 import { BgJobs } from "./bg-jobs.js";
 
 export const PAGE = 200;
 export const KEEP = 2000;
-// "cursor": Cursor through herdr-task's chat bridge (SHEP-6), which reports app=cursor and keeps a transcript the chat
-// reads. Cursor's own terminal UI (a task worker's) reports nothing: agentKindOf says it, the chat can't read it.
 export const KINDS = { "claude-code": "claude", claude: "claude", codex: "codex", cursor: "cursor" };
 
-// The CLI a terminal runs, as the chat knows them ("claude", "codex", "cursor" for the chat bridge), else null.
-export const kindOf = (t) => KINDS[t?.status?.app] ?? KINDS[t?.foreground?.name] ?? (isCursorChatT(t) ? "cursor" : null);
-// The chat bridge before its first status report: herdr-task cursor-chat in the foreground's argv.
-function isCursorChatT(t) {
-  const a = t?.foreground?.argv ?? [];
-  return a.some((w, i) => w === "cursor-chat" && i > 0 && /(?:^|\/)herdr-task$/.test(String(a[i - 1])));
+const argv = (a) => Array.isArray(a) ? a : [];
+const bridge = (a) => argv(a).some((w, i) => w === "cursor-chat" && i > 0 && /(?:^|\/)herdr-task$/.test(String(a[i - 1])));
+const reportedKind = (t) => [t?.status?.app, t?.foreground?.name].map((k) => Object.hasOwn(KINDS, k) ? KINDS[k] : null).find(Boolean);
+const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
+
+function resumeRecord(t) {
+  const label = t?.labels?.["herdr.resume"];
+  if (typeof label !== "string" || label.length > 16384) return null;
+  try { return JSON.parse(label); } catch { return null; }
 }
-// The agent a terminal runs, for its model menu, restart and fork: the chat's own kinds, or Cursor Agent, whose
-// conversation the chat can't read (its log is no file the chat knows): it reports no status and runs as node, so
-// its label (herdr.agent, as herdr-task and restart.sh start it) or its own program in the foreground's argv says it.
+
+// Provider recognition also covers a native worker still starting, so it can never get an ACP composer.
+// Its actual transcript is accepted only after the foreground's store confirms the resume record.
+export function nativeCursorTerminal(t) {
+  const fg = t?.foreground, kind = reportedKind(t);
+  if (bridge(fg?.argv)) return false;
+  if (t?.status?.app === "cursor-agent" || fg?.name === "cursor-agent"
+    || argv(fg?.argv).slice(0, 2).some((w) => /(?:^|\/)cursor-agent(?:\/|$)/.test(String(w)))) return true;
+  if ((kind && kind !== "cursor") || bridge(t?.argv)) return false;
+  const rec = resumeRecord(t);
+  if (rec?.kind === "cursor" && !bridge(rec.argv) && (kind !== "cursor" || nativeLogId(rec.log))) return true;
+  return kind !== "cursor" && (["cursor", "cursor-agent"].includes(t?.labels?.["herdr.agent"])
+    || /(?:^|\/)cursor-agent$/.test(String(argv(t?.argv)[0])));
+}
+
+export const kindOf = (t) => nativeCursorTerminal(t) || bridge(t?.foreground?.argv) ? "cursor" : reportedKind(t) ?? null;
 export const agentKindOf = (t) => kindOf(t) ?? (isCursor(t) ? "cursor" : null);
 export function isCursor(t) {
   if (["cursor", "cursor-agent"].includes(t?.status?.app) || ["cursor-agent", "agent"].includes(t?.foreground?.name)) return true;
-  if (t?.labels?.["herdr.agent"] === "cursor") return true;
-  return (t?.foreground?.argv ?? []).some((a) => /(?:^|\/)cursor-agent(?:\/|$)/.test(String(a)));
+  return nativeCursorTerminal(t);
 }
+
+function nativeLogId(path) {
+  if (typeof path !== "string" || !path.startsWith("/") || /[\x00-\x1f\x7f]/.test(path)) return null;
+  if (path.slice(1).split("/").some((part) => !part || part === "." || part === "..")) return null;
+  const match = /\/projects\/[^/]+\/agent-transcripts\/(?:([^/]+)\/)?([^/]+)\.jsonl$/.exec(path);
+  return match && UUID.test(match[2]) && (!match[1] || match[1] === match[2]) ? match[2] : null;
+}
+
+// Older task records store provider + path. Recognize both native layouts and reject malformed native paths.
+export function savedChatLog(path, kind, session) {
+  if (typeof path !== "string" || !Object.hasOwn(KINDS, kind)) return null;
+  if (kind === "cursor" && path.includes("/agent-transcripts/")) {
+    const id = nativeLogId(path);
+    return id && (session == null || id === session) ? { path, format: "cursor-native" } : null;
+  }
+  return { path, format: null };
+}
+
+export async function findChatLog(sh, t, kind) {
+  const pid = t?.foreground?.pid;
+  if (!kind || !Number.isSafeInteger(pid) || pid <= 0) return null;
+  if (nativeCursorTerminal(t)) {
+    if (t.state && t.state !== "live") return null;
+    const rec = resumeRecord(t);
+    if (rec?.kind !== "cursor" || typeof rec.session !== "string" || nativeLogId(rec.log) !== rec.session
+      || (t.pid != null && rec.pid != null && rec.pid !== t.pid)) return null;
+    const r = await sh(FIND_NATIVE_CURSOR, ["chat", String(pid), rec.session, rec.log]);
+    return r.code === 0 && r.stdout?.trim() === rec.log ? rec.log : null;
+  }
+  const r = await sh(FIND, ["chat", kind, String(pid)]);
+  return String(r.stdout ?? "").trim().split("\n").pop() || null;
+}
+
+export const chatLogArgs = (format, args) => ["log", ...(format === "cursor-native" ? [format] : []), ...args];
 
 export class ChatReader {
   constructor(io, addr) {
@@ -42,6 +89,7 @@ export class ChatReader {
     this.pinned = false;
     this.path = null;
     this.kind = null;
+    this.format = null;
     this.pid = null;
     this.start = null;   // the first byte read (0: the log's very start)
     this.end = 0;
@@ -51,15 +99,19 @@ export class ChatReader {
     this.state = "finding"; // finding | pending (no log yet) | ready | none (not a chat agent) | missing
   }
 
-  log(args) { return this.io.sh(LOG, ["log", ...args], this.machine); }
+  log(args) { return this.io.sh(LOG, chatLogArgs(this.format, args), this.machine); }
 
   // An ended agent's own log (a finished task's last agent, as the Tasks panel opens it): read as it is, never
   // looked for again. -> this reader.
-  fixed(path, kind) {
+  /** @param {string} path @param {string} kind @param {string | null} session */
+  fixed(path, kind, session = null) {
     this.reset();
-    this.path = path;
+    const log = savedChatLog(path, kind, session);
+    this.path = log?.path ?? null;
+    this.format = log?.format ?? null;
     this.kind = kind;
     this.pinned = true;
+    if (!log) this.state = "missing";
     return this;
   }
 
@@ -68,23 +120,24 @@ export class ChatReader {
     if (this.pinned) return false;
     const kind = kindOf(t);
     const pid = t?.foreground?.pid;
-    if (!kind || !pid) { const was = this.state; if (was !== "none") { this.reset(); this.state = "none"; } return was !== "none"; }
-    if (this.path && this.kind === kind && this.pid === pid) return false;
-    const f = await this.io.sh(FIND, ["chat", kind, String(pid)], this.machine);
-    const path = String(f.stdout ?? "").trim().split("\n").pop() ?? "";
+    const format = nativeCursorTerminal(t) ? "cursor-native" : null;
+    if (this.path && this.kind === kind && this.pid === pid && !format && !this.format) return false;
+    const path = await findChatLog((script, args) => this.io.sh(script, args, this.machine), t, kind);
     if (path === "pending" || !path) {
       const was = this.state;
       this.reset();
       this.kind = kind;
+      this.format = format;
       this.pid = pid;
       this.state = path === "pending" ? "pending" : "none";
       if (this.state === "pending") { this.conv = new Conversation(kind); this.start = 0; }
       return was !== this.state;
     }
-    if (path === this.path && kind === this.kind) { this.pid = pid; return false; }
+    if (path === this.path && kind === this.kind && format === this.format) { this.pid = pid; return false; }
     this.reset();
     this.path = path;
     this.kind = kind;
+    this.format = format;
     this.pid = pid;
     return true;
   }
@@ -115,7 +168,7 @@ export class ChatReader {
   }
 
   rebuild() {
-    this.conv = new Conversation(this.kind);
+    this.conv = new Conversation(this.kind, this.format);
     this.conv.feed(this.records);
   }
 
@@ -142,7 +195,7 @@ export class ChatReader {
     const { head, records: recs } = records(r.stdout);
     if (head[0] !== "T") return false;
     // Shorter than what was read: the file was replaced. Start over from its end.
-    if (Number(head[2]) < this.end) { const p = this.path, k = this.kind, pid = this.pid; this.reset(); Object.assign(this, { path: p, kind: k, pid }); return this.pull(); }
+    if (Number(head[2]) < this.end) { this.start = null; return this.pull(); }
     this.end = Number(head[3]);
     if (!recs.length) return false;
     this.records.push(...recs);

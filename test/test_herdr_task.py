@@ -6875,6 +6875,14 @@ class CursorAgent(unittest.TestCase):
         with self.mock.patch.dict(os.environ, {"CURSOR_CONFIG_DIR": home}):
             self.assertEqual(sessions.log_by_session("cursor", sid), os.path.join(t, sid + ".jsonl"))
             self.assertIsNone(sessions.log_by_session("cursor", "22222222-2222-3333-4444-555555555555"))
+            self.assertIsNone(sessions.log_by_session("cursor", "*"))
+            flat = os.path.join(os.path.dirname(t), sid + ".jsonl")
+            with open(flat, "w"):
+                pass
+            self.assertIsNone(sessions.log_by_session("cursor", sid))  # two paths for one id are ambiguous
+            os.unlink(flat)
+            os.symlink(os.path.join(t, sid + ".jsonl"), flat)
+            self.assertEqual(sessions.log_by_session("cursor", sid), os.path.join(t, sid + ".jsonl"))
             # its chat's store held open names the session
             with self.mock.patch.object(sessions, "kids", lambda pid: []), \
                     self.mock.patch.object(sessions.os.path, "isdir", lambda p: False if p.startswith("/proc") else os.path.isdir(p)), \

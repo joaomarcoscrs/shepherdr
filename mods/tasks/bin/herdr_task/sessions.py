@@ -107,16 +107,18 @@ def session_of(pid):
             m = re.search(r"/rollout-.*?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$", f)
             if m:
                 return m.group(1), f
-        # Cursor Agent: its chat's store (~/.cursor/chats/<hash>/<chat id>/store.db) held open, and its transcript
-        # (agent-transcripts/<chat id>.jsonl) where its version writes one.
         for f in files:
-            m = CURSOR_CHAT.search(f)
-            if m:
-                return m.group(1), log_by_session("cursor", m.group(1))
             # Cursor in a chat (herdr-task cursor-chat, SHEP-6): its own transcript, named by Cursor's chat id
             m = CURSOR_BRIDGE.search(f)
             if m:
                 return m.group(1), f
+        # Cursor Agent holds its chat's store open. Several store IDs at once give us no exact session.
+        ids = {m.group(1) for f in files if (m := CURSOR_CHAT.search(f))}
+        if len(ids) == 1:
+            sid = ids.pop()
+            return sid, log_by_session("cursor", sid)
+        if ids:
+            return None, None
     return None, None
 
 
@@ -210,8 +212,14 @@ def log_by_session(kind, sid):
         found = glob.glob(os.path.join(HOME, ".codex", "sessions", "*", "*", "*", f"rollout-*{sid}.jsonl"))
     elif kind == "cursor":
         # Cursor's transcript, where its version writes one: agent-transcripts/<id>/<id>.jsonl, or <id>.jsonl
-        base = os.path.join(cursor_home(), "projects", "*", "agent-transcripts")
+        if not isinstance(sid, str) or not re.fullmatch(UUID, sid):
+            return None
+        root = cursor_home()
+        base = os.path.join(glob.escape(root), "projects", "*", "agent-transcripts")
         found = glob.glob(os.path.join(base, sid, sid + ".jsonl")) + glob.glob(os.path.join(base, sid + ".jsonl"))
+        found = [f for f in found if os.path.isfile(f) and not os.path.islink(f)
+                 and os.path.realpath(f) == os.path.join(os.path.realpath(root), os.path.relpath(f, root))]
+        return found[0] if len(found) == 1 else None
     else:
         found = glob.glob(os.path.join(HOME, ".claude", "projects", "*", sid + ".jsonl"))
     return found[0] if found else None
