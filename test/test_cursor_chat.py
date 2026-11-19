@@ -361,9 +361,9 @@ class CursorChat(unittest.TestCase):
                 if prompt.startswith("plain"):
                     self.assertNotIn("cursor_always", req)    # no Allow always offered: the card has none
                 self.card(aid, {"behavior": "allow", "cursorOption": oid})
-                time.sleep(0.8)
+                end = self.wait_for(os.path.join(self.app, "data", "chat-asks", "end", aid))[0]
                 self.assertEqual(self.answered(), {})
-                with open(os.path.join(self.app, "data", "chat-asks", "end", aid)) as f:
+                with open(end) as f:
                     self.assertIn("didn't match", f.read())
                 self.assertEqual(glob.glob(os.path.join(self.app, "data", "chat-asks", "req", aid + ".json")), [])
                 self.key(p, "1")   # Allow once, in the terminal
@@ -403,10 +403,10 @@ class CursorChat(unittest.TestCase):
 
     def test_a_late_card_answer_for_a_request_cursor_gave_up_on_does_nothing(self):
         p = self.start(env={"HC_TERMINAL_ID": "t9"})
-        self.key(p, "drop gh pr view 1\n", pause=1.5)
-        self.assertEqual(glob.glob(os.path.join(self.app, "data", "chat-asks", "req", "*")), [])
-        ends = glob.glob(os.path.join(self.app, "data", "chat-asks", "end", "t9.*"))
+        self.key(p, "drop gh pr view 1\n")
+        ends = self.wait_for(os.path.join(self.app, "data", "chat-asks", "end", "t9.*"))
         self.assertEqual(len(ends), 1)
+        self.assertEqual(glob.glob(os.path.join(self.app, "data", "chat-asks", "req", "*")), [])
         aid = os.path.basename(ends[0])
         self.card(aid, {"behavior": "allow", "cursorOption": "allow-always"})
         time.sleep(0.8)
