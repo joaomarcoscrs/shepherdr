@@ -22,8 +22,8 @@ LABEL = "herdr.settings"
 STATE = os.path.join(STORE, ".assistant-settings.json")
 EVERY_MS = 60000  # looked at again this often (Autopilot's switch is in its own file), and at once when the settings file changes
 
-HEAD = ("Your settings: (Shepherdr settings for this space, the truth for every task you add; a task's own --set wins, "
-        "and `herdr-task show <id>` says what one task has)")
+HEAD = ("Your settings: (Shepherdr settings for this space. A task's own choices win, "
+        "and `herdr-task show <id>` says which settings it uses.)")
 MERGE_SHORT = {"ask": "ask the person first (they accept it in the Tasks panel, which merges it)",
                "checks": "after checks (Herdr merges a ready task once its checks pass)",
                "auto": "on its own (Herdr merges a ready task)"}
@@ -133,7 +133,9 @@ def rows(space, d=None, auto=None):
              [("tasks", "delivery"), ("tasks", "pr_assign"), ("tasks", "pr_review"), ("tasks", "pr_next")]),
             ("proof", "Proof", "on" if t.get("proof") is not False else "off (tasks show no proof artifact)",
              "off" if t.get("proof") is False else "on", [("tasks", "proof")]),
-            ("agent", "Task agent", pick_words(cfg.get("worker"), "claude, its own default model and effort"),
+            ("agent", "Worker default", pick_words(cfg.get("worker"), "claude, its own default model and effort")
+             + ". Tasks you launch use your current provider unless the task chooses one explicitly. "
+               "Worker settings for that provider still apply",
              pick_words(cfg.get("worker"), "claude").replace(", model ", "/").replace(", effort ", "/"), [("worker", None)]),
             ("base", "Base branch", f"{t['base']} (new tasks branch from it and merge into it)" if str(t.get("base") or "").strip()
              else "the folder's checked-out branch", str(t.get("base") or "").strip(), [("tasks", "base")]),

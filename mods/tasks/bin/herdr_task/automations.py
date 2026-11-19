@@ -16,13 +16,13 @@ from .when import parse_at
 from .settings import bare, set_task, settings_for, SET_KEYS, worker_argv, worktrees_on
 from .agents import agent_running, live_agents, starting, status_of, task_status
 from .sessions import session_of
-from .launch import default_space
+from .launch import default_space, task_assistant
 from .store import locate, open_store, read_list, Store, store_files
 from .queues import queue_reason
 from .archive import archive_pass
 from .output import say
 from .scheduler import ensure_scheduler, script_hash
-from .commands import begin, space_accept
+from .commands import begin, capture_assistant, space_accept
 from .news import news_pass
 from .tick import awaiting_due, end_done_pass, lost_logs_pass, memory_guard, retry_pass, tick_store
 from .backups import backup_pass
@@ -324,7 +324,7 @@ def cmd_auto(args):
                 autos.remove(a)
                 msg = f"{auto_ref(s, a)} removed."
             elif sub == "run-now":
-                t = fire(s, a, "run now")
+                t = fire(s, a, "run now", assistant=task_assistant())
                 msg = f"{auto_ref(s, a)} added {s.ref(t)}" + (f", but: {a['last_error']['message']}" if a.get("last_error") else ".")
             elif sub == "show":
                 msg = auto_line(auto_view(s, a))
@@ -365,7 +365,7 @@ def event_brief(ev, f, src=None):
     return f"Set off by: task {f['ref']} ({' '.join(str(f['title']).split())}) {words}, in {where}."
 
 
-def fire(s, a, why, brief=None):
+def fire(s, a, why, brief=None, assistant=None):
     """Adds the automation's task again and starts it (or queues it, as start would). Returns the
     task. A start that fails is the automation's last error, and the task needs the person.
     brief: what set it off (event_brief), added under its prompt."""
@@ -379,6 +379,8 @@ def fire(s, a, why, brief=None):
     for k, v in (a.get("set") or {}).items():
         set_task(t, k, v)
     space = a.get("space")
+    # A rule's saved parent is where it reports. Only a manual run can have an initiating Assistant.
+    capture_assistant(t, assistant, space)
     space_accept(t, space, new=True)  # SHEP-5: its space's Accept when ready, as a task added there
     run_rec = {"at": now(), "why": why, "task": s.ref(t)}
     if a.get("from") and why.split(":")[0] in EVENTS:
@@ -387,7 +389,7 @@ def fire(s, a, why, brief=None):
         if not space:
             raise Fail("It has no space to start in.")
         argv = worker_argv(s, t, space)
-        parent = a.get("parent")
+        parent = assistant["parent"] if assistant else a.get("parent")
         reason = queue_reason(s, t)
         if reason:
             t["state"], t["queued_at"] = "queued", now()

@@ -4524,7 +4524,7 @@ class AssistantSettings(unittest.TestCase):
         self.assistant()
         note = self.aset.session_note("t5")
         self.assertTrue(note.startswith("Your settings: "))
-        for label, words in [("Review", "off"), ("Merge", "ask the person first"), ("Proof", "on"), ("Task agent", "claude"),
+        for label, words in [("Review", "off"), ("Merge", "ask the person first"), ("Proof", "on"), ("Worker default", "claude"),
                              ("Base branch", "the folder's checked-out branch"), ("Worktrees", "on"), ("Tasks at once", "10 per folder"),
                              ("Task notes", "none"), ("Autopilot", "off"), ("Reactions", "on"),
                              ("Accept when ready", "off (each Ready task waits for the person's Accept)"),
@@ -4550,7 +4550,10 @@ class AssistantSettings(unittest.TestCase):
         self.assertEqual(self.line(note, "Review"), "- Review: on, at most 2 rounds, must fix major and up (blocker, major), reviewer claude, model opus; set for this space")
         self.assertEqual(self.line(note, "Merge"), "- Merge: after checks (Herdr merges a ready task once its checks pass); your setting everywhere")
         self.assertEqual(self.line(note, "Proof"), "- Proof: on")
-        self.assertEqual(self.line(note, "Task agent"), "- Task agent: codex, model gpt-5, effort high; set for this space")
+        worker = self.line(note, "Worker default")
+        self.assertTrue(worker.startswith("- Worker default: codex, model gpt-5, effort high."))
+        self.assertIn("Tasks you launch use your current provider", worker)
+        self.assertTrue(worker.endswith("; set for this space"))
         self.assertIn("- Base branch: dev ", note)
         self.assertIn("- Worktrees: off (tasks work in the folder itself); set for this space", note)
         self.assertIn("- Tasks at once: 3 per folder", note)
@@ -8433,3 +8436,245 @@ class AwaitingDeploy(unittest.TestCase):
         self.assertTrue(cov("hosting", None, "[Prod + EU Prod] Deploy Hosting with Notice · models: modal", "frontend-refresh-notice.yaml"))
         self.assertFalse(cov("hosting", None, "[Prod + EU Prod] Publish Refresh Notice", "frontend-refresh-notice.yaml"))
         self.assertFalse(cov("hosting", None, "[Prod + EU Prod] Deploy Hosting", "deploy-admin.yaml"))
+
+
+class AssistantTaskProvider(unittest.TestCase):
+    """Exercise the task commands and scheduler with a scratch repo and fake hc terminals."""
+
+    run_cmd = Scheduled.run_cmd
+    add = Scheduled.add
+    task = Scheduled.task
+    tick_at = Scheduled.tick_at
+
+    def setUp(self):
+        from unittest import mock
+        sys.path.insert(0, BIN)
+        from herdr_task import automations, commands, launch, settings, tick
+        self.mock, self.settings, self.automations = mock, settings, automations
+        begin = commands.begin
+        Scheduled.setUp(self)
+        self.folder = os.path.realpath(self.folder)
+        self.terminals, self.runs = {}, []
+        self.source = "sp-assistant"
+        self.dest = "sp-target"
+
+        def metadata(*args):
+            if args[0] == "get":
+                return self.terminals.get(args[1])
+            if args[0] == "ls":
+                return {"terminals": list(self.terminals.values())}
+            self.fail(f"Unexpected read: {args}")
+
+        def run(args, **kw):
+            self.assertEqual(args[:2], ["hc", "run"])
+            self.runs.append(args)
+            return subprocess.CompletedProcess(args, 0, '{"address": "t-worker"}', "")
+
+        for target, key, value in [
+            (commands, "begin", begin), (tick, "begin", begin), (automations, "begin", begin),
+            (commands, "worker_argv", settings.worker_argv), (tick, "worker_argv", settings.worker_argv),
+            (commands, "caller_space", launch.caller_space), (commands, "sandbox", mock.Mock(sandboxed=lambda argv: False)),
+            (launch, "hc_json", metadata), (launch, "run", run),
+            (launch, "track", lambda *args: None), (launch, "low_priority", lambda argv, name: argv),
+        ]:
+            patch = mock.patch.object(target, key, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.write_settings({"everywhere": {"worker": {"agent": "claude", "model": "opus", "effort": "high", "perm": "manual"}}})
+
+    def write_settings(self, config):
+        with open(self.settings.SETTINGS, "w") as f:
+            json.dump(config, f)
+
+    def caller(self, cli, addr="t-assistant", **fields):
+        self.terminals[addr] = {"address": addr, "state": "live", "labels": {
+            "herdr.role": "coordinator", "herdr.agent": cli, "herdr.coordinator.space": self.source,
+            "herdr.coordinator.tab": "tb-assistant"}, **fields}
+        os.environ["HC_TERMINAL_ID"] = addr
+        return addr
+
+    def start(self, id, **kwargs):
+        return self.run_cmd(self.commands.cmd_start, id=id, **kwargs)
+
+    def worker(self, id):
+        return self.task(id)["agents"][-1]
+
+    def shown_agent(self, id):
+        shown = self.run_cmd(self.commands.cmd_show, id=id)
+        return next(line for line in shown["settings"] if line["label"] == "Agent")
+
+    def test_codex_cursor_claude_and_pi_launch_as_the_assistant(self):
+        for reported, wanted in [("codex", "codex"), ("agent", "cursor"), ("claude-code", "claude"), ("pi", "pi")]:
+            with self.subTest(cli=reported):
+                addr = self.caller(reported)
+                task = self.add("From the Assistant", here=True, space=self.dest)
+                self.start(task["id"], now=True)
+                self.assertEqual(self.worker(task["id"])["agent"], wanted)
+                self.assertEqual(self.worker(task["id"])["parent"], addr)
+                self.assertIn(f"herdr.task.space={self.dest}", self.runs[-1])
+                self.assertIn("herdr.coordinator=tb-assistant", self.runs[-1])
+
+    def test_provider_captured_at_add_survives_switch_and_shell_start(self):
+        addr = self.caller("codex")
+        task = self.add("Added before a switch", here=True)
+        self.caller("cursor", addr="t-new")
+        next_task = self.add("Added after a switch", here=True)
+        os.environ.pop("HC_TERMINAL_ID")
+        self.assertEqual(self.shown_agent(task["id"])["by"], "assistant")
+        self.start(task["id"], now=True)
+        self.assertEqual(self.worker(task["id"])["agent"], "codex")
+        self.assertEqual(self.worker(task["id"])["parent"], addr)
+        self.start(next_task["id"], now=True)
+        self.assertEqual(self.worker(next_task["id"])["agent"], "cursor")
+
+    def test_uses_live_foreground_over_a_stale_provider_label(self):
+        self.caller("claude", foreground={"name": "codex"})
+        task = self.add("After a switch", here=True)
+        self.start(task["id"], now=True)
+        self.assertEqual(self.worker(task["id"])["agent"], "codex")
+
+    def test_cursor_bridge_in_an_assistant_template(self):
+        self.caller(None, template="assistant", foreground={"name": "python3",
+                    "argv": ["python3", "/tools/herdr-task", "cursor-chat"]})
+        task = self.add("Cursor bridge", here=True)
+        self.start(task["id"], now=True)
+        self.assertEqual(self.worker(task["id"])["argv"], ["cursor-agent"])
+
+    def test_validated_launch_parent_can_request_first_start(self):
+        task = self.add("From a service", here=True)
+        addr = self.caller("codex")
+        os.environ.pop("HC_TERMINAL_ID")
+        started = self.start(task["id"], now=True, parent=addr)
+        self.assertEqual(started["space"], self.source)
+        self.assertEqual(self.worker(task["id"])["agent"], "codex")
+        self.assertEqual(self.worker(task["id"])["parent"], addr)
+
+    def test_shell_workers_and_unavailable_assistants_use_the_worker_default(self):
+        live = self.caller("codex")
+        self.caller("cursor", "t-worker", template="assistant", labels={"herdr.role": "helper", "herdr.agent": "cursor"})
+        self.caller("codex", "t-dead", state="finished")
+        self.caller("codex", "t-shell", foreground={"name": "zsh", "argv": ["zsh", "-l"]})
+        for caller, parent in [("", None), ("t-worker", live), ("t-shell", None), ("", "t-dead"), ("", "t-missing")]:
+            with self.subTest(caller=caller, parent=parent):
+                os.environ["HC_TERMINAL_ID"] = caller
+                task = self.add("Ordinary path", here=True, prompt="herdr.agent=codex", space=self.dest)
+                self.start(task["id"], now=True, space=self.dest, parent=parent)
+                self.assertEqual(self.worker(task["id"])["agent"], "claude")
+        os.environ.pop("HC_TERMINAL_ID")
+        task = self.add("From the Tasks panel", here=True, space=self.source)
+        self.start(task["id"], now=True, space=self.source)
+        self.assertEqual(self.worker(task["id"])["parent"], live)
+        self.assertEqual(self.worker(task["id"])["agent"], "claude")
+
+    def test_settings_keep_only_chosen_providers_model_effort_and_permissions(self):
+        self.write_settings({
+            "everywhere": {"worker": {"agent": "codex", "model": "gpt-5", "effort": "medium", "perm": "read-only"}},
+            "spaces": {self.dest: {"folder": self.folder, "worker": {"agent": "claude", "model": "opus", "perm": "plan"}}},
+        })
+        self.caller("codex")
+        task = self.add("Settings from a different repository's space", here=True, space=self.dest)
+        self.start(task["id"], now=True)
+        codex = self.worker(task["id"])["argv"]
+        self.assertEqual(codex, ["codex", "--no-daemon", "-m", "gpt-5", "-c", 'model_reasoning_effort="medium"',
+                                 "-c", 'service_tier="default"', "-s", "read-only", "-a", "on-request"])
+        self.assertEqual(self.shown_agent(task["id"])["text"], "codex, model gpt-5, effort medium")
+        self.caller("agent")
+        task = self.add("Cursor's Ask when the default asks", here=True, space=self.dest)
+        self.start(task["id"], now=True)
+        self.assertEqual(self.worker(task["id"])["argv"], ["cursor-agent"])
+
+    def test_explicit_agent_and_argv_win_and_show_what_will_run(self):
+        self.caller("codex")
+        task = self.add("Explicit task agent", here=True, agent="claude", model="sonnet")
+        self.start(task["id"], now=True)
+        self.assertIn("sonnet", self.worker(task["id"])["argv"])
+        self.assertEqual(self.shown_agent(task["id"])["by"], "task")
+
+        task = self.add("Explicit start agent", here=True, model="gpt-5")
+        self.start(task["id"], now=True, agent="cursor")
+        self.assertEqual(self.worker(task["id"])["argv"], ["cursor-agent"])
+        self.assertEqual(self.shown_agent(task["id"])["by"], "task")
+
+        task = self.add("Explicit argv", here=True)
+        self.start(task["id"], in_="1h", argv='["/tools/codex","-m","gpt-5"]')
+        queued = self.task(task["id"])
+        self.assertEqual(queued["queue"]["argv"], ["/tools/codex", "-m", "gpt-5", "--no-daemon"])
+        self.assertEqual(self.shown_agent(task["id"])["by"], "task")
+        self.start(task["id"], now=True)
+        self.assertEqual(self.worker(task["id"])["argv"], queued["queue"]["argv"])
+        self.assertEqual(self.shown_agent(task["id"])["by"], "task")
+
+    def test_scheduled_add_and_queue_keep_normalized_argv_after_switch(self):
+        self.write_settings({"everywhere": {"worker": {"argv": ["codex", "-m", "gpt-5"]}}})
+        self.caller("codex")
+        scheduled = self.add("Scheduled before a switch", here=True, in_="1h")
+        self.caller("cursor", addr="t-other")
+        queued = self.add("Dependency queue", here=True, after=scheduled["ref"])
+        self.start(queued["id"])
+        self.assertEqual(self.task(queued["id"])["state"], "queued")
+        self.write_settings({"everywhere": {"worker": {"agent": "claude"}}})
+        os.environ.pop("HC_TERMINAL_ID")
+        due = self.task(scheduled["id"])["scheduled_for"]
+        self.assertEqual(self.tick_at(due), [scheduled["ref"]])
+        self.assertEqual(self.worker(scheduled["id"])["argv"], ["codex", "-m", "gpt-5", "--no-daemon"])
+        self.run_cmd(lambda args: self.commands.cmd_state(args, "done"), id=scheduled["id"])
+        self.assertEqual(self.tick_at(due + 1), [queued["ref"]])
+        self.assertEqual(self.worker(queued["id"])["agent"], "cursor")
+
+    def test_edit_schedules_task_with_the_initiating_assistants_provider(self):
+        task = self.add("Schedule from the Assistant", here=True)
+        self.caller("cursor")
+        self.run_cmd(self.commands.cmd_edit, id=task["id"], in_="1h")
+        os.environ.pop("HC_TERMINAL_ID")
+        self.assertEqual(self.tick_at(self.task(task["id"])["scheduled_for"]), [task["ref"]])
+        self.assertEqual(self.worker(task["id"])["argv"], ["cursor-agent"])
+
+    def test_branch_update_uses_the_assistants_provider(self):
+        self.caller("codex")
+        plan = {"pr": 42, "branch": "feature", "base": "main", "base_at": "a" * 40, "how": "merge"}
+        with self.mock.patch.object(self.commands.branch_update, "plan", return_value=plan):
+            task = self.add("Bring the named PR up to date", update_pr="42")
+        self.start(task["id"], now=True)
+        self.assertEqual(self.worker(task["id"])["agent"], "codex")
+        self.assertEqual(self.task(task["id"])["mode"], "here")
+
+    def test_existing_queue_and_resumed_worker_keep_their_argv(self):
+        scheduled = self.add("Old queued task", here=True, in_="1h")
+        with self.store_mod.Store(self.store_mod.locate(self.folder)) as s:
+            s.find(scheduled["id"])["queue"]["argv"] = ["claude", "--model", "haiku"]
+            s.dirty = True
+        self.caller("codex")
+        self.start(scheduled["id"], now=True)
+        old = self.worker(scheduled["id"])["argv"]
+        self.assertEqual(old, ["claude", "--model", "haiku"])
+        with self.mock.patch.object(self.commands, "just_started", lambda t: None):
+            self.run_cmd(self.commands.cmd_resume, id=scheduled["id"], space=self.dest)
+        self.assertEqual(self.worker(scheduled["id"])["argv"], old)
+
+    def test_legacy_schedule_without_argv_keeps_default_permissions(self):
+        self.write_settings({
+            "everywhere": {"worker": {"agent": "codex", "model": "gpt-5", "perm": "full"}},
+            "spaces": {self.dest: {"folder": self.folder, "worker": {"agent": "claude", "model": "opus", "perm": "manual"}}},
+        })
+        scheduled = self.add("Old schedule without argv", here=True, space=self.dest, agent="codex", in_="1h")
+        self.assertNotIn("argv", self.task(scheduled["id"])["queue"])
+        self.caller("cursor")
+        self.start(scheduled["id"], now=True)
+        self.assertEqual(self.worker(scheduled["id"])["argv"], ["codex", "--no-daemon", "-c", 'service_tier="default"'])
+
+    def test_rule_agent_wins_and_background_rules_are_independent(self):
+        addr = self.caller("codex")
+        with self.store_mod.Store(self.store_mod.locate(self.folder)) as s:
+            rule = {"id": 1, "title": "Rule", "mode": "here", "space": self.dest, "parent": addr}
+            scheduled = self.automations.fire(s, rule, "every")
+            self.assertEqual(scheduled["agents"][-1]["agent"], "claude")
+            self.assertNotIn("assistant", scheduled)
+            s.data["automations"] = [rule]
+        with self.mock.patch.object(self.automations, "ensure_scheduler", lambda **kw: None):
+            self.run_cmd(self.automations.cmd_auto, auto="run-now", id="1")
+            self.assertEqual(self.worker(2)["agent"], "codex")
+            with self.store_mod.Store(self.store_mod.locate(self.folder)) as s:
+                s.data["automations"][0]["agent"] = "cursor"
+                s.dirty = True
+            self.run_cmd(self.automations.cmd_auto, auto="run-now", id="1")
+            self.assertEqual(self.worker(3)["agent"], "cursor")

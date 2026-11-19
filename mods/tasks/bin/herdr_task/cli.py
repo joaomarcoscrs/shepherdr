@@ -185,7 +185,7 @@ def main():
         c.add_argument("--finish-notes", help="this task's own \"When a task finishes\" notes, replacing the folder's (\"\": the folder's)")
 
     def task_opts(c):
-        c.add_argument("--agent", help="the CLI its agent runs (claude, codex, ...; default: Settings' Workers)")
+        c.add_argument("--agent", help="the CLI its agent runs (claude, codex, ...). New Assistant tasks use its provider by default")
         c.add_argument("--model", help="its agent's model, an id or alias (default: Settings'; \"default\": the CLI's own)")
         c.add_argument("--effort", help="its agent's effort: low, medium, high, xhigh, max... (default: Settings')")
         c.add_argument("--reviewer", help="the CLI its agent's review uses (default: Settings' Reviewer, else the other CLI)")
@@ -250,7 +250,8 @@ def main():
     c = cmd("start", cmd_start, "start a task's agent (no tab: an hc child of the space's coordinator)")
     agent_opts(c)
     c.add_argument("--space")
-    c.add_argument("--parent", help="a coordinator's terminal: the agent's hc parent (default: the space's coordinator)")
+    c.add_argument("--parent", help="a coordinator's terminal: the agent's hc parent (default: the launching Assistant, "
+                                   "else the space's coordinator)")
     c.add_argument("--now", action="store_true", help="skip the queue (a scheduled task: start it now)")
     c.add_argument("--branch", help="its branch's exact name (as add --branch), before its worktree is made")
     g = c.add_mutually_exclusive_group()
