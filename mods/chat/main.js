@@ -772,6 +772,11 @@ export default class Chat extends View {
     const tab = mine && panes().find((p) => p.pane === mine)?.tab;
     return tab ? { tab, pane: mine } : undefined;
   }
+  // The same as an action, for a layout whose toasts are Herdr's own (lib/ui.js toast()).
+  toastAction() {
+    const tab = this.toastGo()?.tab;
+    return tab ? { name: "tab.select", args: { id: tab } } : undefined;
+  }
 
   // New asks: the agent waits on the person, as when it's blocked. One toast per request (key "ask:<id>", carrying the
   // request's id only: mods/toasts reads it and offers its card's choices when they fit), never folded together: two
@@ -791,7 +796,7 @@ export default class Chat extends View {
     for (const a of fresh) {
       toast({ title: `${toastWho(k)} · Needs you`, body: a.words?.title ?? "", level: "alert",
         key: `ask:${a.machine ? `${a.machine}/` : ""}${a.id}`, covers: [need], terminal: this.addr,
-        ask: { id: a.id, ...(a.machine ? { machine: a.machine } : {}) }, go: this.toastGo() });
+        ask: { id: a.id, ...(a.machine ? { machine: a.machine } : {}) }, go: this.toastGo(), action: this.toastAction() });
     }
   }
 
@@ -811,7 +816,7 @@ export default class Chat extends View {
       (this.needToldAt ??= {})[addr] = Date.now();
       if (looking) return;
       toast({ title: `${toastWho(k)} · Needs you`, body: this.asking() ?? k?.title ?? "", level: "alert",
-        key: `need:${addr}`, terminal: addr, go: this.toastGo() });
+        key: `need:${addr}`, terminal: addr, go: this.toastGo(), action: this.toastAction() });
     }));
   }
 

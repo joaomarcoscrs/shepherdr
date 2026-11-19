@@ -81,7 +81,7 @@ export const unexpired = (list, now = Date.now()) => (list ?? []).filter((n) => 
 // to spare), and at most this many lines for what is allowed, and for what Allow always adds.
 export const ASK_COLS = 36;
 export const ASK_LINES = 5;
-export const ASK_SCOPE_LINES = 3;
+export const ASK_SCOPE_LINES = 4;
 // Choices take no click until they have shown this long: a toast that appears under a moving pointer can't be answered
 // by a click meant for something else.
 export const ASK_ARM_MS = 800;

@@ -47,8 +47,9 @@ export default class Toasts extends View {
       for (const id of this.seen) if (!list.some((n) => n.id === id)) this.seen.delete(id);
       this.checkAsks(list, cx);
       if (placement()?.hovered) return;
-      // Answered here, or no longer waiting: gone once the pointer has left.
-      const left = unexpired(list).filter((n) => !["sent", "gone", "taken", "changed"].includes(this.asks.get(n.id)?.state));
+      // Answered here, or no longer waiting: gone once the pointer has left. One that changed still waits: it stays its
+      // time, with Open chat.
+      const left = unexpired(list).filter((n) => !["sent", "gone", "taken"].includes(this.asks.get(n.id)?.state));
       if (left.length !== list.length) setShared(TOASTS, left);
       for (const id of this.asks.keys()) if (!left.some((n) => n.id === id)) this.asks.delete(id);
     });
@@ -136,9 +137,9 @@ export default class Toasts extends View {
       if (!s.active) run("space.select", { id: s.id });
       run("tab.select", { id: g.tab });
       if (g.pane && panes().some((p) => p.pane === g.pane)) run("pane.focus", { pane: g.pane });
-    } else if (n.action?.name) run(n.action.name, n.action.args ?? {});
-    // A tab closed since: the agent, wherever it shows now (the tab bar's alert route, lib/inbox.js toAlert()).
-    else if (n.terminal) run(`tabs-tasks.alert-${String(n.terminal).replace(/\//g, "~")}`, {});
+    // Its tab closed since: the agent, wherever it shows now (the tab bar's alert route, lib/inbox.js toAlert()).
+    } else if (n.terminal && (g || !n.action?.name)) run(`tabs-tasks.alert-${String(n.terminal).replace(/\//g, "~")}`, {});
+    else if (n.action?.name) run(n.action.name, n.action.args ?? {});
     this.dismiss(n.id);
   }
 

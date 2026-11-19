@@ -108,7 +108,7 @@ describe("a permission's toast", () => {
     arm();
     press("toast-always-n1");
     await settle();
-    expect(answers()).toEqual([{ id: ID, how: "Allowed always from a notification", text: allowAlways(JSON.parse(files.get(REQ)!)) }]);
+    expect(answers()).toEqual([{ id: ID, how: "Allowed always from a notification", text: allowAlways(JSON.parse(files.get(REQ)!))! }]);
     // a second toast, another request of the same agent: its own answer, under its own id
     const ID2 = "t7.1763560001.4242";
     files.set(`/app/data/chat-asks/req/${ID2}.json`, bashReq("gh pr diff 1"));
@@ -222,4 +222,13 @@ describe("a permission's toast", () => {
     press("toast-open-n9");
     expect(runs).toEqual([["space.select", { id: "s1" }], ["tab.select", { id: "tab1" }]]);
   });
+});
+
+test("its tab closed since: the click goes to the agent wherever it shows now", async () => {
+  shared.clear(); runs.length = 0;
+  view = new Toasts(); view.init({}, cx);
+  await show({ id: "n9", at: Date.now(), level: "alert", title: "a · Needs you", key: "need:vm/t7", terminal: "vm/t7", go: { tab: "gone-tab" },
+    action: { name: "tab.select", args: { id: "gone-tab" } } });
+  press("toast-open-n9");
+  expect(runs).toEqual([["tabs-tasks.alert-vm~t7", {}]]);
 });
