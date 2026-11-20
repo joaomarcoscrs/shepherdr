@@ -10,7 +10,7 @@ import time
 from urllib.parse import urlsplit
 
 from .base import Fail, HOME, run
-from .browsers import ROOT, browser_path
+from .browsers import ROOT, _task, browser_path
 
 TOOL = "HerdrLogin"
 WAIT_SECONDS = 1800
@@ -46,7 +46,10 @@ def owner(address):
     labels = t.get("labels") or {}
     if labels.get("herdr.role") in ("reviewer", "helper") or not t.get("created_ms"):
         return None
-    return {"created": t["created_ms"], "task": labels.get("herdr.task") or None}
+    key = labels.get("herdr.task") or None
+    if key and not re.fullmatch(r"[\w.@-]+#[0-9]+", key):
+        return None
+    return {"created": t["created_ms"], "task": key}
 
 
 def browser_marker(task):
@@ -62,12 +65,21 @@ def browser_marker(task):
     raise Fail("This task has no browser open. Use --site to ask for sign-in in Chrome.")
 
 
+def task_closed(key):
+    if not key:
+        return False
+    found, task = _task(key)
+    return found and (task is None or task.get("state") in ("done", "awaiting", "deploying"))
+
+
 def cmd_login(args):
     address = os.environ.get("HC_TERMINAL_ID", "")
     if not TERMINAL.fullmatch(address) or not (mine := owner(address)):
         raise Fail("Ask from your own live Herdr terminal.")
     if mine["task"] != (os.environ.get("HERDR_BROWSER_TASK") or None):
         raise Fail("Ask from the worker that owns this task.")
+    if task_closed(mine["task"]):
+        raise Fail("This task has finished.")
     if args.site is not None:
         target = {"kind": "site", "origin": safe_origin(args.site)}
     else:
@@ -117,7 +129,7 @@ def wait_registered(root, address, mine, target, used):
         print("Sign-in Ask posted. Waiting for the person.", flush=True)
         until = time.monotonic() + WAIT_SECONDS
         while time.monotonic() < until:
-            if owner(address) != mine:
+            if owner(address) != mine or task_closed(mine["task"]):
                 end.write_text("The session ended\n")
                 return 1
             try:

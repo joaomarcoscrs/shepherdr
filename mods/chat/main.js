@@ -192,6 +192,9 @@ for f in "$d/req/$t".*.json; do [ -f "$f" ] || continue; n=\${f##*/}; n=\${n%.js
   kill -0 "\${n##*.}" 2>/dev/null && login_waiting "$n" || continue; printf 'req\\t%s\\t' "$n"; tr '\\n\\t' '  ' < "$f"; echo; done
 for n in "$@"; do [ -f "$d/end/$n" ] && printf 'end\\t%s\\t%s\\n' "$n" "$(head -n 1 "$d/end/$n")"; done; exit 0`;
 // An answer there: how it went, then the answer ($3) in place at once.
+const REMOTE_LOGIN_WAITING = `${ASKS_THERE}
+${LOGIN_WAITING_SH}
+login_waiting "$1" && [ -f "$d/req/$1.json" ] && [ ! -e "$d/ans/$1.json" ]`;
 const REMOTE_ANSWER = `${ASKS_THERE}; mkdir -p "$d/ans" "$d/end"; [ -f "$d/req/$1.json" ] || exit 3
 [ -z "$2" ] || printf '%s\\n' "$2" > "$d/end/$1"
 printf '%s' "$3" > "$d/ans/$1.json.tmp" && mv "$d/ans/$1.json.tmp" "$d/ans/$1.json"`;
@@ -897,7 +900,10 @@ done; true`, "x", this.askDir, addr]);
     cx.spawn(async () => {
       if (!this.ownsLogin(ask)) return;
       const addr = ask.terminal ?? this.addr, target = ask.words.login;
-      if (!ask.machine && !(await stillWaiting([ask.id], this.askDir))?.has(ask.id)) return;
+      const waiting = ask.machine
+        ? (await exec("hc", ["exec", "--on", ask.machine, "--timeout", "3", "sh", "-c", REMOTE_LOGIN_WAITING, "x", ask.id]).catch(() => null))?.code === 0
+        : (await stillWaiting([ask.id], this.askDir))?.has(ask.id);
+      if (!waiting) return;
       if (addr !== (ask.terminal ?? this.addr) || !this.ownsLogin(ask)) return;
       if (target.kind === "site") {
         const os = window()?.platform;

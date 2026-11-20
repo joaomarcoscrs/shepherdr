@@ -86,6 +86,15 @@ export class Asks {
     this.polling = true;
     try {
       const recent = (e: AskEnd) => e.how === "No longer waiting" && e.id.includes("/") && Date.now() - e.at < 120_000;
+      let changed = false;
+      for (const a of this.open.values()) {
+        if (!a.machine || a.words.kind !== "login") continue;
+        const terminal = this.hub.terminals?.get(a.terminal);
+        if (liveLoginId(a.local) && (!terminal || ownsLogin(a.req, terminal, a.local))) continue;
+        this.open.delete(a.id);
+        this.ended(a);
+        changed = true;
+      }
       const watched = new Set(this.watched().filter((a) => a.includes("/")).map((a) => a.split("/")[0]));
       const machines = new Set(watched);
       // A login Ask is actionable even when no chat on its machine is currently open.
@@ -94,7 +103,6 @@ export class Asks {
       // one open from a machine no page shows any more still closes once it says so
       for (const a of this.open.values()) if (a.machine) machines.add(a.machine);
       for (const e of this.ends) if (recent(e)) machines.add(e.id.split("/")[0]);
-      let changed = false;
       for (const m of machines) {
         if (!MACHINE.test(m)) continue;
         const asked = [...this.open.values()].filter((a) => a.machine === m).map((a) => a.local!);

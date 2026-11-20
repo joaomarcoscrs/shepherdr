@@ -107,6 +107,21 @@ class LoginAsk(unittest.TestCase):
         self.finish(p, 1)
         self.assertFalse(req.exists())
 
+    def test_done_task_closes_ask_even_if_worker_terminal_stays_live(self):
+        self.term.write_text(json.dumps({"address": "t5", "state": "live", "created_ms": 10,
+                                         "labels": {"herdr.task": "example#3"}}))
+        self.env["HERDR_BROWSER_TASK"] = "example#3"
+        self.env["HERDR_TASK_STORE"] = str(self.path)
+        row = self.path / "example.json"
+        row.write_text('{"tasks":[{"id":3,"state":"running"}]}')
+        p = self.start("--terminal")
+        req = self.request()
+        tmp = row.with_suffix(".tmp")
+        tmp.write_text('{"tasks":[{"id":3,"state":"done"}]}')
+        tmp.replace(row)
+        self.finish(p, 1)
+        self.assertFalse(req.exists())
+
     def test_malformed_or_secret_url_never_reaches_ask_store(self):
         for url in ("javascript:alert(1)", "https://example.invalid:90000", "https://a:b@example.invalid",
                     "https://example.invalid/auth/code", "https://example.invalid?token=redacted", "https://example.invalid#redacted"):

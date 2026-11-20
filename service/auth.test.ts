@@ -14,6 +14,15 @@ describe("through tailscale serve", () => {
   test("the owner reads", () => expect(gate(tailnet(), g, false, true)).toMatchObject({ ok: true, via: "tailnet" }));
   test("someone else on the tailnet is refused", () =>
     expect(gate(tailnet({ headers: { "tailscale-user-login": "other@example.com" } }), g, false, true)).toMatchObject({ ok: false, status: 403 }));
+  test("another tailnet user cannot confirm a sign-in Ask", () => {
+    const confirm = (login: string) => new Request("https://box.tailnet.example/api/action", {
+      method: "POST", headers: { host: "box.tailnet.example", origin: "https://box.tailnet.example",
+        "tailscale-user-login": login, "x-shepherdr": "1" },
+      body: JSON.stringify({ type: "answer", chat: "SHOP-4/worker", question: "t2.login.1763560000.7", choice: 0 }),
+    });
+    expect(gate(confirm("other@example.com"), g, false, true)).toMatchObject({ ok: false, status: 403 });
+    expect(gate(confirm(g.owner!), g, false, true)).toMatchObject({ ok: true, via: "tailnet" });
+  });
   test("the header from a connection Tailscale didn't open is refused", () =>
     expect(gate(tailnet(), g, false, false)).toMatchObject({ ok: false, status: 403 }));
   test("another host name is refused (DNS rebinding)", () =>
