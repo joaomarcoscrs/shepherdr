@@ -239,6 +239,10 @@ test("a Chrome sign-in Ask reaches Needs you and its push opens the owning task"
   expect(n).toMatchObject({ id, place: "sp2", task: "SHOP-4", chat: "SHOP-4/worker",
     question: { to: "SHOP-4/worker", login: { kind: "site", origin: "https://shop.example.invalid" }, choices: [{ label: "I signed in" }, { label: "Cancel" }] } });
   expect(quickChoices(n.question)).toEqual([]);
+  const liveChat = c.chat(n.chat, { start: 0, kind: "codex", conv: { items: [] } },
+    { ...term, status: { state: "working" } });
+  expect(liveChat.working).toBe(false);
+  expect(liveChat.doing).toBeUndefined();
   const pushed = alertsOf(snap).get(`need:SHOP-4/worker:${id}`);
   expect(pushed).toMatchObject({ topic: "needs", tag: "SHOP-4", body: "Sign-in needed" });
   expect(new URL(pushed!.url!, "https://herdr.example.invalid").searchParams.get("focus")).toBe(id);

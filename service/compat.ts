@@ -717,7 +717,7 @@ export class Compat {
       for (const e of (this.asks as any)?.endsOf?.(r.worker) ?? []) messages.push(quiet(`ae:${e.id}`, e.at, `${r.ref} · ${e.title} · ${e.how}`));
       if (!nativeWorker) screens(r.worker, r.ref, by);
     }
-    const st = t?.status?.state ?? null;
+    const st = ownedAsks.some((a) => a.words.kind === "login") ? "blocked" : t?.status?.state ?? null;
     // the CLI's own subagents still at work, then its background shells and watchers, above the box (3.0: the helpers
     // list; core/bg-jobs.js)
     // first its own helper agents in herdr (SHEP-54: a reviewer it started as its hc child), each opening to its own chat
