@@ -5282,6 +5282,87 @@ class CodexAsksOnTheCard(unittest.TestCase):
         mine = launch.own_argv(["claude", "--settings", json.dumps({"idleCompaction": True}), "go"])
         self.assertIs(json.loads(mine[2])["idleCompaction"], True)  # the person's own argv says otherwise: theirs
 
+class CodexTaskHelp(unittest.TestCase):
+    def setUp(self):
+        import shlex
+        import shutil
+        from pathlib import Path
+        from unittest import mock
+        sys.path.insert(0, BIN)
+        from herdr_task import launch
+
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        home = Path(scratch.name).resolve()
+        app = home / ".config/herdr-app"
+        self.entry = app / "mods/tasks/bin/herdr-task"
+        shutil.copytree(BIN, self.entry.parent, ignore=shutil.ignore_patterns("__pycache__"))
+        self.alias = home / ".local/bin/herdr-task"
+        self.alias.parent.mkdir(parents=True)
+        self.alias.symlink_to(self.entry)
+        self.denied = {"behavior": "deny", "message": "card fixture"}
+        card = app / "mods/chat/ask-hook.sh"
+        card.parent.mkdir()
+        card.write_text("[ \"$HERDR_ASK_CHAINED\" = 1 ] || exit 0\n"
+                        f"printf '%s\\n' {shlex.quote(json.dumps(self.response(self.denied)))}\n")
+        self.env = {**os.environ, "HOME": str(home), "HERDR_APP_HOME": str(app), "SHEPHERDR_NO_MIGRATE": "1"}
+        self.env.pop("HERDR_TASK_HOOK_LOG", None)
+        with mock.patch.object(launch, "ENTRY", str(self.entry)):
+            self.hook = shlex.split(launch.ask_command(str(self.entry), sandboxed=True))
+            self.alias_hook = shlex.split(launch.ask_command(str(self.alias), sandboxed=True))
+
+    @staticmethod
+    def response(decision):
+        return {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}
+
+    def permission(self, command, hook=None):
+        request = {"hook_event_name": "PermissionRequest", "session_id": "session-1", "turn_id": "turn-1",
+                   "transcript_path": "", "cwd": ROOT, "permission_mode": "default", "tool_name": "Bash",
+                   "tool_input": {"command": command, "description": "Check the task CLI help"}}
+        result = subprocess.run(hook or self.hook, input=json.dumps(request), capture_output=True, text=True,
+                                check=True, env=self.env, timeout=5)
+        return json.loads(result.stdout)
+
+    def test_local_top_level_help_is_allowed(self):
+        allow = self.response({"behavior": "allow"})
+        for path, hook in ((self.alias, self.hook), (self.alias, self.alias_hook), (self.entry, self.hook)):
+            for flag in ("-h", "--help"):
+                command = f"{path} {flag}"
+                with self.subTest(command=command, hook=hook):
+                    self.assertEqual(self.permission(command, hook), allow)
+        self.assertEqual(self.permission(f"{self.entry} status SHEP-1 working"), allow)
+
+    def test_other_commands_still_reach_the_card(self):
+        other = self.alias.with_name("other-herdr-task")
+        other.symlink_to(self.entry)
+        for command in ("herdr-task --help", f"{other} --help", f"{self.alias} --version",
+                        f"{self.alias} cursor-chat --help", f"{self.alias} --on vm --help",
+                        f"{self.alias} --help extra", f"{self.alias} --help && pwd", f"{self.alias} -h\npwd",
+                        f"{self.alias} --help >out", f'{self.alias} "--help$(pwd)"', f"\u00a0{self.alias} --help",
+                        "git merge-tree --write-tree --name-only --no-messages HEAD origin/master"):
+            with self.subTest(command=command):
+                self.assertEqual(self.permission(command), self.response(self.denied))
+        self.alias.unlink()
+        self.alias.symlink_to(self.entry.with_name("different-entry"))
+        self.assertEqual(self.permission(f"{self.alias} --help", self.alias_hook), self.response(self.denied))
+
+    def test_top_level_help_does_not_migrate_state(self):
+        import contextlib
+        import io
+        import runpy
+        from unittest import mock
+        from herdr_task import layout
+
+        for flag in ("-h", "--help"):
+            with self.subTest(flag=flag), mock.patch.object(sys, "argv", [str(self.entry), flag]), \
+                    mock.patch.object(layout, "ensure", return_value="newer") as migrate, \
+                    contextlib.redirect_stdout(io.StringIO()) as out, self.assertRaises(SystemExit) as stopped:
+                runpy.run_path(str(self.entry), run_name="__main__")
+            self.assertEqual(stopped.exception.code, 0)
+            self.assertIn("usage: herdr-task", out.getvalue())
+            migrate.assert_not_called()
+
+
 class CodexAutoWorker(unittest.TestCase):
     def test_native_flag_requires_support_for_fresh_start_and_resume(self):
         from unittest import mock
