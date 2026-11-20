@@ -19,7 +19,7 @@ import shlex
 
 from .base import HOME, hc_json, now, run, SHELLS
 from .agents import agent_running, status_word
-from .sessions import session_of
+from .sessions import codex_parent_id, saved_codex_log, session_of
 from .settings import ASSISTANT_TEMPLATES
 from .launch import CLEAN_ENV
 
@@ -204,7 +204,7 @@ def record_of(k):
     if not kind:
         return None
     sid, log = session_of(pid)
-    if not sid:
+    if not sid or (kind == "codex" and codex_parent_id(log) != sid):
         return None
     return {"kind": kind, "session": sid, "log": log, "argv": argv, "cwd": fg.get("cwd") or k.get("cwd"),
             "pid": k.get("pid"), "working": status_word(k) in ("working", "blocked"), "shell": shell}
@@ -282,6 +282,9 @@ def plan(k, rec, running):
         if not bare_shell(k):
             return None
         rec = task_record(k, task) if task else None
+    if rec and rec.get("kind") == "codex":
+        log = saved_codex_log(rec)
+        rec = dict(rec, log=log, session=rec.get("session") if log else None)
     if rec and rec.get("session") and rec["session"] in running:
         return ("running", None, False)
     if rec and rec.get("session") and rec.get("log") and os.path.isfile(rec["log"]):
@@ -310,6 +313,8 @@ def revive_pass(report):
                 running.add(new["session"])
                 if {x: v for x, v in (rec or {}).items() if x not in ("how", "sent")} != new:
                     write_record(k, new)
+            elif rec and rec.get("kind") == "codex" and rec.get("session") and not saved_codex_log(rec):
+                write_record(k, dict(rec, session=None, log=None))
         elif restarted(k):
             back.append((k, rec))
     for k, rec in back:

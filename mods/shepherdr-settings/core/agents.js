@@ -142,6 +142,10 @@ function parsePer(text) {
   try { return JSON.parse(text || "{}") ?? {}; } catch { return {}; }
 }
 
+// Codex's internal approval reviewer can appear in old transcript metadata and saved picks.
+// Other IDs may be custom even when they are absent from the model cache.
+export const selectableModel = (agent, model) => agent !== "codex" || typeof model !== "string" || model.toLowerCase() !== "codex-auto-review";
+
 // The agent's own settings, from DEFAULTS' output on its machine.
 export function parseDefaults(kind, stdout) {
   const out = {};
@@ -152,7 +156,7 @@ export function parseDefaults(kind, stdout) {
   let models = null;
   if (out.models) {
     try {
-      models = (JSON.parse(out.models).models ?? []).filter((m) => m.visibility !== "hide").map((m) => ({
+      models = (JSON.parse(out.models).models ?? []).filter((m) => m.visibility !== "hide" && selectableModel(kind, m.slug)).map((m) => ({
         id: m.slug, label: m.display_name || m.slug,
         efforts: (m.supported_reasoning_levels ?? []).map((l) => l.effort).filter(Boolean),
         fast: (m.service_tiers ?? []).length > 0,
@@ -174,7 +178,7 @@ export function parseDefaults(kind, stdout) {
   }
   return kind === "claude"
     ? { model: out.model || null, effort: out.effort || null, fast: Boolean(out.fast), per: parsePer(out.per), mode: out.mode || null }
-    : { model: out.model || null, effort: out.model_reasoning_effort || null, fast: ["fast", "priority"].includes(out.service_tier),
+    : { model: selectableModel(kind, out.model) ? out.model || null : null, effort: out.model_reasoning_effort || null, fast: ["fast", "priority"].includes(out.service_tier),
       sandbox: out.sandbox_mode || null, approval: out.approval_policy || null, models };
 }
 
@@ -209,8 +213,9 @@ export function current(kind, argv, meta, dflt) {
       effort: null, fast: false, used: meta.used ?? null, window: meta.window ?? null };
   }
   const o = overrides(argv);
+  if (!selectableModel(kind, meta.model)) meta = {};
   const tier = o.service_tier;
-  const model = meta.model ?? flag(argv, "-m", "--model") ?? o.model ?? dflt.model;
+  const model = [meta.model, flag(argv, "-m", "--model"), o.model, dflt.model].find((m) => m && selectableModel(kind, m));
   const sandbox = flag(argv, "-s", "--sandbox") ?? (hasCodexAuto(argv) ? "workspace-write" : o.sandbox_mode ?? dflt.sandbox);
   const perm = argv.includes("--dangerously-bypass-approvals-and-sandbox") || argv.includes("--yolo") || sandbox === "danger-full-access" ? "full"
     : sandbox === "read-only" ? "read-only" : "auto";
@@ -256,9 +261,9 @@ export function menuFor(agent, dflt, current = null, opts = {}) {
     if (current && !all.some((m) => m.id === current)) all.unshift({ id: current, name: current, efforts: [], defaultEffort: null, fast: false });
     return { name: NAMES.cursor, perms: permsFor("cursor", opts.chat), models: all };
   }
-  const all = (dflt?.models ?? []).map((m) => ({ id: m.id, name: m.label, efforts: m.efforts?.length ? m.efforts : ["low", "medium", "high", "xhigh"],
+  const all = (dflt?.models ?? []).filter((m) => selectableModel(agent, m.id)).map((m) => ({ id: m.id, name: m.label, efforts: m.efforts?.length ? m.efforts : ["low", "medium", "high", "xhigh"],
     defaultEffort: m.defaultEffort ?? dflt?.effort ?? null, fast: m.fast }));
-  if (current && !all.some((m) => m.id === current)) all.unshift({ id: current, name: current, efforts: ["low", "medium", "high", "xhigh"], defaultEffort: dflt?.effort ?? null, fast: false });
+  if (current && selectableModel(agent, current) && !all.some((m) => m.id === current)) all.unshift({ id: current, name: current, efforts: ["low", "medium", "high", "xhigh"], defaultEffort: dflt?.effort ?? null, fast: false });
   return { name: NAMES.codex, perms: PERMS.codex, models: all };
 }
 
@@ -276,7 +281,11 @@ export const pickKey = (agent, id) => `${agent}:${id}`;
 export function parsePicks(text) {
   let d = {};
   try { d = JSON.parse(text || "{}") ?? {}; } catch {}
-  const list = (x) => (Array.isArray(x) ? x.filter((k) => typeof k === "string" && k.includes(":")) : []);
+  const list = (x) => (Array.isArray(x) ? x.filter((k) => {
+    if (typeof k !== "string" || !k.includes(":")) return false;
+    const i = k.indexOf(":");
+    return selectableModel(k.slice(0, i), k.slice(i + 1));
+  }) : []);
   return { pinned: list(d.pinned), recent: list(d.recent).slice(0, RECENT) };
 }
 // Restarted on it: first among the recent ones.
@@ -313,9 +322,10 @@ export function modelSections(menus, agent, picks, q) {
   };
   // a pinned or recent model typed by id (no CLI lists it) stays on offer
   const saved = (k) => {
-    const models = menus?.[k]?.models ?? [], known = new Set(models.map((m) => m.id));
+    const models = (menus?.[k]?.models ?? []).filter((m) => selectableModel(k, m.id));
+    const known = new Set(models.map((m) => m.id));
     const ids = [...new Set([...picks.pinned, ...picks.recent].filter((x) => x.startsWith(`${k}:`)).map((x) => x.slice(k.length + 1)))];
-    return [...models, ...ids.filter((id) => !known.has(id)).map((id) => ({ ...typedModel(k, id), typed: false }))];
+    return [...models, ...ids.filter((id) => selectableModel(k, id) && !known.has(id)).map((id) => ({ ...typedModel(k, id), typed: false }))];
   };
   const capped = (key, title, k, rows) => ({ key, title, agent: k, rows: rows.slice(0, CAP), more: Math.max(0, rows.length - CAP) });
   if (!query) {
@@ -340,7 +350,7 @@ export function modelSections(menus, agent, picks, q) {
   // one word that could be an id, and no model has it: start any agent on it as typed
   if (/^[\w.\[\]-]{2,60}$/.test(query)) {
     const rows = [agent, ...Object.keys(menus ?? {}).filter((x) => x !== agent)]
-      .filter((k) => menus?.[k] && !saved(k).some((m) => m.id === query)).map((k) => ({ agent: k, ...typedModel(k, query), pinned: false }));
+      .filter((k) => menus?.[k] && selectableModel(k, query) && !saved(k).some((m) => m.id === query)).map((k) => ({ agent: k, ...typedModel(k, query), pinned: false }));
     if (rows.length) out.push({ key: "typed", title: "Use the id typed", agent, rows, more: 0 });
   }
   return out;
@@ -469,6 +479,7 @@ function stripSession(kind, argv) {
 // opts.chat: it runs in a chat (an Assistant): Cursor then runs behind herdr-task's chat bridge (CURSOR_CHAT), as it
 // did already when old argv ran it so. opts.codexAuto: CODEX_AUTO_CHECK passed on the launch machine.
 export function argvFor(pick, old, opts = {}) {
+  if (!selectableModel(pick.agent, pick.model)) throw new Error("Pick a model for the conversation.");
   const same = pick.agent === old.agent;
   const flags = same ? kept(pick.agent, old.argv ?? [], { replaceCodexPerm: Boolean(pick.perm) }) : [];
   if (pick.agent === "claude") {

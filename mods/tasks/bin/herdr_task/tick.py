@@ -16,7 +16,7 @@ from .agents import (
     task_status,
 )
 from .provider import NUDGE, provider_cut, provider_error, PROVIDER_WAITS
-from .sessions import find_lost_logs, refresh_sessions, session_of
+from .sessions import CODEX_ROLLOUT, codex_parent_id, find_lost_logs, refresh_sessions, session_of
 from .github import (already_merged, base_pushes, BEHIND, CHECKS_NEVER, checks_missing, checks_since, drop_branch, expected_checks, finish, github, mergeable_known, merged_here, needs_approval, note_checks, pr_merged, pr_pending, pr_problem,
                      pr_view, pr_wait, queue_entry, queue_merge, tidy_done, tidy_due, update_main, watch_main)
 from .launch import default_space
@@ -621,7 +621,11 @@ def retry_pass(report):
             continue
         pid = (k.get("foreground") or {}).get("pid")
         was = old.get(k["address"]) or {}
-        log = was.get("log") if was.get("pid") == pid and was.get("log") else (session_of(pid)[1] if pid else None)
+        log = was.get("log") if was.get("pid") == pid else None
+        if log and CODEX_ROLLOUT.search(log) and not codex_parent_id(log):
+            log = None
+        if not log and pid:
+            log = session_of(pid)[1]
         row = retry_one(was or None, k, log, report)
         if row:
             rows[k["address"]] = {**row, "pid": pid}

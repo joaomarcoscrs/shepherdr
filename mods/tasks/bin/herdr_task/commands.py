@@ -20,7 +20,7 @@ from .agents import (
     agent_log, agent_running, background_jobs, busy_again, detail, fit, LINE_MAX, live_agents, ready_turns, ready_wait, STATUSES,
     SUMMARY_MAX, WORKING_AGAIN,
 )
-from .sessions import refresh_sessions
+from .sessions import refresh_sessions, saved_codex_log
 from .github import (already_merged, base_pushes, checks_missing, github_unreachable, pr_for_branch, checks_since, drop_branch, expected_checks, finish, gh, github, merged_here, needs_approval, note_checks, own_work, pr_adopt, pr_open,
                      pr_pending, pr_problem, pr_view, remote_of, update_main, watch_main)
 from .github import CHECKS_RUNNING as PR_CHECKS_RUNNING
@@ -1122,7 +1122,10 @@ def start_again(s, t, space, key=None, argv_json=None, message=None, parent=None
     if key or argv_json or not keep:
         t["worker_by"] = "task" if key or argv_json else worker_source(t)
     same = prev and agent_key(argv) == prev.get("agent")
-    res = resume_argv(argv, prev["session"], folder_for(s, t)) if same and prev.get("session") else None
+    session = prev.get("session") if same else None
+    if session and prev.get("agent") == "codex" and not saved_codex_log(prev):
+        session = None
+    res = resume_argv(argv, session, folder_for(s, t)) if session else None
     if res:
         return launch(s, t, argv, space, message or nudge, parent=parent, resume=res), True
     text = handoff(s, t, prev, parent, argv) + (("\n\n" + message) if message else "")
