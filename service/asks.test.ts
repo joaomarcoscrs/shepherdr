@@ -230,7 +230,7 @@ test("a Chrome sign-in Ask reaches Needs you and its push opens the owning task"
   const term = { address: addr, state: "live", created_ms: 9, labels: { "herdr.task": "shop#4" } };
   const terminals = new Map([[addr, term]]);
   c.terminalsOf = (a: string) => terminals.get(a);
-  asks.remote({ terminals }, () => []);
+  asks.remote({ terminals } as any, () => []);
   const row = { section: "needs", worker: addr, ref: "SHOP-4", folder: "/tmp/shop", slug: "shop", id: 4, title: "Shop preview", sub: "Sign-in needed" };
   const snap = c.snapshot({ host: "here", user: "owner", machines: [], sections: [],
     spaces: [{ id: "sp2", name: "Shop", folder: "/tmp/shop" }], off: ["browser"], rows: [row] });
