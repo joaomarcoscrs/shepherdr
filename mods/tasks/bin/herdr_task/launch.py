@@ -204,7 +204,7 @@ def own_command(path, text, sandboxed=False):
     if sandboxed and re.fullmatch(r"[\w#.@-]+", task):
         # the reviewer's label as the brief writes it, its one variable: this worker's own task
         text = text.replace('"herdr.task=$HERDR_BROWSER_TASK"', f'"herdr.task={task}"')
-    words, at, text = [], 0, text.strip()
+    words, at, text = [], 0, text.strip(" \t\n")
     while at < len(text):
         if text[at] in " \t":
             at += 1
@@ -216,6 +216,11 @@ def own_command(path, text, sandboxed=False):
         at = m.end()
     if len(words) >= 2 and words[0] == path and words[1] in OWN:
         return True
+    if sandboxed and len(words) == 2 and words[1] in ("-h", "--help"):
+        # The install alias can be absent from the worker's PATH. Trust it only for this launcher.
+        alias = os.path.expanduser("~/.local/bin/herdr-task")
+        if words[0] in (path, alias) and os.path.realpath(words[0]) == ENTRY:
+            return True
     bp = browser_path()
     if bp and len(words) >= 2 and words[0] in (bp, "herdr-browser"):
         return True
