@@ -92,6 +92,7 @@ test("Codex Auto uses the supported native flag on fresh starts and resumes", ()
   for (const chat of [true, false]) {
     const { base } = argvFor(pick, { agent: "claude", argv: ["claude"] }, { chat, codexAuto: true });
     expect(base).toEqual(["codex", "--no-daemon", "-c", 'service_tier="default"', "--approve-for-me"]);
+    expect(current("codex", base, {}, { sandbox: "read-only" }).perm).toBe("auto");
     const { argv } = argvFor(pick, { agent: "codex", argv: base, session: "S1" }, { chat, codexAuto: true });
     expect(argv).toEqual(["codex", "resume", ...base.slice(1), "S1"]);
     expect(resumeArgv("codex", argv, "S2")).toEqual(["codex", "resume", ...base.slice(1), "S2"]);

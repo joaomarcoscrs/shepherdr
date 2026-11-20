@@ -211,7 +211,7 @@ export function current(kind, argv, meta, dflt) {
   const o = overrides(argv);
   const tier = o.service_tier;
   const model = meta.model ?? flag(argv, "-m", "--model") ?? o.model ?? dflt.model;
-  const sandbox = flag(argv, "-s", "--sandbox") ?? o.sandbox_mode ?? dflt.sandbox;
+  const sandbox = flag(argv, "-s", "--sandbox") ?? (hasCodexAuto(argv) ? "workspace-write" : o.sandbox_mode ?? dflt.sandbox);
   const perm = argv.includes("--dangerously-bypass-approvals-and-sandbox") || argv.includes("--yolo") || sandbox === "danger-full-access" ? "full"
     : sandbox === "read-only" ? "read-only" : "auto";
   return { agent: "codex", model, label: dflt.models?.find((m) => m.id === model)?.label ?? null, perm,
