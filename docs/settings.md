@@ -15,6 +15,26 @@ drops the space's own, and it inherits again. A few settings are one for every s
 - **The header's Autopilot switch** turns Autopilot on or off in its space; *Write a heartbeat* opens that space's
   Autopilot page.
 
+## Codex Auto permissions
+
+With **Auto** selected for a worker or Assistant, Herdr uses Codex's `--approve-for-me` when the launch machine's
+CLI lists it for both a fresh session and `resume`. Codex keeps its workspace-write sandbox and reviews eligible
+approval requests. Older CLIs use workspace-write with on-request approvals.
+
+For supported shell and workspace tools, the Herdr card hands control back when Codex's transcript confirms automatic
+review for the current turn. The worker's scoped hook checks run first. Codex still enforces its own policy and handles
+managed human checkpoints in the terminal. A user reviewer, an unconfirmed turn, or an MCP tool with its own review
+routing keeps the usual card path.
+
+Settings apply when a new worker or Assistant launches from those settings. A chat already labeled **Auto** from an
+older launch offers **Restart with Auto review** on a supported CLI. Herdr resumes the same Codex conversation when
+available. A normal resume or crash recovery reuses the previous launch arguments, so automatic review carries over
+once launched with it. Selecting **Read only** or **Full access** sets the new permission mode and replaces the
+session's automatic reviewer on CLIs that support it.
+
+The Codex PermissionRequest hook accepts a one-time allow or deny. Codex's native command prompt can offer session or
+policy reuse where applicable. Those decisions are not available through the Herdr hook card.
+
 ## The audit
 
 | Page | Setting | Level | Why |

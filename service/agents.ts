@@ -7,7 +7,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Hub } from "./hub.ts";
 import { where, writable } from "./paths.ts";
-import { sh } from "./model.ts";
+import { codexAuto, sh } from "./model.ts";
 import { layoutScript } from "./layout-scripts.ts";
 import * as AG from "../core/agents.js";
 import { chatLabel } from "../core/spaces.js";
@@ -15,7 +15,7 @@ import { agentKindOf as kindOf } from "../core/chat-reader.js";
 import * as LS from "../core/live-switch.js";
 import { historyLines } from "../core/mouse-leak.js";
 
-const { DEFAULTS, parseDefaults, current, menuFor, rowFor, argvFor, sessionOf, NAMES, line, PICKS_FILE, parsePicks, pickKey, withPin, withRecent, isCursorChat } = AG as any;
+const { DEFAULTS, parseDefaults, current, menuFor, rowFor, argvFor, sessionOf, NAMES, line, PICKS_FILE, parsePicks, pickKey, withPin, withRecent, isCursorChat, hasCodexAuto } = AG as any;
 /** Whether Cursor may run this agent: anything but a reviewer or a helper (core/settings.js CURSOR_ROLES). */
 export const cursorRole = (t: any) => !["reviewer", "helper"].includes(t?.labels?.["herdr.role"]);
 
@@ -83,8 +83,11 @@ export class Agents {
     // not a task's agent (an Assistant): Cursor runs behind its chat bridge there, which has no Auto (CURSOR_CHAT_PERMS)
     const chat = !t.labels?.["herdr.task"];
     const menus = Object.fromEntries(["claude", "codex", "cursor"].filter(offered).map((k) => [k, menuFor(k, dflts[k], k === kind ? row : null, { chat })]));
+    const offline = machine && !(await this.reachable(machine)) ? machine : null;
+    const codexAutoUpgrade = !offline && kind === "codex" && c.perm === "auto" && !hasCodexAuto(t.foreground?.argv ?? t.argv)
+      && await codexAuto(this.hub, machine);
     return { current: { agent: kind, model: row, effort: c.effort ?? null, fast: !!c.fast, perm: c.perm ?? null }, menus,
-      permDefault: { claude: claude?.mode ?? "manual", codex: "auto", cursor: "auto" }, picks: this.picks(), offline: machine && !(await this.reachable(machine)) ? machine : null };
+      permDefault: { claude: claude?.mode ?? "manual", codex: "auto", cursor: "auto" }, picks: this.picks(), offline, codexAutoUpgrade };
   }
 
   /** whether another machine answers now (hc machine ls: connected) */
@@ -159,6 +162,10 @@ export class Agents {
     const state = t.status?.state;
     if (state === "working") throw new Error("It's busy with a turn. Switch once it's done, or stop it first.");
     if (state === "blocked") throw new Error("It's waiting on a question. Answer it, then switch.");
+    if (to.agent === "codex" && to.perm === "auto" && !hasCodexAuto(t.foreground?.argv ?? t.argv) &&
+        await codexAuto(this.hub, machine)) {
+      return { terminal: await this.restart(addr, reader, pick, true) };
+    }
     const hc = (args: string[]) => run([process.env.SHEPHERDR_HC || "hc", ...args]);
     // a send returns once a turn starts or ~5 s pass, and a command starts none: its answer on screen is what counts,
     // so each is waited for only as long as a refusal takes (it comes at once), not for the rest
@@ -189,24 +196,27 @@ export class Agents {
   }
 
   /** Restarts it on the picked CLI, model, effort and speed; resolves with the new agent's address. */
-  async restart(addr: string, reader: any, pick: { kind: string; model?: string; effort?: string; speed?: string; perm?: string }) {
+  async restart(addr: string, reader: any, pick: { kind: string; model?: string; effort?: string; speed?: string; perm?: string }, supported?: boolean) {
     const t: any = this.hub.terminals.get(addr);
     if (!t || t.state !== "live") throw new Error("That agent isn't running.");
     const kind = kindOf(t) ?? "claude";
+    const machine = addr.includes("/") ? addr.split("/")[0] : null;
     const old = { agent: kind, argv: t.foreground?.argv ?? t.argv ?? [], session: sessionOf(kind, reader?.path ?? null) };
     const task = t.labels?.["herdr.task"];
     // Assistants use Cursor's chat bridge. Task workers keep Cursor's native terminal and its permissions.
-    const built = argvFor({ agent: pick.kind, model: pick.model, effort: pick.effort, fast: pick.speed === "fast", perm: pick.perm ?? current(kind, old.argv, {}, {}).perm }, old, { chat: !task });
+    const built = argvFor({ agent: pick.kind, model: pick.model, effort: pick.effort, fast: pick.speed === "fast", perm: pick.perm ?? current(kind, old.argv, {}, {}).perm }, old,
+      { chat: !task, codexAuto: pick.kind === "codex" && (supported ?? await codexAuto(this.hub, machine)) });
     const pane = t.labels?.["herdr.chat"] ?? "";
     if (task) {
-      const r = await run(["herdr-task", "switch", task, "--folder", t.foreground?.cwd ?? t.cwd, "--argv", JSON.stringify(built.base), "--json"]);
+      const r = await run(["herdr-task", ...(machine ? ["--on", machine] : []), "switch", task, "--folder", t.foreground?.cwd ?? t.cwd, "--argv", JSON.stringify(built.base), "--json"]);
       let out: any = {};
       try { out = JSON.parse(r.out || "{}"); } catch {}
       if (r.code !== 0 || !out.terminal) throw new Error((r.err || r.out).trim() || "herdr-task switch failed");
-      if (pane) await run([process.env.SHEPHERDR_HC || "hc", "label", out.terminal, `herdr.chat=${chatLabel(pane)}`, `herdr.chat.origin=${t.labels?.["herdr.chat.origin"] || addr}`]);
-      await run(["herdr-app", "do", "terminal.park", "--terminal", out.terminal]);
+      const next = machine && !out.terminal.includes("/") ? `${machine}/${out.terminal}` : out.terminal;
+      if (pane) await run([process.env.SHEPHERDR_HC || "hc", "label", next, `herdr.chat=${chatLabel(pane)}`, `herdr.chat.origin=${t.labels?.["herdr.chat.origin"] || addr}`]);
+      await run(["herdr-app", "do", "terminal.park", "--terminal", next]);
       this.used(pick);
-      return out.terminal as string;
+      return next as string;
     }
     const script = layoutScript("restart.sh");
     if (!script) throw new Error("This install can't restart an Assistant: update Shepherdr on that machine.");

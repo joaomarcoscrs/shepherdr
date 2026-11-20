@@ -5,13 +5,16 @@ import home_guard  # noqa: F401  (first: every test on a throwaway home, never t
 import json
 import os
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(ROOT, "mods", "chat", "ask-hook.sh")
+TASK_BIN = os.path.join(ROOT, "mods", "tasks", "bin")
 REQ = {"tool_name": "Bash", "tool_input": {"command": "touch made.txt"}, "cwd": "/tmp/x", "transcript_path": ""}
 ALLOW = json.dumps({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow"}}})
 
@@ -44,11 +47,11 @@ class AskHook(unittest.TestCase):
             json.dump(t, f)
         os.replace(self.state + ".tmp", self.state)
 
-    def start(self, **env):
+    def start(self, request=REQ, cmd=None, **env):
         e = {"PATH": f"{self.bin}:{os.environ['PATH']}", "HOME": self.tmp, "HERDR_APP_HOME": self.app,
              "HC_TERMINAL_ID": "t9", "FAKE_HC_STATE": self.state, **env}
-        p = subprocess.Popen(["sh", HOOK], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=e)
-        p.stdin.write(json.dumps(REQ).encode())
+        p = subprocess.Popen(cmd or ["sh", HOOK], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=e, start_new_session=True)
+        p.stdin.write(json.dumps(request).encode())
         p.stdin.close()
         return p
 
@@ -57,6 +60,16 @@ class AskHook(unittest.TestCase):
         p.wait(timeout=timeout)
         with p.stdout:
             return p.stdout.read()
+
+    def no_card(self, p):
+        try:
+            self.assertEqual(self.out(p, timeout=3), b"")
+            self.assertIsNone(self.waiting(0.1))
+        finally:
+            if p.poll() is None:
+                os.killpg(p.pid, signal.SIGKILL)
+                p.wait()
+                p.stdout.close()
 
     def waiting(self, timeout=5):
         end = time.time() + timeout
@@ -97,6 +110,52 @@ class AskHook(unittest.TestCase):
         open(os.path.join(self.asks, "ans", ask + ".json"), "w").close()
         out = self.out(p)
         self.assertEqual(out, b"")
+
+    def codex_request(self, reviewer, turn="turn-now", tool="Bash"):
+        session = "11111111-2222-4333-8444-555555555555"
+        path = os.path.join(self.tmp, f"rollout-2026-11-20T00-00-00-{session}.jsonl")
+        with open(path, "w") as f:
+            for row in ({"type": "session_meta", "payload": {"id": session}},
+                        {"type": "turn_context", "payload": {"turn_id": "turn-old", "approval_policy": "on-request",
+                                                            "approvals_reviewer": "auto_review"}},
+                        {"type": "turn_context", "payload": {"turn_id": turn, "approval_policy": "on-request",
+                                                            "approvals_reviewer": reviewer}}):
+                f.write(json.dumps(row) + "\n")
+        return {**REQ, "hook_event_name": "PermissionRequest", "permission_mode": "default", "tool_name": tool,
+                "session_id": session, "turn_id": "turn-now", "transcript_path": path}
+
+    def test_codex_native_auto_review_leaves_no_card_or_hook_decision(self):
+        request = self.codex_request("auto_review")
+        self.term({"state": "live", "status": "working", "argv": ["codex", "--approve-for-me"]})
+        self.no_card(self.start(request))
+
+    def test_codex_worker_checks_scoped_allows_before_deferring_to_the_reviewer(self):
+        chat = os.path.join(self.app, "mods", "chat")
+        os.makedirs(chat)
+        for name in ("ask-hook.sh", "ask-auto.py"):
+            src = os.path.join(os.path.dirname(HOOK), name)
+            if os.path.isfile(src):
+                shutil.copyfile(src, os.path.join(chat, name))
+        code = ("import argparse, sys; sys.path.insert(0, sys.argv[1]); from herdr_task.launch import cmd_allow;"
+                "cmd_allow(argparse.Namespace(command='/x/herdr-task', sandboxed=True))")
+        entry = [sys.executable, "-c", code, TASK_BIN]
+        request = self.codex_request("auto_review")
+        self.term({"state": "live", "status": "working", "argv": ["codex", "--approve-for-me"]})
+        self.no_card(self.start(request, cmd=entry))
+        own = {**request, "tool_input": {"command": "/x/herdr-task status SHEP-1 working"}}
+        self.assertEqual(json.loads(self.out(self.start(own, cmd=entry))), json.loads(ALLOW))
+
+    def test_codex_manual_fallback_with_stale_or_missing_reviewer_and_for_mcp(self):
+        self.term({"state": "live", "status": "working", "argv": ["codex", "--approve-for-me"]})
+        for reviewer, turn, tool in (("user", "turn-now", "Bash"), (None, "turn-now", "Bash"),
+                                     ("auto_review", "turn-stale", "Bash"), ("auto_review", "turn-now", "mcp__app__prompt")):
+            with self.subTest(reviewer=reviewer, turn=turn, tool=tool):
+                p = self.start(self.codex_request(reviewer, turn, tool))
+                ask = self.waiting()
+                self.assertIsNotNone(ask)
+                with open(os.path.join(self.asks, "ans", ask + ".json"), "w") as f:
+                    f.write(ALLOW)
+                self.assertEqual(json.loads(self.out(p)), json.loads(ALLOW))
 
     def test_a_task_workers_codex_hands_it_over_through_its_own_hook(self):
         # Codex runs ~/.codex/hooks.json's copy beside the worker's `herdr-task _allow` and waits for both: this copy

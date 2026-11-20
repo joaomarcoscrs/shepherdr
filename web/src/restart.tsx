@@ -227,7 +227,7 @@ function SpeedWords({ speed }: { speed: Worn }) {
 export type MenuModel = { id: string; name: string; efforts: string[]; defaultEffort?: string | null; fast?: boolean }
 export type AgentMenu = { name: string; models: MenuModel[]; perms?: { id: string; label: string }[] }
 type MenuPick = { agent: string; model: string | null; effort: string | null; fast: boolean; perm: string | null }
-type MenuData = { current: MenuPick; menus: Record<string, AgentMenu>; permDefault: Record<string, string>; picks?: Picks; offline?: string | null }
+type MenuData = { current: MenuPick; menus: Record<string, AgentMenu>; permDefault: Record<string, string>; picks?: Picks; offline?: string | null; codexAutoUpgrade?: boolean }
 /** a stretch of the model list (core/agents.js modelSections): Pinned, Recent, All models, or an agent's matches */
 type Picks = { pinned: string[]; recent: string[] }
 type Section = { key: string; title: string | null; agent: string; rows: (MenuModel & { agent: string; pinned: boolean; typed?: boolean })[]; more: number }
@@ -388,6 +388,7 @@ function ModelMenu({ chat, typed }: { chat: string; typed?: string }) {
   }, [chat, typed])
   const model = (s: MenuPick) => data?.menus[s.agent]?.models.find((m) => m.id === s.model) ?? null
   const level = (s: MenuPick) => s.effort ?? model(s)?.defaultEffort ?? null
+  const upgradeAuto = !!data?.codexAutoUpgrade && sel?.agent === 'codex' && sel.perm === 'auto'
   const changes = () => {
     if (!data || !sel) return []
     const w = data.current, out: string[] = []
@@ -396,6 +397,7 @@ function ModelMenu({ chat, typed }: { chat: string; typed?: string }) {
     if (level(sel) && level(sel) !== level(w)) out.push(LEVEL[level(sel)!] ?? level(sel)!)
     if (sel.fast !== w.fast) out.push(sel.fast ? 'Fast' : 'Standard')
     if (sel.perm && sel.perm !== w.perm) out.push(data.menus[sel.agent]?.perms?.find((x) => x.id === sel.perm)?.label ?? sel.perm)
+    else if (upgradeAuto) out.push('Auto review')
     return out
   }
   const restart = async () => {
@@ -428,7 +430,7 @@ function ModelMenu({ chat, typed }: { chat: string; typed?: string }) {
   const perm = sel ? menu?.perms?.find((x) => x.id === sel.perm) : undefined
   const ch = changes()
   // only another agent or permission mode needs a restart: the rest changes in place, the conversation going on
-  const restarts = !!data && !!sel && (sel.agent !== data.current.agent || (!!sel.perm && sel.perm !== data.current.perm))
+  const restarts = !!data && !!sel && (upgradeAuto || sel.agent !== data.current.agent || (!!sel.perm && sel.perm !== data.current.perm))
   const row = 'flex min-h-[31px] w-full items-center gap-2.5 rounded-[7px] px-[9px] text-left enabled:hover:bg-hover focus-visible:bg-hover focus-visible:outline-none disabled:text-fg3 coarse:min-h-11 phone:min-h-11'
   const head = (t: string) => <div className="px-[9px] pt-2 pb-1 text-[0.6875rem] text-fg3 coarse:text-[0.8125rem] phone:text-[0.8125rem]">{t}</div>
   const sheet = (
@@ -501,7 +503,7 @@ function ModelMenu({ chat, typed }: { chat: string; typed?: string }) {
                   {/* a permission mode is set when the agent starts: said before the press too */}
                   {restarts && sel.agent === data.current.agent ? (
                     <p className="px-[9px] text-pretty text-[0.71875rem] text-fg3 coarse:text-[0.8125rem] phone:text-[0.8125rem]">
-                      A new permission mode restarts the agent. The conversation carries on.
+                      {upgradeAuto ? 'Auto review takes effect after a restart.' : 'A new permission mode restarts the agent.'} The conversation carries on.
                     </p>
                   ) : null}
                   {/* another machine out of reach: said when a change is chosen, the button still tries */}

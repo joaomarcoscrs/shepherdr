@@ -288,6 +288,23 @@ def worktrees_on(s, space=None):
     return s.loc["kind"] == "repo" and settings_for(s, space)["tasks"].get("worktrees") is not False
 
 
+def codex_auto_supported():
+    """The launch machine's CLI must accept the native mode both fresh and on resume."""
+    exe = shutil.which("codex")
+    if not exe:
+        return False
+    for sub in ([], ["resume"]):
+        try:
+            r = subprocess.run([exe, *sub, "--help"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL, text=True, errors="replace", timeout=3,
+                               env={**os.environ, "LC_ALL": "C"})
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if r.returncode or not re.search(r"^\s*--approve-for-me(?:\s|$)", r.stdout, re.MULTILINE):
+            return False
+    return True
+
+
 def argv_for(pick):
     """How to start an agent from a role's settings {agent, model, effort, fast, perm} (or its own
     argv), as the chat's agent picker builds it (mods/chat/agent.js argvFor). None: no setting."""
@@ -336,8 +353,12 @@ def argv_for(pick):
             a.append("--dangerously-bypass-approvals-and-sandbox")
         elif perm == "read-only":
             a += ["-s", "read-only", "-a", "on-request"]
+        elif perm == "auto" and codex_auto_supported():
+            a.append("--approve-for-me")
         elif perm:
             a += ["-s", "workspace-write", "-a", "on-request"]
+        if perm in ("read-only", "full") and codex_auto_supported():
+            a += ["-c", 'approvals_reviewer="user"']
         return a
     return [agent] if agent else None
 
