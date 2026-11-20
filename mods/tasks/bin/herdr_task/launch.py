@@ -216,6 +216,8 @@ def own_command(path, text, sandboxed=False):
         at = m.end()
     if len(words) >= 2 and words[0] == path and words[1] in OWN:
         return True
+    if login_words(path, words):
+        return True
     if sandboxed and len(words) == 2 and words[1] in ("-h", "--help"):
         # The install alias can be absent from the worker's PATH. Trust it only for this launcher.
         alias = os.path.expanduser("~/.local/bin/herdr-task")
@@ -233,6 +235,38 @@ def own_command(path, text, sandboxed=False):
         return True
     sp = secret_path()
     return bool(sp) and len(words) >= 2 and words[0] in (sp, "herdr-secret") and words[1] in SECRET
+
+
+def login_words(path, words):
+    """Only the sign-in request. No global flags, other verbs, or command expansion."""
+    if len(words) < 3 or words[0] not in (path, "herdr-task") or words[1] != "ask-login":
+        return False
+    if words[0] == "herdr-task" and os.path.realpath(shutil.which("herdr-task") or "") != ENTRY:
+        return False
+    if len(words) == 3:
+        return words[2] in ("--terminal", "--browser")
+    if len(words) == 4 and words[2] == "--site":
+        from .login import safe_origin
+        try:
+            safe_origin(words[3])
+            return True
+        except Fail:
+            pass
+    return False
+
+
+def login_decision(path, command):
+    if not isinstance(command, str):
+        return None
+    prefix = r"^[ \t]*(?:" + re.escape(path) + r"|herdr-task)[ \t]+ask-login(?:[ \t]|$)"
+    if not re.match(prefix, command):
+        return None
+    # Refuse malformed calls here so even an accidentally supplied redirect never becomes a permission card.
+    if own_command(path, command):
+        return SHARED_ALLOW
+    return {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {
+        "behavior": "deny", "message": "Use one plain ask-login command with an HTTP(S) site origin, --terminal, or --browser."
+    }}}
 
 
 # A Codex worker's review (#866): its sandbox can't reach hc. Keep the read-only launch shape
@@ -383,6 +417,26 @@ def ask_card(raw):
     return out
 
 
+def bash_command(data):
+    cmd = (data.get("tool_input") or {}).get("command") if isinstance(data.get("tool_input"), dict) else None
+    if isinstance(cmd, list) and all(isinstance(w, str) for w in cmd):
+        # Older requests can use argv. Unwrap only a recognized shell, never another executable.
+        cmd = cmd[2] if len(cmd) == 3 and cmd[0] in ("/bin/bash", "/bin/sh", "/bin/zsh", "bash", "sh", "zsh") \
+            and cmd[1] in ("-c", "-lc") else shlex.join(cmd)
+    return cmd
+
+
+def cmd_login_allow(_args):
+    try:
+        data = json.loads(sys.stdin.buffer.read(1 << 20))
+    except ValueError:
+        return
+    if isinstance(data, dict) and data.get("tool_name") == "Bash":
+        decision = login_decision(own_path(), bash_command(data))
+        if decision:
+            print(json.dumps(decision))
+
+
 def cmd_allow(args):
     """The PermissionRequest hook of a task worker (Claude Code and Codex, own_argv): allows this
     launch's own herdr-task commands and Claude's Read of a picture the person shared in a chat (shared);
@@ -395,6 +449,11 @@ def cmd_allow(args):
         return
     if not isinstance(data, dict):
         return
+    cmd = bash_command(data) if data.get("tool_name") == "Bash" else None
+    decision = login_decision(args.command, cmd)
+    if decision:
+        print(json.dumps(decision))
+        return
     if os.environ.get("HERDR_TASK_HOOK_LOG"):
         with open(os.environ["HERDR_TASK_HOOK_LOG"], "a") as f:
             f.write(json.dumps(data) + "\n")
@@ -402,11 +461,6 @@ def cmd_allow(args):
     if shared_read(data):
         print(json.dumps(SHARED_ALLOW))
         return
-    cmd = (data.get("tool_input") or {}).get("command") if isinstance(data.get("tool_input"), dict) else None
-    if isinstance(cmd, list) and all(isinstance(w, str) for w in cmd):
-        # Older requests can use argv. Unwrap only a recognized shell, never another executable.
-        cmd = cmd[2] if len(cmd) == 3 and cmd[0] in ("/bin/bash", "/bin/sh", "/bin/zsh", "bash", "sh", "zsh") \
-            and cmd[1] in ("-c", "-lc") else shlex.join(cmd)
     if data.get("tool_name") == "Bash" and own_command(args.command, cmd, getattr(args, "sandboxed", False)):
         print(json.dumps(SHARED_ALLOW))
         return
@@ -656,6 +710,9 @@ def closing_line(s, task, parent=None, argv=None):
                  f"it; carry on.")
     text += (f" Your herdr-task command is {ht}: write that full path each time (never the bare name), as one plain command; "
              f"then its {', '.join(OWN)} commands run without asking.")
+    text += (f" To ask for sign-in, run `{ht} ask-login --site https://app.example.com` (site origin only), "
+             f"`{ht} ask-login --terminal` for this CLI, or `{ht} ask-login --browser` for this task’s existing Herdr Browser. "
+             "These wait for the person without a separate approval in Shepherdr’s managed launches. Verify sign-in after confirmation.")
     text += browser_line()
     if secret_path():
         text += (" Secrets (keys, tokens, passwords) are used by name, never seen: `herdr-secret ask NAME --why \"…\"` "

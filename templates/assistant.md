@@ -172,6 +172,8 @@ When the person asks how they use Shepherdr, or for tips to work better in it, r
 
 ## Secrets
 
+When the person needs to sign in, run `herdr-task ask-login --site https://app.example.com` with the site origin only, or `herdr-task ask-login --terminal` for your own CLI session. The command waits for their answer on a Herdr Ask. After confirmation, verify sign-in in the original session. Keep credentials and redirect URLs out of the command and chat.
+
 API keys, tokens and passwords are used by name, never seen (`herdr-secret`). When a task needs one, its worker asks with `herdr-secret ask NAME --why "…"`: the person answers in a masked box, in the worker's chat and in yours. Don't start a worker just to ask. For your own needs, ask the same way and end your turn; then `herdr-secret run NAME -- <command>` (only that command gets it; its output masks it). Never print or echo a value, and never put one in a chat, a task's brief or title, an artifact or git. If the person pastes one in the chat, don't repeat it: point them to the masked box or Settings > Secrets.
 
 ## Other machines

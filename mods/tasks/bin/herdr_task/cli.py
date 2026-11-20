@@ -114,6 +114,8 @@ def remote_run(machine, argv, timeout=None):
 def remote(machine, argv):
     """Runs herdr-task on the machine that holds the folder (installing it there first), then
     names a new tab from here, where the window is."""
+    if argv[:1] == ["ask-login"]:
+        raise Fail("Ask for sign-in from the terminal that needs it.")
     if argv[:1] == ["tick"]:
         # Its start limits live in Settings here, where the window is (HERD-40).
         from .settings import machine_limits
@@ -487,6 +489,16 @@ def main():
     c.add_argument("--space")
     c.add_argument("--parent")
     c.add_argument("--keep", action="store_true", help="add the agent beside the old one")
+    from .login import cmd_login
+    c = sub.add_parser("ask-login", help="ask the person to sign in and wait for their answer")
+    target = c.add_mutually_exclusive_group(required=True)
+    target.add_argument("--site", help="open an HTTP(S) site origin in Chrome (no path, query or fragment)")
+    target.add_argument("--terminal", action="store_true", help="open your own terminal for CLI sign-in")
+    target.add_argument("--browser", action="store_true", help="open this task's existing browser, if enabled")
+    c.set_defaults(fn=cmd_login, json=False)
+    from .launch import cmd_login_allow
+    c = sub.add_parser("_login-allow")  # the installed chat hook, including Assistants
+    c.set_defaults(fn=cmd_login_allow, json=False)
     c = sub.add_parser("_allow")  # Codex's PermissionRequest hook (own_argv)
     c.add_argument("--command", required=True)
     c.add_argument("--sandboxed", action="store_true")  # Codex's: its proof and commits run escalated (#866)

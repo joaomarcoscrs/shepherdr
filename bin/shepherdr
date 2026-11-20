@@ -997,6 +997,50 @@ def add_hooks(r, rec):
     return done
 
 
+CURSOR_CONFIG = ".cursor/cli-config.json"
+
+
+def cursor_login_rules(r, rec, *, remove=False):
+    """Cursor's native CLI takes scoped shell rules from its config, with denies taking precedence."""
+    path = r.p(CURSOR_CONFIG)
+    previous = rec.get("cursor_login_rules", [])
+    if not os.path.isdir(os.path.dirname(path)) or (remove and not previous):
+        return
+    body = read(path)
+    try:
+        config = json.loads(body) if body else {}
+        allow = config.setdefault("permissions", {}).setdefault("allow", [])
+        if not isinstance(allow, list):
+            raise ValueError
+    except (ValueError, AttributeError):
+        r.notes.append("Cursor's CLI settings could not be read. Its sign-in request follows its existing permission rules.")
+        return
+    if remove:
+        rules = [x for x in allow if x in previous]
+        allow[:] = [x for x in allow if x not in previous]
+    else:
+        # One verb and three forms. A broader herdr-task grant would also cover task and Git operations.
+        rules = [
+            f"Shell({r.p(f'{BIN}/herdr-task')}:ask-login {arg})"
+            for arg in ("--terminal", "--browser", "--site http*")
+        ]
+        rules += [f"Shell(herdr-task:ask-login {arg})" for arg in ("--terminal", "--browser", "--site http*")]
+        rules = [x for x in rules if x not in allow]
+        allow.extend(rules)
+        rec["cursor_login_rules"] = list(dict.fromkeys(previous + rules))
+        if not body and rules:
+            rec["cursor_login_created"] = True
+    if not rules or r.dry:
+        return
+    if body is not None:
+        r.backup(CURSOR_CONFIG)
+    if remove and rec.get("cursor_login_created") and config == {"permissions": {"allow": []}}:
+        os.remove(path)
+    else:
+        mode = os.stat(path).st_mode & 0o777 if os.path.exists(path) else 0o600
+        atomic_write(path, (json.dumps(config, indent=2) + "\n").encode(), mode)
+
+
 # ---- agent-browser (the task browser, SHEP-156) ------------------------------------------------
 # herdr-browser owns it: which versions work, where Shepherdr's own copy goes, how it's fetched. Install, update and
 # doctor only ask it (--install, --status), as the installed copy, with the root's home.
@@ -1240,6 +1284,7 @@ def cmd_install(a, update=False):
         install_guard(r, src, rec)
     if not a.no_hooks:
         rec["hooks"] = add_hooks(r, rec)
+        cursor_login_rules(r, rec)
     rec.update({"version": VERSION, "source": src, "at": r.stamp, "root": root})
     if a.dry_run:
         say("  keys.json: " + ("would change" if keys_changed else "nothing to add"))
@@ -1719,7 +1764,8 @@ def cmd_uninstall(a):
         if os.path.lexists(saved) and not os.path.lexists(r.p(rel)) and not a.dry_run:
             os.makedirs(os.path.dirname(r.p(rel)), exist_ok=True)
             os.rename(saved, r.p(rel))
-    # Hooks: our entries out.
+    # Hooks and the scoped Cursor sign-in command: our entries out.
+    cursor_login_rules(r, rec, remove=True)
     for f in {h[0] for h in rec.get("hooks", [])}:
         p = r.p(f)
         try:
@@ -2028,7 +2074,7 @@ def main(argv):
             c.add_argument("--adopt", action="store_true", help="files by these names that aren't Shepherdr's: back them up and take them over")
             c.add_argument("--guard", action="store_true", help="also put the herdr-app guard on the PATH (refuses a window with another home)")
             c.add_argument("--keys", choices=["ask", "keep", "ours"], default="ask", help="a key you already use: ask (default; keep without a terminal), keep yours, or take ours")
-            c.add_argument("--no-hooks", action="store_true", help="leave Claude Code's and Codex's settings alone")
+            c.add_argument("--no-hooks", action="store_true", help="leave agent CLI settings alone")
             c.add_argument("--yes", action="store_true", help="ask nothing (keys: keep yours unless --keys ours)")
             c.add_argument("--force", action="store_true", help="install although a check failed")
             c.add_argument("--web", action="store_true", help="web only: no herdr-app (the service, the web app, herdr-task and the helpers)")

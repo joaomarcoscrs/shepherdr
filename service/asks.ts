@@ -5,13 +5,14 @@
 // (the web served from a machine other than theirs) ask in that machine's data/chat-asks: read and answered through
 // herdr-core's link.
 import { watch, readdirSync, readFileSync, writeFileSync, renameSync, existsSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { DATA, appHome, writable } from "./paths.ts";
 import * as A from "../core/asks.js";
 import type { Hub } from "./hub.ts";
 import { note as noteUsage } from "./usage.ts";
 
-const { words, allow, allowAlways, deny, answers, annotationsOf, howAnswered, release, chatAbout, dismiss, ALWAYS_CHOICE } = A as any;
+const { words, allow, allowAlways, deny, answers, annotationsOf, howAnswered, release, chatAbout, dismiss, ALWAYS_CHOICE, loginId, liveLoginId, ownsLogin, loginAnswer, LOGIN_WAITING_SH, ANSWER_ONCE } = A as any;
 const dir = () => join(appHome(), "data", "chat-asks");
 const ID = /^[\w.-]+$/;
 const MACHINE = /^[\w.-]+$/;
@@ -19,7 +20,11 @@ const MACHINE = /^[\w.-]+$/;
 // then how each id given has ended ("end", its id, the hook's or a card's words).
 const THERE = 'd="${HERDR_APP_HOME:-$HOME/.config/herdr-app}/data/chat-asks"';
 const LIST = `${THERE}
+${LOGIN_WAITING_SH}
+login_only=$1; shift
 for f in "$d"/req/*.json; do [ -f "$f" ] || continue; n=\${f##*/}; n=\${n%.json}; [ -f "$d/ans/$n.json" ] && continue
+  if [ "$login_only" = 1 ]; then case "$n" in *.login.*.*) ;; *) continue ;; esac; fi
+  login_waiting "$n" || continue
   printf 'req\\t%s\\t' "$n"; tr '\\n\\t' '  ' < "$f"; echo; done
 for n in "$@"; do [ -f "$d/end/$n" ] && printf 'end\\t%s\\t%s\\n' "$n" "$(head -n 1 "$d/end/$n")"; done; exit 0`;
 // An answer there, as answer() writes one here: how it went (end/<id>), then the answer (stdin) in place at once.
@@ -52,7 +57,7 @@ export class Asks {
   private ended(a: Ask, known?: string) {
     if (this.ends.some((e) => e.id === a.id)) return;
     let how = known ?? "";
-    if (!a.machine) try { how = readFileSync(join(dir(), "end", a.id), "utf8").trim(); } catch {}
+    if (!a.machine && !known) try { how = readFileSync(join(dir(), "end", a.id), "utf8").trim(); } catch {}
     this.ends = [...this.ends, { id: a.id, terminal: a.terminal, title: a.words?.title ?? "", how: how || "No longer waiting", at: askAt(a.id), kind: a.words?.kind ?? "" }].slice(-200);
     // Usage insights (service/usage.ts): how long it waited, and whether it was answered in the agent's terminal
     noteUsage("ask", { type: a.words?.kind || undefined, ms: Math.max(0, Date.now() - askAt(a.id) + 999), ...(/terminal/i.test(how) ? { from: "terminal" } : {}) });
@@ -72,6 +77,7 @@ export class Asks {
   remote(hub: Hub, watched: () => string[]) {
     this.hub = hub;
     this.watched = watched;
+    this.read();
     setInterval(() => void this.poll().catch(() => {}), 3000);
   }
 
@@ -80,16 +86,28 @@ export class Asks {
     this.polling = true;
     try {
       const recent = (e: AskEnd) => e.how === "No longer waiting" && e.id.includes("/") && Date.now() - e.at < 120_000;
-      const machines = new Set(this.watched().filter((a) => a.includes("/")).map((a) => a.split("/")[0]));
+      let changed = false;
+      for (const a of this.open.values()) {
+        if (!a.machine || a.words.kind !== "login") continue;
+        const terminal = this.hub.terminals?.get(a.terminal);
+        if (liveLoginId(a.local) && (!terminal || ownsLogin(a.req, terminal, a.local))) continue;
+        this.open.delete(a.id);
+        this.ended(a);
+        changed = true;
+      }
+      const watched = new Set(this.watched().filter((a) => a.includes("/")).map((a) => a.split("/")[0]));
+      const machines = new Set(watched);
+      // A login Ask is actionable even when no chat on its machine is currently open.
+      for (const [address, terminal] of this.hub.terminals ?? [])
+        if (address.includes("/") && liveLoginId(terminal.labels?.["herdr.login.ask"])) machines.add(address.split("/")[0]);
       // one open from a machine no page shows any more still closes once it says so
       for (const a of this.open.values()) if (a.machine) machines.add(a.machine);
       for (const e of this.ends) if (recent(e)) machines.add(e.id.split("/")[0]);
-      let changed = false;
       for (const m of machines) {
         if (!MACHINE.test(m)) continue;
         const asked = [...this.open.values()].filter((a) => a.machine === m).map((a) => a.local!);
         const late = this.ends.filter((e) => recent(e) && e.id.startsWith(`${m}/`)).map((e) => e.id.slice(m.length + 1));
-        const r = await this.hub.call<{ code: number; stdout: string }>("machine.exec", { on: m, argv: ["sh", "-c", LIST, "sh", ...asked, ...late], timeout: 10 }, 15_000).catch(() => null);
+        const r = await this.hub.call<{ code: number; stdout: string }>("machine.exec", { on: m, argv: ["sh", "-c", LIST, "sh", watched.has(m) || asked.some((id) => !loginId(id)) ? "0" : "1", ...asked, ...late], timeout: 10 }, 15_000).catch(() => null);
         // out of reach: what is open stays as it was
         if (r?.code !== 0) continue;
         const reqs = new Map<string, string>(), ends = new Map<string, string>();
@@ -101,10 +119,15 @@ export class Asks {
         }
         for (const [local, body] of reqs) {
           const id = `${m}/${local}`;
-          if (this.open.has(id)) continue;
           try {
-            const req = JSON.parse(body);
-            this.open.set(id, { id, terminal: `${m}/${local.split(".")[0]}`, at: askAt(local), req, words: words(req), machine: m, local });
+            const terminal = `${m}/${local.split(".")[0]}`;
+            const req = this.open.get(id)?.req ?? JSON.parse(body);
+            if ((loginId(local) || req.tool_name === "HerdrLogin") && !ownsLogin(req, this.hub.terminals?.get(terminal), local)) {
+              reqs.delete(local);
+              continue;
+            }
+            if (this.open.has(id)) continue;
+            this.open.set(id, { id, terminal, at: askAt(local), req, words: words(req), machine: m, local });
             changed = true;
           } catch {}
         }
@@ -133,10 +156,15 @@ export class Asks {
       const id = n.slice(0, -5);
       if (!ID.test(id) || existsSync(join(dir(), "ans", n))) continue;
       const old = this.open.get(id);
-      if (old) { next.set(id, old); continue; }
       try {
-        const req = JSON.parse(readFileSync(join(dir(), "req", n), "utf8"));
-        next.set(id, { id, terminal: id.split(".")[0], at: statSync(join(dir(), "req", n)).mtimeMs, req, words: words(req) });
+        const terminal = id.split(".")[0];
+        const req = old?.req ?? JSON.parse(readFileSync(join(dir(), "req", n), "utf8"));
+        if (loginId(id) || req.tool_name === "HerdrLogin") {
+          if (!ownsLogin(req, this.hub?.terminals?.get(terminal), id)) continue;
+          process.kill(Number(id.split(".").at(-1)), 0);
+        }
+        if (old) { next.set(id, old); continue; }
+        next.set(id, { id, terminal, at: statSync(join(dir(), "req", n)).mtimeMs, req, words: words(req) });
       } catch {}
     }
     const changed = next.size !== this.open.size || [...next.keys()].some((k) => !this.open.has(k));
@@ -153,11 +181,30 @@ export class Asks {
   of(terminal: string) { return [...this.open.values()].filter((a) => a.terminal === terminal); }
 
   /** Answers it as the window's card would: a permission or plan allowed or declined, a question's pick. */
-  async answer(id: string, a: { choice?: number; choices?: number[]; note?: string; other?: string; answers?: string[]; terminal?: boolean; talk?: boolean; dismiss?: boolean }) {
+  async answer(id: string, a: { choice?: number; choices?: number[]; note?: string; other?: string; answers?: string[]; terminal?: boolean; talk?: boolean; dismiss?: boolean }, terminal?: string) {
     const ask = this.open.get(id);
     if (!ask) throw new Error("That question was answered already.");
     const w = ask.words;
     let out: string;
+    if (w.kind === "login") {
+      const local = ask.local ?? ask.id;
+      if (terminal !== ask.terminal || !ownsLogin(ask.req, this.hub?.terminals?.get(terminal), local))
+        throw new Error("That sign-in Ask is no longer waiting in this chat.");
+      if (a.terminal || a.talk || (!a.dismiss && a.choice !== 0 && a.choice !== 1))
+        throw new Error("Confirm or cancel the sign-in Ask.");
+      const text = loginAnswer(!a.dismiss && a.choice === 0);
+      const how = howAnswered(ask, text, "on the web");
+      const code = ask.machine
+        ? (await this.hub?.call<{ code: number }>("machine.exec", { on: ask.machine,
+            argv: ["sh", "-c", THERE + '\nset -- "$d" "$@"\n' + ANSWER_ONCE, "sh", local, how, text], timeout: 10 }, 15_000).catch(() => null))?.code
+        : spawnSync("sh", ["-c", ANSWER_ONCE, "sh", dir(), local, how, text]).status;
+      if (code === 3 || code === 4) throw new Error("That sign-in Ask is no longer waiting.");
+      if (code !== 0) throw new Error("The answer didn’t reach the session. Try again.");
+      this.open.delete(id);
+      this.ended(ask, how);
+      for (const fn of this.listeners) fn();
+      return;
+    }
     // the window's card links: "Answer in terminal" (no decision: the CLI asks in its terminal) and a questions card's
     // "Chat about this" (Claude hears the person wants to talk it over first)
     if (a.terminal) out = release();

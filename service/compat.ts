@@ -16,7 +16,7 @@ const { senderName, briefLabel, firstUser, firstKeys, newsTimeline, resolveArtif
 import { mentionedIn } from "../core/send.js";
 import * as MEc from "../core/mentions.js";
 import * as SCc from "../core/screens.js";
-import { codexChoice, ALWAYS_CHOICE } from "../core/asks.js";
+import { codexChoice, ALWAYS_CHOICE, LOGIN_CHOICES } from "../core/asks.js";
 const { SCREEN } = SCc as any;
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -261,9 +261,26 @@ export class Compat {
   /** Open hook asks (service/asks.ts), set by main: they show as cards in their chat and in Needs you. */
   asks: { of(terminal: string): any[]; open: Map<string, any> } | null = null;
 
+  loginWaiting(address: string | null | undefined) {
+    return Boolean(address && this.asks?.of(address).some((a) => a.words.kind === "login"));
+  }
+
+  authQuestion(t: any, key: string): Question | undefined {
+    if (t?.state !== "live" || t.status?.state !== "blocked" || t.status?.kind !== "auth") return;
+    return { id: `auth:${t.address}`, title: "Signed out", kind: "Question", to: key,
+      login: { kind: "terminal", detail: "Sign in in the terminal, then follow the CLI’s instructions." }, choices: [] };
+  }
+
   /** A hook ask as 2.1's question card (core/asks.js words: a permission, a plan, or a question). */
   question(a: any, key: string): Question {
     const w = a.words;
+    if (w.kind === "login") {
+      const unavailable = w.login?.kind === "browser" && a.machine
+        ? "Open this task’s Browser in Herdr on " + a.machine + "." : undefined;
+      return { id: a.id, title: w.title, kind: "Question", to: key, noNote: true,
+        login: { ...w.login, detail: unavailable ?? w.detail, ...(unavailable ? { unavailable: true } : {}) },
+        choices: LOGIN_CHOICES.map((label) => ({ label })) };
+    }
     if (w.kind === "questions") {
       const q = w.questions[0];
       const choices = (x: any) => x.options.map((o: any) => ({ label: o.name, ...(o.description ? { description: o.description } : {}), ...(o.recommended ? { recommended: true } : {}), ...(o.preview ? { preview: o.preview } : {}) }));
@@ -349,7 +366,7 @@ export class Compat {
       const ak: any = s.assistant ? (this as any).terminalsOf?.(s.assistant) : null;
       const atLabel = ak?.labels?.["herdr.coordinator.tab"] ?? ak?.labels?.["herdr.tab"];
       const own = (s.tabs ?? []).find((t: any) => (t.terminals ?? []).includes(s.assistant) || (atLabel && (t.id === atLabel || t.id === `${s.machine}/${atLabel}`)));
-      const assistantTab = { ...(own ? { id: own.id } : {}), name: named(own?.name) ? own.name : "Assistant", named: named(own?.name), state: s.assistant ? stateOf(ak) : "idle", live: !!s.assistant, ...(kindOfTerm(ak) ? { cli: kindOfTerm(ak) } : {}),
+      const assistantTab = { ...(own ? { id: own.id } : {}), name: named(own?.name) ? own.name : "Assistant", named: named(own?.name), state: this.loginWaiting(s.assistant) ? "blocked" : s.assistant ? stateOf(ak) : "idle", live: !!s.assistant, ...(kindOfTerm(ak) ? { cli: kindOfTerm(ak) } : {}),
         ...(agentIn(ak) || kindOfTerm(ak) ? { agent: agentIn(ak)?.key ?? kindOfTerm(ak) } : {}) };
       const name = spaceName(s, { home: s.machine ? null : HOME, repo: s.git?.name ?? null });
       // what 3.0's pane header says under it: "Assistant · Claude Code" (just "Assistant" until it has started), and the
@@ -361,7 +378,7 @@ export class Compat {
       // machine's too, as its own window shows it); the space's folder until it has one
       const live = ak?.foreground?.cwd ?? ak?.cwd;
       const cwd = live ? (s.machine ? SPc.tilde(live) : shortHome(live)) : null;
-      return { id: s.id, name, ...(!s.name || s.name === "~" ? { unnamed: true } : {}), ...(s.icon ? { emoji: s.icon } : {}),...(s.git ? { git: s.git.linked ? "linked" : "main", repo: s.git.repo, gitName: s.git.name, branch: s.git.branch ?? null } : {}), ...(s.git?.linked ? { worktree: true } : {}), machine: s.machine ?? host, level: 0, status: AGENT[s.assistantStatus] ?? "idle", mode: s.autopilot ? "autopilot" : "regular", chat: key, header, where, ...(cwd ? { cwd } : {}), assistantTab, ...(s.pilot ? { pilot: headerPilot(s.pilot) } : {}),store: artifactStore(s as any), ...((s as any).changedAt ? { changedAt: (s as any).changedAt } : {}),...(tabs.length ? { tabs } : {}) };
+      return { id: s.id, name, ...(!s.name || s.name === "~" ? { unnamed: true } : {}), ...(s.icon ? { emoji: s.icon } : {}),...(s.git ? { git: s.git.linked ? "linked" : "main", repo: s.git.repo, gitName: s.git.name, branch: s.git.branch ?? null } : {}), ...(s.git?.linked ? { worktree: true } : {}), machine: s.machine ?? host, level: 0, status: this.loginWaiting(s.assistant) ? "need" : AGENT[s.assistantStatus] ?? "idle", mode: s.autopilot ? "autopilot" : "regular", chat: key, header, where, ...(cwd ? { cwd } : {}), assistantTab, ...(s.pilot ? { pilot: headerPilot(s.pilot) } : {}),store: artifactStore(s as any), ...((s as any).changedAt ? { changedAt: (s as any).changedAt } : {}),...(tabs.length ? { tabs } : {}) };
     });
 
     // every agent's own helper agents (SHEP-54): their chats open by t:<address>, as a tab's
@@ -379,8 +396,9 @@ export class Compat {
         const source = kind === "cursor" && session ? `${kind}:${session}` : kind;
         chats.set(`${id}/worker`, `log:${r.machine ?? ""}|${source}|${path}`);
       }
+      const signingIn = r.section === "working" && this.loginWaiting(r.worker);
       const t: Task = {
-        id, name: r.title, status: SECTION[r.section] ?? "todo", place: placeOf(r), listName: placeName(r), age: r.started ? ago(r.started, false) : "",
+        id, name: r.title, status: signingIn ? "need" : SECTION[r.section] ?? "todo", place: placeOf(r), listName: placeName(r), age: r.started ? ago(r.started, false) : "",
         state: r.section, on: r.machine ?? host, created: "", ...(r.folder ? { taskFolder: r.folder } : {}),
         // its latest news (ms), as Jump orders tasks newest first
         at: Math.max(0, ...[r.done_at, r.ready_at, r.started].filter((x: unknown): x is number => typeof x === "number")),
@@ -415,7 +433,7 @@ export class Compat {
         ...(r.said ? { report: { msg: r.section === "working" && r.why ? r.why : r.said.text, ...(r.said.done != null ? { progress: r.said.done } : {}),
           ...(r.said.left != null && !r.said.paused ? { eta: r.said.left } : {}), ...(r.said.paused ? { paused: true } : {}) } }
           : r.section === "working" && r.why ? { report: { msg: r.why, ...(r.pct != null ? { progress: r.pct } : {}) } } : {}),
-        ...(r.worker ? { agent: { chat: `${id}/worker`, role: "worker", cli: (r as any).cli ?? "claude", status: r.section === "needs" ? "need" : "work", running: true, age: "", note: "" } } : {}),
+        ...(r.worker ? { agent: { chat: `${id}/worker`, role: "worker", cli: (r as any).cli ?? "claude", status: r.section === "needs" || signingIn ? "need" : "work", running: true, age: "", note: "" } } : {}),
         ...(!r.worker && r.lastLog ? { agent: { chat: `${id}/worker`, role: "worker", cli: r.lastLog.kind, status: "idle", running: false, age: "", note: "" } } : {}),
       };
       return t;
@@ -432,7 +450,7 @@ export class Compat {
       const key = keyOf.get(a.terminal);
       if (!key) continue;
       const task = key.endsWith("/worker") ? key.slice(0, -7) : undefined;
-      const place = task ? tasks.find((x) => x.id === task)?.place ?? "" : places.find((p) => p.chat === key)?.id ?? "";
+      const place = task ? tasks.find((x) => x.id === task)?.place ?? "" : places.find((p) => p.chat === key || p.tabs?.some((t) => t.term === key))?.id ?? "";
       needs.push({ id: a.id, chat: key, place, ...(task ? { task } : {}), at: a.at, question: this.question(a, key) });
     }
 
@@ -440,7 +458,7 @@ export class Compat {
       const key = keyOf.get(a.address);
       if (!key) continue;
       const task = key.endsWith("/worker") ? key.slice(0, -7) : undefined;
-      const place = task ? tasks.find((x) => x.id === task)?.place ?? "" : places.find((p) => p.chat === key)?.id ?? "";
+      const place = task ? tasks.find((x) => x.id === task)?.place ?? "" : places.find((p) => p.chat === key || p.tabs?.some((t) => t.term === key))?.id ?? "";
       needs.push({ id: `secret:${a.address}:${a.name}`, chat: key, place, ...(task ? { task } : {}), at: Date.now(), secret: this.secretAsk(a) });
     }
 
@@ -449,6 +467,17 @@ export class Compat {
     const carded = new Set(needs.filter((x) => x.id !== "attention").map((x) => x.chat));
     for (let i = needs.length - 1; i >= 0; i--) if (needs[i].id === "attention" && carded.has(needs[i].chat)) needs.splice(i, 1);
 
+    for (const [key, address] of chats) {
+      const q = this.authQuestion((this as any).terminalsOf?.(address), key);
+      if (!q || carded.has(key)) continue;
+      const task = key.endsWith("/worker") ? key.slice(0, -7) : undefined;
+      const place = task ? tasks.find((t) => t.id === task)?.place : places.find((p) => p.chat === key || p.tabs?.some((t) => t.term === key))?.id;
+      if (place === undefined) continue;
+      const i = needs.findIndex((n) => n.id === "attention" && n.chat === key);
+      const need = { id: q.id, chat: key, place, ...(task ? { task } : {}), at: Date.now(), question: q };
+      if (i >= 0) needs[i] = { ...need, at: needs[i].at };
+      else needs.push(need);
+    }
     const pinned = spaces.filter((s) => s.pinned).map((s) => s.id);
     const sections: Section[] = [
       ...(pinned.length ? [{ id: "pinned", name: "Pinned", spaces: pinned }] : []),
@@ -658,7 +687,10 @@ export class Compat {
       if (!s && q.images) messages.push({ id: `${q.id}:n`, images: q.images, ...mark } as Message);
     }
     // what the agent asks now, as cards at the end of its chat
-    for (const a of addr && !nativeCursor ? this.asks?.of(addr) ?? [] : []) messages.push({ id: `ask:${a.id}`, who: "agent", at: a.at, question: this.question(a, key) });
+    const ownedAsks = (addr ? this.asks?.of(addr) ?? [] : []).filter((a) => !nativeCursor || a.words.kind === "login");
+    for (const a of ownedAsks) messages.push({ id: `ask:${a.id}`, who: "agent", at: a.at, question: this.question(a, key) });
+    const auth = ownedAsks.length ? undefined : this.authQuestion(t, key);
+    if (auth) messages.push({ id: auth.id, who: "agent", at: t.status_ms ?? Date.now(), question: auth });
     if (codexCard) messages.push({ id: `ask:cq:${codexCard.id}`, who: "agent", at: codexCard.at ?? Date.now(), question: codexQuestion(codexCard, key) });
     for (const a of (this.secrets?.asks() ?? []).filter((x) => x.address === addr)) messages.push({ id: `secret:${a.address}:${a.name}`, who: "agent", at: Date.now(), secret: this.secretAsk(a) } as Message);
     // asks that closed, as the window's quiet lines ("✓ Run: npm test · Allowed in the chat"); a question's own line is
@@ -679,13 +711,13 @@ export class Compat {
     if (space) for (const r of spaceRows.filter((r) => r.worker)) {
       const by = { ref: r.ref, title: r.title, chat: `${taskId(r)}/worker` };
       const nativeWorker = nativeCursorTerminal(term(r.worker));
-      const a = nativeWorker ? null : (this.asks?.of(r.worker) ?? []).sort((p: any, q: any) => p.at - q.at)[0];
-      if (a) messages.push({ id: `ask:${a.id}`, who: "agent", at: a.at, question: { ...this.question(a, key), by } as any });
+      const a = (this.asks?.of(r.worker) ?? []).filter((a) => !nativeWorker || a.words.kind === "login").sort((p: any, q: any) => p.at - q.at)[0];
+      if (a) messages.push({ id: `ask:${a.id}`, who: "agent", at: a.at, question: { ...this.question(a, a.words.kind === "login" ? by.chat : key), by } });
       else for (const s of (this.secrets?.asks() ?? []).filter((x) => x.address === r.worker)) messages.push({ id: `secret:${s.address}:${s.name}`, who: "agent", at: Date.now(), secret: { ...this.secretAsk(s), by } } as Message);
       for (const e of (this.asks as any)?.endsOf?.(r.worker) ?? []) messages.push(quiet(`ae:${e.id}`, e.at, `${r.ref} · ${e.title} · ${e.how}`));
       if (!nativeWorker) screens(r.worker, r.ref, by);
     }
-    const st = t?.status?.state ?? null;
+    const st = ownedAsks.some((a) => a.words.kind === "login") ? "blocked" : t?.status?.state ?? null;
     // the CLI's own subagents still at work, then its background shells and watchers, above the box (3.0: the helpers
     // list; core/bg-jobs.js)
     // first its own helper agents in herdr (SHEP-54: a reviewer it started as its hc child), each opening to its own chat

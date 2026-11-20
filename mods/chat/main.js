@@ -32,7 +32,7 @@ import { LOG, Conversation, records, resultText, summary, excerpt, names, pilotL
 import { BgJobs } from "./core/bg-jobs.js";
 import { ChatReader, KINDS, kindOf, nativeCursorTerminal, findChatLog, savedChatLog, chatLogArgs } from "./core/chat-reader.js";
 import { preview } from "./core/recipe.js";
-import { words, howAnswered, codexOnScreen, codexSteps } from "./core/asks.js";
+import { words, howAnswered, codexOnScreen, codexSteps, ownsLogin, loginId, LOGIN_WAITING_SH, ANSWER_ONCE } from "./core/asks.js";
 // The rows' words and rules the web app's chat draws by too (core/chat-view.js).
 import { WORDS, clock, bgGroups, subagentsOf, subagentWord, senderName, briefLabel, firstUser, firstKeys, literal, fromName, sentTo, selfName, initialOf, newsWords, resolveArtifacts, unsigned, ownWords, fitThumbs, bandActs, bandOrder, imagesLine, questionsBelow, notSent, published, artifactLine, videoLine, mediaIn, elapsed, reportMsg, doingWords, LOST, lostMessage, shellWord, sessionStarted, sessionFailed } from "./core/chat-view.js";
 // Sending the person's words, as the web app does (core/send.js).
@@ -43,7 +43,7 @@ import { historyLines } from "./core/mouse-leak.js";
 import { AskCards, linkCtl } from "./cards.js";
 import * as strips from "./strips.js";
 import { button, red, green, amber, H, RADIUS, TEXT, toast, toastUp, toastWho, plainError } from "./ui.js";
-import { answerAsk } from "./answers.js";
+import { answerAsk, stillWaiting } from "./answers.js";
 import { openViewer, noteChatArea } from "./artview.js";
 import { KEY_HOLDER, holdKeys, keysElsewhere, dialogHolds, liveHolder } from "./keyholder.js";
 import { SecretCards } from "./secret-card.js";
@@ -187,15 +187,23 @@ const threadOf = (terminal) => Object.entries(threads()).find(([, v]) => v?.term
 // its id, its JSON), then how each id given after it ended ("end", its id, the hook's words).
 const ASKS_THERE = 'd="${HERDR_APP_HOME:-$HOME/.config/herdr-app}/data/chat-asks"';
 const REMOTE_LIST = `${ASKS_THERE}; t=$1; shift
+${LOGIN_WAITING_SH}
 for f in "$d/req/$t".*.json; do [ -f "$f" ] || continue; n=\${f##*/}; n=\${n%.json}; [ -f "$d/ans/$n.json" ] && continue
-  kill -0 "\${n##*.}" 2>/dev/null || continue; printf 'req\\t%s\\t' "$n"; tr '\\n\\t' '  ' < "$f"; echo; done
+  kill -0 "\${n##*.}" 2>/dev/null && login_waiting "$n" || continue; printf 'req\\t%s\\t' "$n"; tr '\\n\\t' '  ' < "$f"; echo; done
 for n in "$@"; do [ -f "$d/end/$n" ] && printf 'end\\t%s\\t%s\\n' "$n" "$(head -n 1 "$d/end/$n")"; done; exit 0`;
 // An answer there: how it went, then the answer ($3) in place at once.
+const REMOTE_LOGIN_WAITING = `${ASKS_THERE}
+${LOGIN_WAITING_SH}
+login_waiting "$1" && [ -f "$d/req/$1.json" ] && [ ! -e "$d/ans/$1.json" ]`;
 const REMOTE_ANSWER = `${ASKS_THERE}; mkdir -p "$d/ans" "$d/end"; [ -f "$d/req/$1.json" ] || exit 3
 [ -z "$2" ] || printf '%s\\n' "$2" > "$d/end/$1"
 printf '%s' "$3" > "$d/ans/$1.json.tmp" && mv "$d/ans/$1.json.tmp" "$d/ans/$1.json"`;
 async function answerRemote(machine, id, text, how) {
-  await exec("hc", ["exec", "--on", machine, "sh", "-c", REMOTE_ANSWER, "x", id, how ?? "", text]).catch(() => {});
+  if (loginId(id)) {
+    const r = await exec("hc", ["exec", "--on", machine, "sh", "-c", ASKS_THERE + '\nset -- "$d" "$@"\n' + ANSWER_ONCE, "x", id, how ?? "", text]).catch(() => null);
+    return r?.code === 0 ? "sent" : r?.code === 3 ? "gone" : r?.code === 4 ? "taken" : "failed";
+  }
+  return exec("hc", ["exec", "--on", machine, "sh", "-c", REMOTE_ANSWER, "x", id, how ?? "", text]).catch(() => {});
 }
 // The person's words keep the line breaks they typed: markdown joins single lines, so each one
 // becomes a hard break (outside code fences, which keep theirs). A "<word>" they typed shows as
@@ -396,12 +404,14 @@ export default class Chat extends View {
     this.cards = new AskCards({
       reply: (ask, text, cx) => this.reply(ask, text, cx),
       toTerminal: () => this.toTerminal(),
+      openLogin: (ask, cx) => this.openLogin(ask, cx),
       chatAbout: () => this.box.focus(),
     }, cx.focus_handle());
     // An Assistant's chat: its tasks' workers' asks on the same cards (workerAsks()). Shown ones
     // by id, the requests being read, those answered here (until the hook lets them go).
     this.workerCards = new AskCards({
       reply: (ask, text, cx) => this.replyWorker(ask, text, cx),
+      openLogin: (ask, cx) => this.openLogin(ask, cx),
       toTerminal: (ask) => { openTaskThread(ask.terminal, ask.ref, ask.title); requestWorkerTerminal(ask.terminal); },
       chatAbout: (ask) => openTaskThread(ask.terminal, ask.ref, ask.title),
     }, cx.focus_handle());
@@ -708,13 +718,14 @@ export default class Chat extends View {
       if (kind === "req") reqs.set(id, rest.join("\t"));
       else if (kind === "end" && rest.join("\t").trim()) ends.set(id, rest.join("\t").trim());
     }
-    const kept = this.asks.filter((a) => reqs.has(a.id));
+    const kept = this.asks.filter((a) => reqs.has(a.id) && (!loginId(a.id) || this.ownsLogin(a)));
     for (const a of this.asks.filter((a) => !reqs.has(a.id))) this.askEnded(a, ends.get(a.id) || "No longer waiting");
     const fresh = [];
     for (const [id, text] of reqs) {
       if (kept.some((a) => a.id === id)) continue;
       let req = null;
       try { req = JSON.parse(text); } catch {}
+      if ((loginId(id) || req?.tool_name === "HerdrLogin") && !this.ownsLogin({ id, req })) continue;
       const w = req ? words(req) : { kind: "permission", title: "Claude asks for something the chat can't read", detail: "", unread: true };
       kept.push({ id, req, words: w, machine });
       fresh.push(kept[kept.length - 1]);
@@ -730,8 +741,24 @@ export default class Chat extends View {
   async readAsks(cx) {
     // Each request is named <terminal>.<time>.<hook pid>: one whose hook was killed (Claude or
     // Codex stopped it) is gone, so drop its file.
-    const r = await exec("sh", ["-c", 'cd "$1/req" 2>/dev/null || exit 0; for f in "$2".*.json; do [ -f "$f" ] || continue; p=${f%.json}; p=${p##*.}; if kill -0 "$p" 2>/dev/null; then echo "$f"; else rm -f "$f"; fi; done; true', "x", this.askDir, this.addr]);
+    const addr = this.addr;
+    const r = await exec("sh", ["-c", `${LOGIN_WAITING_SH}
+cd "$1/req" 2>/dev/null || exit 0
+for f in "$2".*.json; do
+  [ -f "$f" ] || continue
+  id=\${f%.json}; p=\${id##*.}
+  if kill -0 "$p" 2>/dev/null; then
+    case "$id" in *.login.*.*) login_waiting "$id" && [ ! -f "../ans/$f" ] || continue ;; esac
+    echo "$f"
+  else rm -f "$f"
+  fi
+done; true`, "x", this.askDir, addr]);
+    if (this.addr !== addr) return;
     const ids = r.stdout.split("\n").filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5));
+    for (const ask of this.asks) if (loginId(ask.id) && !this.ownsLogin(ask)) {
+      const i = ids.indexOf(ask.id);
+      if (i >= 0) ids.splice(i, 1);
+    }
     const kept = this.asks.filter((a) => ids.includes(a.id));
     // Gone without an answer from here: the hook says how (data/chat-asks/end/<id>: answered
     // or declined in the terminal, the agent stopped), else Claude stopped waiting on it.
@@ -746,6 +773,7 @@ export default class Chat extends View {
       let req = null;
       try { req = JSON.parse(text ?? ""); } catch {}
       // Unreadable here: it can only be allowed in the terminal.
+      if ((loginId(id) || req?.tool_name === "HerdrLogin") && !this.ownsLogin({ id, req })) continue;
       const w = req ? words(req) : { kind: "permission", title: "Claude asks for something the chat can't read", detail: "", unread: true };
       kept.push({ id, req, words: w });
       fresh.push(kept[kept.length - 1]);
@@ -838,6 +866,7 @@ export default class Chat extends View {
 
   // The card's answer goes to the waiting hook; it prints it as Claude's decision.
   reply(ask, text, cx) {
+    if (ask?.words?.kind === "login") return this.replyLogin(ask, text, cx);
     if (this.nativeCursor()) return;
     this.asks = this.asks.filter((a) => a !== ask);
     const how = howAnswered(ask, text, "in the chat");
@@ -846,6 +875,54 @@ export default class Chat extends View {
     // A task worker's ask may show in its Assistant's chat too: that copy reads how it went.
     const where = howAnswered(ask, text, this.thread || this.t?.labels?.["herdr.task"] ? "in the task's chat" : "in its chat");
     cx.spawn(async () => ask.machine ? answerRemote(ask.machine, ask.id, text, where) : answerAsk(this.askDir, ask.id, text, where));
+  }
+
+  ownsLogin(ask) {
+    const addr = ask.terminal ?? this.addr;
+    return ownsLogin(ask.req, terminals().find((k) => k.address === addr), ask.id);
+  }
+
+  replyLogin(ask, text, cx) {
+    cx.spawn(async (cx) => {
+      if (!this.ownsLogin(ask)) return;
+      const how = howAnswered(ask, text, "in the chat");
+      const result = ask.machine ? await answerRemote(ask.machine, ask.id, text, how)
+        : await answerAsk(this.askDir, ask.id, text, how);
+      if (result === "sent") {
+        if (ask.terminal) { this.answeredAsks.add(ask.id); ask.answered = true; this.workerAskEnded(ask, how); }
+        else { this.asks = this.asks.filter((a) => a !== ask); this.askEnded(ask, how); }
+      } else if (result === "failed") toast({ title: "The answer didn’t reach the session", body: "Try again in the sign-in card.", level: "error" });
+      cx.notify();
+    });
+  }
+
+  openLogin(ask, cx) {
+    cx.spawn(async () => {
+      if (!this.ownsLogin(ask)) return;
+      const addr = ask.terminal ?? this.addr, target = ask.words.login;
+      const waiting = ask.machine
+        ? (await exec("hc", ["exec", "--on", ask.machine, "--timeout", "3", "sh", "-c", REMOTE_LOGIN_WAITING, "x", ask.id]).catch(() => null))?.code === 0
+        : (await stillWaiting([ask.id], this.askDir))?.has(ask.id);
+      if (!waiting) return;
+      if (addr !== (ask.terminal ?? this.addr) || !this.ownsLogin(ask)) return;
+      if (target.kind === "site") {
+        const os = window()?.platform;
+        const r = await (os === "macos" ? exec("open", ["-a", "Google Chrome", target.origin])
+          : os === "windows" ? exec("cmd", ["/c", "start", "", "chrome", target.origin])
+          : exec("google-chrome", [target.origin])).catch(() => null);
+        if (r?.code !== 0) toast({ title: "Couldn't open Chrome", body: target.origin, level: "error" });
+      } else if (target.kind === "terminal") {
+        if (ask.terminal && !this.thread) openTaskThread(addr, ask.ref, ask.title);
+        if (ask.terminal || this.thread) requestWorkerTerminal(addr);
+        else this.toTerminal();
+      } else if (addr.includes("/")) {
+        toast({ title: "Open this task’s Browser on " + addr.split("/")[0], level: "info" });
+      } else {
+        if (!addonOn("browser")) { toast({ title: "The task Browser is off", level: "info" }); return; }
+        openTaskThread(addr, ask.ref ?? this.taskRef, ask.title);
+        run("layout.select", { stack: THREAD_BODY, child: THREAD_BROWSER });
+      }
+    });
   }
 
   // ---- a task worker's asks (an Assistant's chat) ---------------------------------------------
@@ -874,7 +951,7 @@ export default class Chat extends View {
   workerAsks(cx) {
     const by = this.workerTasks();
     const native = new Set(terminals().filter(nativeCursorTerminal).map((k) => k.address));
-    const listed = (shared("inbox.asks") ?? []).filter((a) => by.has(a.terminal) && !native.has(a.terminal));
+    const listed = (shared("inbox.asks") ?? []).filter((a) => by.has(a.terminal) && !a.machine && (loginId(a.id) || !native.has(a.terminal)));
     const ids = new Set(listed.map((a) => a.id));
     for (const id of [...this.answeredAsks]) if (!ids.has(id)) this.answeredAsks.delete(id);
     const gone = [...this.shownAsks.values()].filter((a) => !ids.has(a.id));
@@ -895,6 +972,7 @@ export default class Chat extends View {
           try { req = JSON.parse((await readTextFile(`${this.askDir}/req/${a.id}.json`).catch(() => null)) ?? ""); } catch {}
           const w = req ? words(req) : { kind: "permission", title: "Claude asks for something the chat can't read", detail: "", unread: true };
           this.readingAsks.delete(a.id);
+          if ((loginId(a.id) || w.kind === "login") && !this.ownsLogin({ ...a, req })) continue;
           if ((shared("inbox.asks") ?? []).some((b) => b.id === a.id)) this.shownAsks.set(a.id, { id: a.id, terminal: a.terminal, req, words: w, ref: x.ref, title: x.title, at: Date.now() });
         }
         cx.notify();
@@ -917,6 +995,7 @@ export default class Chat extends View {
 
   // Answered on its card here: the same delivery as the worker's own chat (answerAsk()).
   replyWorker(ask, text, cx) {
+    if (ask?.words?.kind === "login") return this.replyLogin(ask, text, cx);
     if (nativeCursorTerminal(terminals().find((k) => k.address === ask.terminal))) return;
     this.answeredAsks.add(ask.id);
     ask.answered = true;
@@ -972,7 +1051,7 @@ export default class Chat extends View {
   timelineCards() {
     const out = [];
     const native = this.nativeCursor();
-    for (const a of native ? [] : this.asks) out.push({ id: `card:${a.id}`, at: askAt(a.id), strips: this.cards.strips(a, { who: this.cli() }), owner: this.cards, ask: a, question: a.words.kind === "questions" });
+    for (const a of this.asks.filter((a) => !native || a.words.kind === "login")) out.push({ id: `card:${a.id}`, at: askAt(a.id), strips: this.cards.strips(a, { who: this.cli() }), owner: this.cards, ask: a, question: a.words.kind === "questions" });
     const cq = this.codexCard();
     if (cq) out.push({ id: `card:${cq.id}`, at: cq.at, strips: this.codexCards.strips(cq, { who: "Codex" }), owner: this.codexCards, ask: cq, question: true });
     for (const a of this.sasks ?? []) {
@@ -1562,6 +1641,7 @@ export default class Chat extends View {
     if (this.kind === "cursor" && (this.asks.length || this.status() === "blocked")) { this.queue.push(msg); cx.notify(); return; }
     // A card asks (a question, a permission, a plan): the words answer it, as typing in the
     // CLI would (cards.js replyWith); the card's buttons still work too.
+    if (this.asks.some((a) => a.words.kind === "login")) { this.queue.push(msg); cx.notify(); return; }
     if (this.asks.length && msg.text && !msg.files?.length) {
       this.replied = [...this.replied.slice(-20), { id: msg.id, text: msg.text, at: Date.now() }];
       this.cards.replyWith(this.asks[0], msg.text, cx);
@@ -3702,7 +3782,9 @@ export default class Chat extends View {
 
   // What the agent says it waits for (its status report), e.g. "Do you prefer tea or coffee? (Tea · Coffee)".
   asking() {
-    const msg = reportMsg(terminals().find((x) => x.address === this.addr));
+    const terminal = terminals().find((x) => x.address === this.addr);
+    if (terminal?.report?.kind === "auth") return "Signed out";
+    const msg = reportMsg(terminal);
     return msg ? msg.replace(/^answer:\s*/i, "").trim() : null;
   }
 
@@ -4401,7 +4483,7 @@ export default class Chat extends View {
         .child(Textarea.new(this.box).w_full().text_size(13).text_color(t.foreground)
           .when(Boolean(this.boxSpare && this.lineH), (el) => el.mb(-this.lineH)))
         .when(!this.box.value().trim(), (el) => el.child(div().absolute().top(9).left(12).text_size(13).text_color(t.dim)
-          .child(this.asks.length || st === "blocked" ? (this.kind === "cursor" ? WORDS.waitsForAnswer : WORDS.replyInstead) : this.placeholder()))))
+          .child(this.asks.some((a) => a.words.kind === "login") ? "Confirm or cancel sign-in above" : this.asks.length || st === "blocked" ? (this.kind === "cursor" ? WORDS.waitsForAnswer : WORDS.replyInstead) : this.placeholder()))))
       // While recording: the recording row. Else one row, on the right: what the agent runs on
       // (opens the picker), dictation, Send (or Call). Send never turns into Stop: while the
       // agent works it still sends (or queues) and calls; Stop is on the working line above.

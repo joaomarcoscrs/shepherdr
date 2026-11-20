@@ -21,6 +21,57 @@ function rel(p, cwd) {
 }
 const host = (u) => { try { return new URL(String(u)).host || String(u); } catch { return String(u ?? ""); } };
 
+export const loginId = (id) => /^t[1-9][0-9bcdfghjkmnpqrstvwxyz]*\.login\.[0-9]{10}\.[1-9][0-9]*$/.test(id);
+export const liveLoginId = (id, now = Date.now()) => loginId(id) &&
+  now >= Number(id.split(".")[2]) * 1000 && now - Number(id.split(".")[2]) * 1000 < 1_800_000;
+
+export const loginAnswer = (confirmed) => JSON.stringify({ login: confirmed ? "confirmed" : "canceled" });
+export const LOGIN_CHOICES = ["I signed in", "Cancel"];
+
+export const LOGIN_WAITING_SH = `login_waiting() {
+  case "$1" in *.login.*.*) ;; *) return 0 ;; esac
+  p=\${1##*.}; stamp=\${1%.*}; stamp=\${stamp##*.}
+  case "$p:$stamp" in *[!0-9:]*|:*|*:) return 1 ;; esac
+  [ "\${#stamp}" -eq 10 ] && [ "$p" -gt 0 ] || return 1
+  age=$(( $(date +%s) - stamp ))
+  [ "$age" -ge 0 ] && [ "$age" -lt 1800 ] && kill -0 "$p" 2>/dev/null
+}`;
+
+// $1 the folder, $2 the id, $3 how it went ("" for none), $4 the answer ("" is no decision: the terminal asks).
+// Exit 0 sent, 3 no longer waiting, 4 answered already, 5 couldn't write.
+export const ANSWER_ONCE = `${LOGIN_WAITING_SH}
+d=$1; id=$2; req="$d/req/$id.json"; ans="$d/ans/$id.json"
+[ -f "$req" ] && login_waiting "$id" || exit 3
+kill -0 "\${id##*.}" 2>/dev/null || exit 3
+[ -e "$ans" ] && exit 4
+mkdir -p "$d/ans" "$d/end" || exit 5
+tmp="$d/ans/.$id.$$.tmp"
+printf '%s' "$4" > "$tmp" || { rm -f "$tmp"; exit 5; }
+if ln "$tmp" "$ans" 2>/dev/null; then rm -f "$tmp"; else rm -f "$tmp"; exit 4; fi
+[ -z "$3" ] || { printf '%s\\n' "$3" > "$d/end/$id.tmp" && mv "$d/end/$id.tmp" "$d/end/$id"; }
+exit 0`;
+
+export function loginTarget(v) {
+  if (v?.kind === "browser" || v?.kind === "terminal") return { kind: v.kind };
+  if (v?.kind !== "site" || typeof v.origin !== "string" || v.origin.length > 253 ||
+      !/^https?:\/\/(?:[a-z0-9.-]+|\[[0-9a-f:]+\])(?::[0-9]{1,5})?\/?$/i.test(v.origin)) return null;
+  try {
+    const url = new URL(v.origin);
+    return url.port === "0" || !url.hostname.replace(/\./g, "") ? null : { kind: "site", origin: url.origin };
+  } catch { return null; }
+}
+
+// Herdr terminal addresses are stable within a core. The start time also rejects a replaced
+// session at that address. The task key comes from the terminal record, never from a card action.
+export function ownsLogin(req, terminal, id) {
+  return Boolean(liveLoginId(id) && req?.tool_name === "HerdrLogin" && loginTarget(req.tool_input) &&
+    terminal?.state === "live" && terminal.address?.split("/").at(-1) === id.split(".")[0] &&
+    terminal.created_ms > 0 && terminal.created_ms === req.owner?.created &&
+    (terminal.labels?.["herdr.task"] || null) === req.owner?.task &&
+    (req.tool_input.kind !== "browser" || Boolean(req.owner.task)) &&
+    !["reviewer", "helper"].includes(terminal.labels?.["herdr.role"]));
+}
+
 // Lines of detail, and whether some had to be left out (past SHOWN lines or LINE characters:
 // the card says so, the terminal has the rest).
 function lines(...parts) {
@@ -59,6 +110,12 @@ function wordsOf(req) {
   const v = req?.tool_input && typeof req.tool_input === "object" ? req.tool_input : {};
   const cwd = String(req?.cwd ?? "");
   switch (tool) {
+    case "HerdrLogin": {
+      const login = loginTarget(v);
+      const detail = login?.kind === "site" ? login.origin : login?.kind === "browser" ? "Sign in in this task’s Browser." :
+        login?.kind === "terminal" ? "Sign in in the requesting terminal." : "The destination is unavailable.";
+      return { kind: "login", title: "Sign-in needed", detail, login, cut: false };
+    }
     case "AskUserQuestion": {
       // Each question with its options: the chat's question card answers them all at once.
       const questions = (Array.isArray(v.questions) ? v.questions : []).map((q) => ({
@@ -140,6 +197,14 @@ export const release = () => "";
 // How a card's answer went, for its quiet line ("Allowed in the chat"); null for no decision (the terminal asks
 // instead). ask: { words }, text: the hook's answer, where: "in the chat", "in the task's chat"...
 export function howAnswered(ask, text, where) {
+  if (ask.words.kind === "login") {
+    try {
+      const login = JSON.parse(text).login;
+      if (login === "confirmed") return "Sign-in confirmed " + where;
+      if (login === "canceled") return "Sign-in canceled " + where;
+    } catch {}
+    return null;
+  }
   let d = null;
   try { d = JSON.parse(text).hookSpecificOutput?.decision; } catch {}
   if (!d) return null;

@@ -81,6 +81,19 @@ class AskHook(unittest.TestCase):
             time.sleep(0.05)
         return None
 
+    def test_login_command_is_allowed_and_redirect_is_refused_without_a_card(self):
+        path = f"{self.bin}:{TASK_BIN}:{os.environ['PATH']}"
+        for arg, decision in (("https://shop.example.invalid", "allow"),
+                              ("https://shop.example.invalid/auth/redirect?code=fixture", "deny")):
+            with self.subTest(decision=decision):
+                req = {"tool_name": "Bash", "tool_input": {"command": f"herdr-task ask-login --site {arg}"}}
+                p = self.start(req, PATH=path)
+                out = self.out(p, timeout=5).decode()
+                self.assertEqual(json.loads(out)["hookSpecificOutput"]["decision"]["behavior"], decision)
+                self.assertNotIn(arg, out)
+                self.assertIsNone(self.waiting(0.2))
+                self.assertEqual(os.listdir(os.path.join(self.asks, "req")), [])
+
     def test_asks_the_chat_with_no_chat_showing_the_agent(self):
         # no data/chat-asks/open/<terminal>: before SHEP-91 it left this to the terminal at once
         p = self.start()

@@ -218,3 +218,94 @@ test("a Cursor request too long for the card is never allowed always from the we
   await expect(asks.answer("e1.100.1", { choice: 2 })).rejects.toThrow(/terminal/);
   expect(existsSync(join(dir, "ans", "e1.100.1.json"))).toBe(false);
 });
+
+test("a Chrome sign-in Ask reaches Needs you and its push opens the owning task", async () => {
+  const { alertsOf } = await import("./push.ts");
+  const { quickChoices } = await import("../web/shared/alerts.ts");
+  const addr = "t80", id = `${addr}.login.${Math.floor(Date.now() / 1000)}.${process.pid}`;
+  const req = { tool_name: "HerdrLogin", owner: { created: 9, task: "shop#4" },
+    tool_input: { kind: "site", origin: "https://shop.example.invalid" } };
+  put(id, req);
+  const c = new Compat() as any, asks = c.asks = new Asks();
+  const term = { address: addr, state: "live", created_ms: 9, labels: { "herdr.task": "shop#4" } };
+  const terminals = new Map([[addr, term]]);
+  c.terminalsOf = (a: string) => terminals.get(a);
+  asks.remote({ terminals } as any, () => []);
+  const row = { section: "needs", worker: addr, ref: "SHOP-4", folder: "/tmp/shop", slug: "shop", id: 4, title: "Shop preview", sub: "Sign-in needed" };
+  const snap = c.snapshot({ host: "here", user: "owner", machines: [], sections: [],
+    spaces: [{ id: "sp2", name: "Shop", folder: "/tmp/shop" }], off: ["browser"], rows: [row] });
+  expect(snap.needs).toHaveLength(1);
+  const [n] = snap.needs;
+  expect(n).toMatchObject({ id, place: "sp2", task: "SHOP-4", chat: "SHOP-4/worker",
+    question: { to: "SHOP-4/worker", login: { kind: "site", origin: "https://shop.example.invalid" }, choices: [{ label: "I signed in" }, { label: "Cancel" }] } });
+  expect(quickChoices(n.question)).toEqual([]);
+  const liveChat = c.chat(n.chat, { start: 0, kind: "codex", conv: { items: [] } },
+    { ...term, status: { state: "working" } });
+  expect(liveChat.working).toBe(false);
+  expect(liveChat.doing).toBeUndefined();
+  const pushed = alertsOf(snap).get(`need:SHOP-4/worker:${id}`);
+  expect(pushed).toMatchObject({ topic: "needs", tag: "SHOP-4", body: "Sign-in needed" });
+  expect(new URL(pushed!.url!, "https://herdr.example.invalid").searchParams.get("focus")).toBe(id);
+  expect(new URL(pushed!.url!, "https://herdr.example.invalid").searchParams.get("task")).toBe("SHOP-4");
+
+  const reopened = new Asks();
+  reopened.remote({ terminals } as any, () => []);
+  expect(reopened.of(addr)[0]?.id).toBe(id);
+  await expect(reopened.answer(id, { choice: 0 }, "t81")).rejects.toThrow("this chat");
+  await expect(reopened.answer(id, { terminal: true }, addr)).rejects.toThrow("Confirm or cancel");
+  expect(existsSync(join(dir, "ans", id + ".json"))).toBe(false);
+  await reopened.answer(id, { choice: 0 }, addr);
+  expect(JSON.parse(readFileSync(join(dir, "ans", id + ".json"), "utf8"))).toEqual({ login: "confirmed" });
+  await expect(asks.answer(id, { choice: 1 }, addr)).rejects.toThrow("no longer waiting");
+  expect(reopened.endsOf(addr).at(-1)?.how).toBe("Sign-in confirmed on the web");
+});
+
+test("remote sign-in reaches an unwatched chat and cancels on the owning machine", async () => {
+  const there = mkdtempSync(join(tmpdir(), "shep-login-remote-"));
+  const td = join(there, "data", "chat-asks");
+  for (const d of ["req", "ans", "end"]) mkdirSync(join(td, d), { recursive: true });
+  const id = `t82.login.${Math.floor(Date.now() / 1000)}.${process.pid}`;
+  const address = "m4/t82";
+  writeFileSync(join(td, "req", id + ".json"), JSON.stringify({ tool_name: "HerdrLogin", owner: { created: 6, task: null }, tool_input: { kind: "terminal" } }));
+  const term = { address, state: "live", created_ms: 6, labels: { "herdr.login.ask": id } };
+  const hub: any = { terminals: new Map([[address, term]]), async call(_m: string, p: any) {
+    const r = Bun.spawnSync(p.argv, { env: { ...process.env, HERDR_APP_HOME: there }, stdin: "ignore" });
+    return { code: r.exitCode, stdout: Buffer.from(r.stdout).toString("base64") };
+  } };
+  const asks = new Asks();
+  asks.remote(hub, () => []);
+  await (asks as any).poll();
+  const [a] = asks.of(address);
+  expect(new Compat().question(a, "p:m4:sp1")).toMatchObject({ to: "p:m4:sp1", login: { kind: "terminal" } });
+  await expect(asks.answer(a.id, { choice: 0 }, "t82")).rejects.toThrow("this chat");
+  await asks.answer(a.id, { choice: 1 }, address);
+  expect(JSON.parse(readFileSync(join(td, "ans", id + ".json"), "utf8"))).toEqual({ login: "canceled" });
+});
+
+test("mismatched, expired, malformed and replaced terminals have no sign-in card", async () => {
+  const at = Math.floor(Date.now() / 1000), t = "t83";
+  const req = { tool_name: "HerdrLogin", owner: { created: 4, task: "shop#3" }, tool_input: { kind: "browser" } };
+  const ids = [0, 1, 2, 3600].map((n) => `${t}.login.${at - n}.${process.pid}`);
+  put(ids[0], req);
+  put(ids[1], { ...req, owner: { created: 4, task: "shop#2" } });
+  put(ids[2], { ...req, tool_input: { kind: "site", origin: "https://shop.example.invalid/redirect?state=discard" } });
+  put(ids[3], req);
+  const term = { address: t, state: "live", created_ms: 4, labels: { "herdr.task": "shop#3" } };
+  const asks = new Asks();
+  asks.remote({ terminals: new Map([[t, term]]) } as any, () => []);
+  expect(asks.of(t).map((a) => a.id)).toEqual([ids[0]]);
+  expect(new Compat().question(asks.of(t)[0], "SHOP-3/worker")).toMatchObject({ login: { kind: "browser" }, to: "SHOP-3/worker" });
+  term.created_ms = 5;
+  await expect(asks.answer(ids[0], { choice: 0 }, t)).rejects.toThrow("this chat");
+  (asks as any).read();
+  expect(asks.of(t)).toEqual([]);
+});
+
+test("a native auth status offers the terminal and carries no provider message or approval", () => {
+  const c = new Compat(), t = { state: "live", address: "t84", status: { state: "blocked", kind: "auth", msg: "provider-private-message" } };
+  const q = c.authQuestion(t, "p:sp4");
+  expect(q).toMatchObject({ title: "Signed out", to: "p:sp4", login: { kind: "terminal" }, choices: [] });
+  expect(JSON.stringify(q)).not.toContain(t.status.msg);
+  expect(c.authQuestion({ ...t, state: "finished" }, "p:sp4")).toBeUndefined();
+  expect(c.authQuestion({ ...t, status: { state: "blocked", kind: "permission" } }, "p:sp4")).toBeUndefined();
+});
