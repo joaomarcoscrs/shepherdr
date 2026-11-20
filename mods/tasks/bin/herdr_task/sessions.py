@@ -18,6 +18,10 @@ from .agents import agent_running, detail
 
 TABLE_FOR = 2.0          # seconds a read of the process table serves (a pass's agents, a list's tasks)
 _table = {"at": None, "children": {}}
+UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+CODEX_ROLLOUT = re.compile(rf"/rollout-.*-({UUID})\.jsonl$")
+CURSOR_CHAT = re.compile(rf"/\.cursor/chats/[0-9a-f]+/({UUID})/store\.db$")
+CURSOR_BRIDGE = re.compile(rf"/cursor-chats/({UUID})\.jsonl$")
 
 
 def _read_table():
@@ -73,6 +77,49 @@ def kids(pid):
     return out
 
 
+def codex_parent_id(path):
+    """Match core/chat-log.js: validate the first session header before trusting a rollout."""
+    if not isinstance(path, str) or not os.path.isabs(path) or not os.path.isfile(path):
+        return None
+    match = CODEX_ROLLOUT.search(path)
+    if not match:
+        return None
+    try:
+        with open(path, "rb") as f:
+            line = f.readline(1048576)
+        row = json.loads(line) if line.endswith(b"\n") else {}
+        meta = row.get("payload")
+        if row.get("type") != "session_meta" or meta.get("id") != match[1]:
+            return None
+        source = meta.get("source")
+        # A user fork can name forked_from_thread_id; parent_thread_id belongs to a subagent.
+        if ((source is None or isinstance(source, str)) and not meta.get("parent_thread_id")
+                and meta.get("thread_source") not in ("subagent", "guardian_review")):
+            return match[1]
+    except (OSError, ValueError, AttributeError):
+        pass
+    return None
+
+
+def _open_files(pid):
+    fd = f"/proc/{pid}/fd"
+    if os.path.isdir(fd):
+        try:
+            names = os.listdir(fd)
+        except OSError:
+            return []
+        files = []
+        for name in names:
+            try:
+                files.append(os.readlink(os.path.join(fd, name)))
+            except OSError:
+                pass
+        return files
+    if shutil.which("lsof"):
+        return [line[1:] for line in run(["lsof", "-p", pid, "-Fn"]).stdout.splitlines() if line.startswith("n")]
+    return []
+
+
 def session_of(pid):
     """(session id, log path) of the agent process pid (or a child), as mods/chat/log.js finds it:
     Claude Code names its session in ~/.claude/sessions/<pid>.json; Codex holds its rollout open."""
@@ -93,20 +140,12 @@ def session_of(pid):
                         log = f
                         break
                 return sid, log
-        files = []
-        fd = f"/proc/{p}/fd"
-        if os.path.isdir(fd):
-            for n in os.listdir(fd):
-                try:
-                    files.append(os.readlink(os.path.join(fd, n)))
-                except OSError:
-                    pass
-        elif shutil.which("lsof"):
-            files = [l[1:] for l in run(["lsof", "-p", p, "-Fn"]).stdout.split("\n") if l.startswith("n")]
-        for f in files:
-            m = re.search(r"/rollout-.*?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$", f)
-            if m:
-                return m.group(1), f
+        files = _open_files(p)
+        rollouts = [f for f in dict.fromkeys(files) if re.search(r"/rollout-.*\.jsonl$", f)]
+        if rollouts:
+            parents = [(sid, f) for f in rollouts if (sid := codex_parent_id(f))]
+            # With one owner, FD order is irrelevant. Do not substitute a child's session for it.
+            return parents[0] if len(parents) == 1 else (None, None)
         for f in files:
             # Cursor in a chat (herdr-task cursor-chat, SHEP-6): its own transcript, named by Cursor's chat id
             m = CURSOR_BRIDGE.search(f)
@@ -120,11 +159,6 @@ def session_of(pid):
         if ids:
             return None, None
     return None, None
-
-
-UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-CURSOR_CHAT = re.compile(rf"/\.cursor/chats/[0-9a-f]+/({UUID})/store\.db$")
-CURSOR_BRIDGE = re.compile(rf"/cursor-chats/({UUID})\.jsonl$")
 
 
 def cursor_home():
@@ -142,6 +176,9 @@ def refresh_sessions(s, task, live):
         sid, log = session_of(pid)
         if sid and (a.get("session"), a.get("log")) != (sid, log):
             a["session"], a["log"] = sid, log
+            s.dirty = True
+        elif not sid and a.get("agent") == "codex" and a.get("session") and not saved_codex_log(a):
+            a["session"], a["log"] = None, None
             s.dirty = True
 
 
@@ -209,7 +246,12 @@ def project_dir(folder):
 def log_by_session(kind, sid):
     import glob
     if kind == "codex":
-        found = glob.glob(os.path.join(HOME, ".codex", "sessions", "*", "*", "*", f"rollout-*{sid}.jsonl"))
+        if not isinstance(sid, str) or not re.fullmatch(UUID, sid):
+            return None
+        root = os.environ.get("CODEX_HOME") or os.path.join(HOME, ".codex")
+        found = glob.glob(os.path.join(glob.escape(root), "sessions", "*", "*", "*", f"rollout-*-{sid}.jsonl"))
+        found = [f for f in found if codex_parent_id(f) == sid]
+        return found[0] if len(found) == 1 else None
     elif kind == "cursor":
         # Cursor's transcript, where its version writes one: agent-transcripts/<id>/<id>.jsonl, or <id>.jsonl
         if not isinstance(sid, str) or not re.fullmatch(UUID, sid):
@@ -225,6 +267,14 @@ def log_by_session(kind, sid):
     return found[0] if found else None
 
 
+def saved_codex_log(record):
+    """A saved path can be absent, for example when a task recovered only the session ID."""
+    sid, path = record.get("session"), record.get("log")
+    if not sid:
+        return None
+    return path if codex_parent_id(path) == sid else log_by_session("codex", sid)
+
+
 def find_log(a, ref, folders, taken=()):
     """The log of agent `a` (a task's agents[] row) of task `ref` (SHEP-26), run in one of `folders`,
     or None: by its session when it has one, else the earliest log of its kind that started from
@@ -232,7 +282,7 @@ def find_log(a, ref, folders, taken=()):
     import glob
     kind = a.get("agent") if a.get("agent") in ("codex", "cursor") else "claude"
     if a.get("session"):
-        return log_by_session(kind, a["session"])
+        return saved_codex_log(a) if kind == "codex" else log_by_session(kind, a["session"])
     if kind == "cursor":
         return None  # Cursor's logs are found by their chat id only
     at = a.get("at")
@@ -242,13 +292,14 @@ def find_log(a, ref, folders, taken=()):
     if kind == "codex":
         import datetime
         days = {datetime.date.fromtimestamp((at + d) / 1000) for d in (-86400000, 0, 86400000)}
-        files = [f for day in days for f in glob.glob(os.path.join(HOME, ".codex", "sessions", f"{day:%Y}", f"{day:%m}", f"{day:%d}", "rollout-*.jsonl"))]
+        root = os.environ.get("CODEX_HOME") or os.path.join(HOME, ".codex")
+        files = [f for day in days for f in glob.glob(os.path.join(glob.escape(root), "sessions", f"{day:%Y}", f"{day:%m}", f"{day:%d}", "rollout-*.jsonl"))]
     else:
         files = [f for d in dict.fromkeys(x for x in folders if x) for f in glob.glob(os.path.join(project_dir(d), "*.jsonl"))]
     named = re.compile(rf"(?<![\w-]){re.escape(ref)}(?![\w-])")
     best = None
     for f in files:
-        if f in taken:
+        if f in taken or (kind == "codex" and not codex_parent_id(f)):
             continue
         try:
             if os.path.getmtime(f) * 1000 < at - LOOK_BACK_MS:

@@ -53,6 +53,10 @@ function nativeLogId(path) {
 // Older task records store provider + path. Recognize both native layouts and reject malformed native paths.
 export function savedChatLog(path, kind, session) {
   if (typeof path !== "string" || !Object.hasOwn(KINDS, kind)) return null;
+  if (kind === "codex") {
+    const id = /-([0-9a-f-]{36})\.jsonl$/.exec(path)?.[1];
+    return id && UUID.test(id) && (session == null || session === id) ? { path, format: "codex-saved" } : null;
+  }
   if (kind === "cursor" && path.includes("/agent-transcripts/")) {
     const id = nativeLogId(path);
     return id && (session == null || id === session) ? { path, format: "cursor-native" } : null;
@@ -72,10 +76,10 @@ export async function findChatLog(sh, t, kind) {
     return r.code === 0 && r.stdout?.trim() === rec.log ? rec.log : null;
   }
   const r = await sh(FIND, ["chat", kind, String(pid)]);
-  return String(r.stdout ?? "").trim().split("\n").pop() || null;
+  return r.code === 0 ? String(r.stdout ?? "").trim().split("\n").pop() || null : null;
 }
 
-export const chatLogArgs = (format, args) => ["log", ...(format === "cursor-native" ? [format] : []), ...args];
+export const chatLogArgs = (format, args) => ["log", ...(format ? [format] : []), ...args];
 
 export class ChatReader {
   constructor(io, addr) {
@@ -91,6 +95,7 @@ export class ChatReader {
     this.kind = null;
     this.format = null;
     this.pid = null;
+    this.locatedAt = null;
     this.start = null;   // the first byte read (0: the log's very start)
     this.end = 0;
     this.records = [];
@@ -121,7 +126,10 @@ export class ChatReader {
     const kind = kindOf(t);
     const pid = t?.foreground?.pid;
     const format = nativeCursorTerminal(t) ? "cursor-native" : null;
-    if (this.path && this.kind === kind && this.pid === pid && !format && !this.format) return false;
+    const at = Date.now();
+    // A Codex terminal can change rollouts without changing PID (including /resume and /fork).
+    if (this.path && this.kind === kind && this.pid === pid && !format && !this.format
+      && (kind !== "codex" || (this.locatedAt !== null && at - this.locatedAt < 4000))) return false;
     const path = await findChatLog((script, args) => this.io.sh(script, args, this.machine), t, kind);
     if (path === "pending" || !path) {
       const was = this.state;
@@ -133,12 +141,17 @@ export class ChatReader {
       if (this.state === "pending") { this.conv = new Conversation(kind); this.start = 0; }
       return was !== this.state;
     }
-    if (path === this.path && kind === this.kind && format === this.format) { this.pid = pid; return false; }
+    if (path === this.path && kind === this.kind && format === this.format) {
+      this.pid = pid;
+      this.locatedAt = at;
+      return false;
+    }
     this.reset();
     this.path = path;
     this.kind = kind;
     this.format = format;
     this.pid = pid;
+    this.locatedAt = at;
     return true;
   }
 

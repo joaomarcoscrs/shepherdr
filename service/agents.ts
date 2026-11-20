@@ -15,7 +15,7 @@ import { agentKindOf as kindOf } from "../core/chat-reader.js";
 import * as LS from "../core/live-switch.js";
 import { historyLines } from "../core/mouse-leak.js";
 
-const { DEFAULTS, parseDefaults, current, menuFor, rowFor, argvFor, sessionOf, NAMES, line, PICKS_FILE, parsePicks, pickKey, withPin, withRecent, isCursorChat, hasCodexAuto } = AG as any;
+const { DEFAULTS, parseDefaults, current, menuFor, rowFor, argvFor, sessionOf, NAMES, line, PICKS_FILE, parsePicks, pickKey, withPin, withRecent, isCursorChat, hasCodexAuto, selectableModel } = AG as any;
 /** Whether Cursor may run this agent: anything but a reviewer or a helper (core/settings.js CURSOR_ROLES). */
 export const cursorRole = (t: any) => !["reviewer", "helper"].includes(t?.labels?.["herdr.role"]);
 
@@ -147,6 +147,7 @@ export class Agents {
   /** The model menu's pick: in place when only the model, level or Fast changes (the same agent, its conversation
    *  on), else a restart. Resolves with { live } or { terminal } (the restarted agent's address). */
   async change(addr: string, reader: any, pick: { kind: string; model?: string; effort?: string; speed?: string; perm?: string }) {
+    if (!selectableModel(pick.kind, pick.model)) throw new Error("Pick a model for the conversation.");
     const t: any = this.hub.terminals.get(addr);
     if (!t || t.state !== "live") throw new Error("That agent isn't running.");
     const machine = addr.includes("/") ? addr.split("/")[0] : null;

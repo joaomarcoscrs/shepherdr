@@ -1248,6 +1248,11 @@ export default class Chat extends View {
     // Not in its session yet (no report, no turn): perhaps on its own start screen, which
     // shows as a card under an empty chat.
     if (!path && !format && starting(t)) path = "pending";
+    if ((!path || path === "pending") && this.kind === "codex" && this.path) {
+      this.path = null;
+      this.reset();
+      this.set("finding", cx);
+    }
     if (path === "pending") {
       // A Claude Code that hasn't written its first line yet has no file: an empty chat.
       if (this.phase === "finding") { this.kind = kind; this.conv = new Conversation(kind); this.start = 0; this.set("ready", cx); }

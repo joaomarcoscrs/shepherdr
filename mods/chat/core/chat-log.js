@@ -3,7 +3,7 @@
 // Finding an agent's own session log and reading it as a conversation.
 // Claude Code: ~/.claude/sessions/<pid>.json names the session its process writes, so the
 // log is ~/.claude/projects/*/<sessionId>.jsonl. Codex keeps its rollout file open, so the
-// file is whatever rollout-*.jsonl its process (or a child) holds. Cursor's chat bridge (herdr-task cursor-chat, SHEP-6)
+// file is the parent rollout its process (or a child) holds. Cursor's chat bridge (herdr-task cursor-chat, SHEP-6)
 // holds its transcript open the same way: cursor-chats/<chat id>.jsonl. Native Cursor holds its chat
 // database open, and herdr.resume records the matching transcript path.
 
@@ -25,6 +25,38 @@ cursor_file() {
 }
 `;
 
+// Match sessions.py: only a complete session header for this file can identify a Codex parent.
+// A user fork can name forked_from_thread_id; parent_thread_id belongs to a subagent.
+const CODEX_FILE = String.raw`
+codex_file() {
+  python3 -c '
+import json, os, re, sys
+
+def parent(path):
+    match = re.search(r"/rollout-.*-([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.jsonl$", path)
+    if not match or not path.startswith("/") or not os.path.isfile(path):
+        return False
+    try:
+        with open(path, "rb") as f:
+            line = f.readline(1048576)
+        row = json.loads(line) if line.endswith(b"\n") else {}
+        meta = row.get("payload")
+        if row.get("type") != "session_meta" or meta.get("id") != match[1]:
+            return False
+        source = meta.get("source")
+        return ((source is None or isinstance(source, str)) and not meta.get("parent_thread_id")
+                and meta.get("thread_source") not in ("subagent", "guardian_review"))
+    except (OSError, ValueError, AttributeError):
+        return False
+
+paths = sys.argv[1:] or sys.stdin.read().splitlines()
+valid = [path for path in dict.fromkeys(paths) if parent(path)]
+if len(valid) == 1:
+    print(valid[0])
+' "$@"
+}
+`;
+
 // Args (already shape-checked): foreground pid, label session id, exact label path. Require the
 // foreground to have just one Cursor chat store open. A stale label or an ambiguous store fails closed.
 export const FIND_NATIVE_CURSOR = CURSOR_FILE + String.raw`
@@ -43,10 +75,17 @@ ids=$(printf '%s\n' "$files" | LC_ALL=C awk -v prefix="$physical/chats/" '
 [ "$ids" != "$sid" ] || printf '%s\n' "$log"
 `;
 
-export const FIND = `
+export const FIND = CODEX_FILE + `
 kind="$1"; pid="$2"
 procs() { if [ -r /proc/self/stat ]; then cat /proc/[0-9]*/stat 2>/dev/null | awk '{ p = $1; sub(/.*\\) /, ""); print p, $2 }'; else ps -axo pid=,ppid= 2>/dev/null; fi; }
 kids() { procs | sort -n | awk -v r="$1" 'function walk(p,  c, m, j) { m = split(k[p], c, " "); for (j = 1; j <= m; j++) if (!(c[j] in s)) { s[c[j]] = 1; print c[j]; walk(c[j]) } } { k[$2] = k[$2] " " $1 } END { s[r] = 1; walk(r) }'; }
+open_files() {
+  if [ -d "/proc/$1/fd" ]; then
+    for d in /proc/"$1"/fd/*; do readlink "$d"; done 2>/dev/null
+  else
+    lsof -a -p "$1" -Fn 2>/dev/null | sed -n 's/^n//p'
+  fi
+}
 for p in "$pid" $(kids "$pid"); do
   if [ "$kind" = claude ]; then
     j="$HOME/.claude/sessions/$p.json"
@@ -55,14 +94,14 @@ for p in "$pid" $(kids "$pid"); do
     [ -n "$id" ] || continue
     for f in "$HOME"/.claude/projects/*/"$id".jsonl; do [ -f "$f" ] && { echo "$f"; exit 0; }; done
     echo "pending"; exit 0
+  elif [ "$kind" = codex ]; then
+    files=$(open_files "$p" | grep '/rollout-.*\\.jsonl$')
+    [ -n "$files" ] || continue
+    # This process owns the rollouts. Never substitute a child process's chat if its parent isn't ready.
+    printf '%s\\n' "$files" | codex_file
+    exit 0
   else
-    pat='/rollout-.*\\.jsonl$'
-    [ "$kind" = cursor ] && pat='/cursor-chats/[^/]*\\.jsonl$'
-    if [ -d "/proc/$p/fd" ]; then
-      f=$(for d in /proc/$p/fd/*; do readlink "$d"; done 2>/dev/null | grep "$pat" | head -1)
-    else
-      f=$(lsof -p "$p" -Fn 2>/dev/null | sed -n 's/^n//p' | grep "$pat" | head -1)
-    fi
+    f=$(open_files "$p" | grep '/cursor-chats/[^/]*\\.jsonl$' | head -1)
     [ -n "$f" ] && { echo "$f"; exit 0; }
   fi
 done
@@ -79,9 +118,13 @@ true`;
 //                                     last whole line), going back in growing chunks:
 //                                     "P <start> <end>" (start 0: the very start)
 //   log results <file> <offset>...    the first 64 KB of the lines at those offsets
-export const LOG = CURSOR_FILE + String.raw`
+export const LOG = CURSOR_FILE + CODEX_FILE + String.raw`
 native=0
 if [ "$1" = cursor-native ]; then native=1; shift; fi
+if [ "$1" = codex-saved ]; then
+  shift
+  [ "$(codex_file "$2")" = "$2" ] || { echo "missing"; exit 0; }
+fi
 mode="$1"; f="$2"
 [ "$native" -eq 0 ] || cursor_file "$f" || { echo "missing"; exit 0; }
 [ -f "$f" ] || { echo "missing"; exit 0; }
