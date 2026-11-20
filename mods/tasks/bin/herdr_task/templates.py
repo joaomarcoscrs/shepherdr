@@ -109,7 +109,19 @@ WORKER_MD_BEFORE_ASK = WORKER_MD_BEFORE_OFTEN.replace(OFTEN_OLD, OFTEN_RULE).rep
 ASK_OLD = "Anything else: ask the person in one short message. Then run ready again."
 ASK_RULE = ("Anything else: ask the person with your CLI's question tool, as below (a question in plain text reaches "
             "nobody while the task is Ready). Then run ready again.")
-WORKER_MD = WORKER_MD_BEFORE_ASK.replace(ASK_OLD, ASK_RULE)
+WORKER_MD_BEFORE_HELPER_IDS = WORKER_MD_BEFORE_ASK.replace(ASK_OLD, ASK_RULE)
+HELPER_IDS_OLD = ("Wait for it with `hc wait <its name> --timeout 600` (again on a timeout, or while it says turn 0: "
+                  "it hadn't started), read its report with `hc read <its name> --lines 400`, then end it with `hc kill <its name>`.")
+HELPER_IDS_RULE = ("Save the terminal address printed by `hc run`, such as `t7`. Wait with "
+                   "`hc wait <address> --timeout 600` (again on a timeout, or while it says turn 0: it hadn't started), "
+                   "read its report with `hc read <address> --lines 400`, then end it with `hc kill <address>`.")
+HELPER_CLEANUP = ("- The Codex and Claude Code permission hooks let you manage a local reviewer or helper you started for this task "
+                  "without asking the person first. "
+                  "Use its exact terminal address for `hc get`, `hc wait`, `hc read`, `hc interrupt` to stop its turn, "
+                  "`hc kill` to end its program, or `hc rm` to remove its finished terminal. "
+                  "Use separate commands with the literal address each time.\n")
+WORKER_MD = WORKER_MD_BEFORE_HELPER_IDS.replace(HELPER_IDS_OLD, HELPER_IDS_RULE).replace(
+    "- Review, when", HELPER_CLEANUP + "- Review, when")
 
 REVIEWER_MD_BEFORE_SUBAGENT = """You review one Herdr task's work before it can merge. Read only: never edit files, commit or push.
 - Read the task, then the diff of its branch against its base, and run the project's checks.
@@ -142,7 +154,7 @@ OLD_WORKER_READY = """You work on one Herdr task. Stay within the task's scope a
 - When the work is finished, run the `herdr-task ready` command given at the end of your brief, with a short summary. That puts the task in Ready for the person, who accepts it. Never mark a task done yourself.
 """
 OLD_WORKER_MD = OLD_WORKER_READY.split("- When the work is finished")[0]
-OLD_WORKERS = (WORKER_MD_BEFORE_ASK, WORKER_MD_BEFORE_OFTEN, WORKER_MD_BEFORE_SUGGEST, WORKER_MD_BEFORE_COMMAND, WORKER_MD_BEFORE_FEEDBACK, WORKER_MD_BEFORE_SUBAGENTS, WORKER_MD_BEFORE_LEFT, WORKER_MD_BEFORE_DETAILS, WORKER_MD_BEFORE_CUT, WORKER_MD_BEFORE_ESTIMATE, WORKER_MD_BEFORE_SUMMARY, WORKER_MD_BEFORE_GATE, WORKER_MD_BEFORE_TEMPLATES, WORKER_MD_BEFORE_NEWS, OLD_WORKER_READY, OLD_WORKER_MD, OLD_WORKER_MD.replace(OLD_WORKER_MD.split("\n")[0], OLD_WORKER_FIRST), OLD_WORKER_REVIEW)
+OLD_WORKERS = (WORKER_MD_BEFORE_HELPER_IDS, WORKER_MD_BEFORE_ASK, WORKER_MD_BEFORE_OFTEN, WORKER_MD_BEFORE_SUGGEST, WORKER_MD_BEFORE_COMMAND, WORKER_MD_BEFORE_FEEDBACK, WORKER_MD_BEFORE_SUBAGENTS, WORKER_MD_BEFORE_LEFT, WORKER_MD_BEFORE_DETAILS, WORKER_MD_BEFORE_CUT, WORKER_MD_BEFORE_ESTIMATE, WORKER_MD_BEFORE_SUMMARY, WORKER_MD_BEFORE_GATE, WORKER_MD_BEFORE_TEMPLATES, WORKER_MD_BEFORE_NEWS, OLD_WORKER_READY, OLD_WORKER_MD, OLD_WORKER_MD.replace(OLD_WORKER_MD.split("\n")[0], OLD_WORKER_FIRST), OLD_WORKER_REVIEW)
 
 
 TEMPLATE_HEADS = {

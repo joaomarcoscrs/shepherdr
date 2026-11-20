@@ -2810,10 +2810,13 @@ class ReviewAsAHelperAgent(unittest.TestCase):
             self.assertIn("codex --no-daemon --sandbox read-only", words)
             self.assertIn("claude --permission-mode plan", words)
             self.assertIn("exactly as the Reviewer line gives it", words)
-            self.assertIn("hc wait <its name>", words)
+            self.assertIn("hc wait <address>", words)
+            self.assertIn("hc kill <address>", words)
+            self.assertIn(templates.HELPER_CLEANUP.strip(), words)
             self.assertNotIn("< /dev/null", words)
         self.assertIn(templates.WORKER_MD_BEFORE_SUBAGENTS, templates.OLD_WORKERS)
         self.assertIn(templates.WORKER_MD_BEFORE_COMMAND, templates.OLD_WORKERS)
+        self.assertIn(templates.WORKER_MD_BEFORE_HELPER_IDS, templates.OLD_WORKERS)
         with open(os.path.join(ROOT, "templates", "reviewer.md")) as f:
             self.assertIn(templates.REVIEWER_MD.strip(), f.read())
 
@@ -4972,6 +4975,118 @@ class Feedback(unittest.TestCase):
         self.assertIn("feedback", __import__("herdr_task.launch", fromlist=["OWN"]).OWN)
 
 
+class OwnSubagentPermission(unittest.TestCase):
+    """Replay provider requests against a fake local hc. Only get is reachable in the fixture."""
+
+    def setUp(self):
+        from contextlib import ExitStack
+        from unittest import mock
+        import socket
+        sys.path.insert(0, BIN)
+        from herdr_task import base, launch
+        self.launch, self.mock = launch, mock
+        resources = ExitStack()
+        self.addCleanup(resources.close)
+        work = resources.enter_context(tempfile.TemporaryDirectory(prefix="shep-", dir="/tmp"))
+        listener = resources.enter_context(socket.socket(socket.AF_UNIX))
+        endpoint = os.path.join(work, "core.sock")
+        listener.bind(endpoint)
+        self.hc = os.path.join(work, "hc")
+        self.state = os.path.join(work, "terminals.json")
+        with open(self.hc, "w") as f:
+            f.write(f"#!{sys.executable}\n"
+                    "import json, os, sys\n"
+                    "assert len(sys.argv) == 4 and sys.argv[1] == 'get' and sys.argv[3] == '--json'\n"
+                    "with open(os.environ['TEST_HC_STATE']) as f:\n"
+                    "    row = json.load(f).get(sys.argv[2])\n"
+                    "if row is None: sys.exit(1)\n"
+                    "if os.environ.get('TEST_HC_OTHER_CORE') and not os.environ.get('HC_SOCKET'):\n"
+                    "    row['created_ms'] += 1\n"
+                    "print(json.dumps(row))\n")
+        os.chmod(self.hc, 0o755)
+        resources.enter_context(mock.patch.dict(os.environ, {
+            "PATH": work + os.pathsep + os.environ["PATH"], "HC_TERMINAL_ID": "t3",
+            "HC_TERMINAL_SOCKET": endpoint, "HERDR_BROWSER_TASK": "demo#1", "TEST_HC_STATE": self.state,
+        }))
+        resources.enter_context(mock.patch.object(base, "real_home", return_value=os.environ["HOME"]))
+        worker = {"herdr.task": "demo#1", "herdr.task.space": "sp1"}
+        reviewer = {"herdr.task": "demo#1", "herdr.role": "reviewer"}
+        self.rows = {
+            "t3": dict(address="t3", state="live", pid=100, created_ms=1000, labels=worker),
+            "t4": dict(address="t4", state="live", parent="t3", labels=reviewer),
+            "t5": dict(address="t5", state="live", parent="t2", labels=reviewer),
+            "t6": dict(address="t6", state="live", parent="t3", labels={**reviewer, "herdr.task": "demo#2"}),
+            "t7": dict(address="t7", state="live", parent="t3", labels={**reviewer, "herdr.task.space": "sp2"}),
+            "t8": dict(address="t8", state="finished", parent="t3", labels=reviewer),
+            "t9": dict(address="t9", state="live", parent="t3", labels=worker),
+            "foreign-review": dict(address="t5", state="live", parent="t2", labels=reviewer),
+        }
+
+    def permission(self, command, codex=True, tool="Bash"):
+        import argparse
+        import io
+        with open(self.state, "w") as f:
+            json.dump(self.rows, f)
+        req = dict(hook_event_name="PermissionRequest", tool_name=tool, tool_input={"command": command})
+        if codex:
+            req["turn_id"] = "turn-1"
+        else:
+            req["permission_suggestions"] = []
+        raw, out = io.BytesIO(json.dumps(req).encode()), io.StringIO()
+        with self.mock.patch.object(sys, "stdin", self.mock.Mock(buffer=raw)), \
+                self.mock.patch.object(sys, "stdout", out), \
+                self.mock.patch.object(self.launch, "ask_card", return_value='{"card": true}'):
+            self.launch.cmd_allow(argparse.Namespace(command="/x/herdr-task", sandboxed=codex))
+        return json.loads(out.getvalue())
+
+    def assert_allowed(self, command, **kwargs):
+        self.assertEqual(self.permission(command, **kwargs), self.launch.SHARED_ALLOW, command)
+
+    def assert_asks(self, command, **kwargs):
+        self.assertEqual(self.permission(command, **kwargs), {"card": True}, command)
+
+    def test_live_actual_child_cleanup_in_both_hooks(self):
+        for codex in (True, False):
+            for command in ("hc get t4 --json", "hc wait t4 --timeout 600", "hc read --lines 400 t4",
+                            f"{self.hc} kill t4", "hc interrupt t4 --timeout 10", "hc rm t8"):
+                with self.subTest(codex=codex, command=command):
+                    self.assert_allowed(command, codex=codex)
+
+    def test_cannot_manage_another_terminal_by_address_or_name(self):
+        for target in ("t3", "t5", "t6", "t7", "t9", "t10", "foreign-review", "demo-1-review", "vm/t4"):
+            self.assert_asks(f"hc kill {target}")
+        self.rows["t10"] = self.rows["t4"]  # A name lookup claiming the wrong address.
+        self.assert_asks("hc kill t10")
+
+    def test_malformed_or_unrelated_requests_reach_normal_approval(self):
+        for command in ("hc kill", "hc kill t4 t8", "hc kill t4 --on elsewhere", "hc wait --children all t4",
+                        "hc wait t4 --timeout nope", "hc read t4 --lines 1 --lines 2", "hc rm t4",
+                        "hc send t4 hi", "kill 123", "/tmp/hc kill t4", "hc kill t4 && git status",
+                        "hc kill t4\nhc kill t5", "hc kill \"$CHILD\"", "hc kill t4 >out",
+                        "HC_SOCKET=/tmp/other hc kill t4", "hc kill 't4", "hc kill t4*",
+                        ["/not/a/shell", "-lc", "hc kill t4"], ["hc", "kill", None]):
+            self.assert_asks(command)
+        self.assert_asks("hc kill t4", tool="mcp__example__command")
+        self.assert_allowed(["/bin/zsh", "-lc", "hc kill t4"])
+        self.assert_allowed([self.hc, "kill", "t4"])
+
+    def test_unknown_ownership_falls_through(self):
+        for key in ("HC_TERMINAL_ID", "HC_TERMINAL_SOCKET", "HERDR_BROWSER_TASK"):
+            with self.mock.patch.dict(os.environ, {key: ""}):
+                self.assert_asks("hc kill t4")
+        del self.rows["t4"]["parent"]
+        self.assert_asks("hc kill t4")
+
+    def test_command_and_hook_must_use_the_same_core(self):
+        # The shared guard allows Linux's default socket even if the worker's own socket differs.
+        linux_default = f"/run/user/{os.getuid()}/herdr-core/default.sock"
+        for env in ({"HC_SOCKET": linux_default}, {"HC_SOCKET": "/tmp/another-core.sock"}, {"TEST_HC_OTHER_CORE": "1"}):
+            with self.mock.patch.dict(os.environ, env):
+                self.assert_asks("hc kill t4")
+        with self.mock.patch.dict(os.environ, {"HC_SOCKET": os.environ["HC_TERMINAL_SOCKET"]}):
+            self.assert_allowed("hc kill t4")
+
+
 class CodexAsksOnTheCard(unittest.TestCase):
     """SHEP-91: a Codex worker's PermissionRequest hook (`herdr-task _allow`) allows its own commands, and hands anything
     else to the chat's card (ask-hook.sh, marked HERDR_ASK_CHAINED), waiting as long as the card does."""
@@ -5093,25 +5208,24 @@ class CodexAsksOnTheCard(unittest.TestCase):
                 self.assertFalse(own(c), c)
             self.assertFalse(own("git commit -m x", False))
             self.assertFalse(own("herdr-artifact publish /tmp/p", False))
-        # its review: the reviewer the brief's Reviewer line gives, read-only, and its own helpers only
+        # Its review launch still accepts only the Reviewer line's read-only command.
         from herdr_task.settings import reviewer_command
         rv = reviewer_command("codex", folder=tempfile.mkdtemp())
         with mock.patch.dict(os.environ, {"HERDR_BROWSER_TASK": "demo#1"}):
             own = lambda c, sb=True: launch.own_command("/x/herdr-task", c, sb)  # noqa: E731
             yes = [f"hc run --bg --name demo-1-review --label \"herdr.task=$HERDR_BROWSER_TASK\" --label herdr.role=reviewer "
                    f"--label herdr.agent=codex -- {rv} 'Review it: \"ok\" & $x'",
-                   "hc run --bg --name demo-1-review -- claude --permission-mode plan --model opus 'review'",
-                   "hc wait demo-1-review --timeout 600", "hc read demo-1-review --lines 400", "hc kill demo-1-review"]
+                   "hc run --bg --name demo-1-review -- claude --permission-mode plan --model opus 'review'"]
             no = ["hc run --bg --name demo-1-review -- claude --permission-mode plan --dangerously-skip-permissions x",
                   "hc run --bg --name demo-1-review -- codex --no-daemon --sandbox read-only --ask-for-approval never "
                   "-c sandbox_mode=\"danger-full-access\" x",
                   "hc run --bg --name demo-1-review -- sh -c 'rm -rf /'", "hc run --bg --name x -- claude --permission-mode plan x",
-                  "hc kill t15q", "hc send demo-1-review hi"]
+                  "hc kill demo-1-review", "hc send demo-1-review hi"]
             for c in yes:
                 self.assertTrue(own(c), c)
             for c in no:
                 self.assertFalse(own(c), c)
-            self.assertFalse(own(yes[2], False))
+            self.assertFalse(own(yes[0], False))
         argv = launch.own_argv(["codex", "-s", "workspace-write"])
         self.assertIn(" _allow --command ", argv[2])
         self.assertIn(" --sandboxed", argv[2])
