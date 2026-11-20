@@ -275,12 +275,19 @@ def pr_describe(s, task, summary=None):
 
 
 def pr_title(s, task):
-    """The repo's commit titles read "SHEP-198: the task's title" (a squash merge adds "(#945)"): the
-    task's ref first, so the pull request stays findable by it."""
-    ref = s.ref(task)
+    """Use the task's title without its internal Herdr reference."""
     title = " ".join(str(task.get("title") or "").split())
-    rest = re.sub(rf"^{re.escape(ref)}\b[:\s-]*", "", title, flags=re.I)
-    return f"{ref}: {rest or ref}"
+    ref = rf"(?<![\w-]){re.escape(s.ref(task))}(?![\w-])"
+    tag = rf"(?:\[\s*{ref}\s*\]|\(\s*{ref}\s*\)|{ref})"
+    divider = r"(?:[:|–—]|(?<!\S)-(?!\S))"
+    # Keep one divider when the reference occupies a whole section of the title.
+    title = re.sub(rf"({divider})\s*{tag}\s*\1", r"\1", title, flags=re.I)
+    # Drop an edge divider with its tag and keep sentence punctuation next to the remaining text.
+    title = re.sub(rf"^{tag}(?:\s*{divider})?"
+                   rf"|(?:{divider}\s*)?{tag}$"
+                   rf"| {tag}(?=[,.!?;:)])"
+                   rf"|{tag}", "", title, flags=re.I)
+    return " ".join(title.split()) or "Update project"
 
 
 def pr_body(s, task, summary=None):
