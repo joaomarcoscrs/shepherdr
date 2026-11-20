@@ -1504,6 +1504,7 @@ class BackToWork(unittest.TestCase):
         self.assertEqual(github.pr_open(self.store, t, "o/r", "Done.")["number"], 599)
         self.assertEqual(t["pr"], {"number": 599, "url": "https://github.com/o/r/pull/599", "repo": "o/r"})
         self.assertNotIn(("pr", "create"), calls)
+        self.assertNotIn(("pr", "edit"), calls)
         self.assertIn(("pr", "comment"), calls)  # the summary still reaches it
 
     def test_ready_again_edits_one_comment_never_a_second(self):
@@ -1529,6 +1530,7 @@ class BackToWork(unittest.TestCase):
         self.assertIn("repos/o/r/issues/comments/4242", edits[0])
         self.assertIn("body=Done, and the findings fixed.", edits[0])
         self.assertEqual(t["pr_note"], {"number": 599, "id": 4242, "said": "Done, and the findings fixed."})
+        self.assertFalse(any(c[:2] == ("pr", "edit") and "--title" in c for c in calls))
 
     def test_a_new_pull_request_says_it_in_its_body_only(self):
         import herdr_task.github as github
@@ -5712,8 +5714,7 @@ class TaskFlow(unittest.TestCase):
         self.assertIn("Couldn't push task/1", str(e.exception))
 
     def test_the_pull_request_title_and_body_are_short(self):
-        """SHEP-198 (GitHub #924): the title follows the repo's commit titles ("SHEP-198: ..."), and the
-        body is the summary, details and proof's title, never the brief."""
+        """Only the current task's reference is omitted from the title. The body still includes it."""
         import herdr_task.github as github
         wt, remote = self.task["worktree"], os.path.join(self.root, "remote.git")
         self.git(self.root, "init", "-q", "--bare", remote)
@@ -5731,15 +5732,40 @@ class TaskFlow(unittest.TestCase):
         self.assertEqual(github.pr_open(self.store, self.task, "o/r", "The flow works now")["number"], 9)
         create = next(a for a in asked if a[:2] == ("pr", "create"))
         title, body = create[create.index("--title") + 1], create[create.index("--body") + 1]
-        self.assertEqual(title, f"{ref}: Flow")
         self.assertNotIn("BRIEF-ONLY-LINE", body)
         self.assertIn(f"Task: {ref}", body)
         self.assertIn("The flow works now", body)
         self.assertIn("- Checked the flow", body)
         self.assertIn(f"{ref}: Flow · Proof", body)
         self.assertLess(len(body), 400)
-        # A title that already names the ref doesn't name it twice.
-        self.assertEqual(github.pr_title(self.store, {**self.task, "title": f"{ref} Flow"}), f"{ref}: Flow")
+        with self.subTest(task_title="Flow"):
+            self.assertEqual(title, "Flow")
+        for task_title, expected in (
+            (f"{ref}: Fix flow", "Fix flow"),
+            (f"[{ref.lower()}] Fix flow", "Fix flow"),
+            (f"{ref} - Fix flow", "Fix flow"),
+            (f"{ref} — Fix flow", "Fix flow"),
+            (f"{ref} Fix flow", "Fix flow"),
+            (f"Fix flow ({ref})", "Fix flow"),
+            (f"Fix flow ({ref}).", "Fix flow."),
+            (f"Fix flow | {ref}", "Fix flow"),
+            (f"Fix {ref} flow.", "Fix flow."),
+            (f"Fix flow | [{ref}] | Web", "Fix flow | Web"),
+            (f"Fix [{ref}] flow (DATA-42, #123).", "Fix flow (DATA-42, #123)."),
+            (f"[{ref}] DATA-42: Fix flow (#123)!", "DATA-42: Fix flow (#123)!"),
+            (f"Fix {ref}0, X{ref}, {ref}_v2 and {ref}-v2", f"Fix {ref}0, X{ref}, {ref}_v2 and {ref}-v2"),
+            (f"RFC: Keep '{ref}0' — as-is!", f"RFC: Keep '{ref}0' — as-is!"),
+            (ref, "Update project"),
+            (f" [{ref}] — ", "Update project"),
+            (" \t\n ", "Update project"),
+        ):
+            with self.subTest(task_title=task_title):
+                task = {k: v for k, v in self.task.items() if k != "pr"}
+                task["title"] = task_title
+                github.pr_open(self.store, task, "o/r", "The flow works now")
+                create = asked[-1]
+                self.assertEqual(create[:2], ("pr", "create"))
+                self.assertEqual(create[create.index("--title") + 1], expected)
 
     def test_ready_keeps_the_pull_request_the_task_continues(self):
         """#828: the work pushed to an open pull request's own branch: ready takes that one, never a second."""
