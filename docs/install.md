@@ -48,8 +48,17 @@ The PermissionRequest hooks (the chat's and each task worker's `herdr-task _allo
 a picture you shared in a chat, as when a task's brief names your screenshot: one the chat handed an agent on this
 machine (listed in `~/.config/herdr-app/data/chat-shared.tsv`, kept 30 days), one you pasted or uploaded
 (`data/chat-attach/`), or a copy it sent to another machine. A picture in your own messages of a conversation the chat
-shows (one sent before this list was kept, say) goes on the list too, with its message's time. Only image files, only
-Read; anything else asks as before.
+shows (one sent before this list was kept, say) goes on the list too, with its message's time. The picture rule applies
+to image files opened with Read.
+
+The task worker's hook also allows `hc get`, `wait`, `read`, `interrupt`, `kill`, and `rm` on its own local
+reviewer or helper. Use the literal terminal address from `hc run`, such as `t7`, in a separate command.
+The core must report the worker as the helper's parent and both terminals as part of the same task. `rm`
+only removes finished terminals. A running worker with an older brief can use the address immediately after
+the hook code is updated.
+
+This applies to Codex shell approval requests and Claude Code Bash permission requests that reach the
+worker hook. The CLI's approval policy and any other installed hook still apply.
 
 What it records: `~/.config/herdr-app/data/shepherdr/installed.json`, a sha256 per file it put there. Running it
 again changes only what changed; a file you edited since is kept (the new copy goes beside it as `.new`), except a

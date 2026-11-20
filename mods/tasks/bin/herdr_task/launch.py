@@ -11,14 +11,15 @@ import re
 import secrets
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import time
 
-from .base import ASK_HOME, ENTRY, Fail, git, hc_json, now, run, WORKTREES
+from .base import ASK_HOME, ENTRY, Fail, git, guard, hc_json, now, run, WORKTREES
 from .settings import AGENTS, agent_key, ASSISTANT_TEMPLATES, keep_delivery, trust_roots, bare, BRANCH_PATTERN, branch_pattern_problem, keep_review, notes, notes_part, review_limits, settings_block, settings_for
 from .templates import instructions
-from .agents import agent_running, detail, LINE_MAX, live_agents, SUMMARY_MAX
+from .agents import agent_running, detail, HELPER_ROLES, LINE_MAX, live_agents, SUMMARY_MAX
 from .github import finish, remote_of
 from .browsers import browser_line, browser_path
 from .shared import ALLOW as SHARED_ALLOW, allows as shared_read
@@ -223,26 +224,102 @@ def own_command(path, text, sandboxed=False):
         return True
     if sandboxed and len(words) >= 2 and words[0] == "git" and words[1] in GIT:
         return True
-    if sandboxed and words and words[0] == "hc" and helper_hc(words):
+    if words and helper_hc(words, sandboxed):
         return True
     sp = secret_path()
     return bool(sp) and len(words) >= 2 and words[0] in (sp, "herdr-secret") and words[1] in SECRET
 
 
-# A Codex worker's review (#866): its sandbox can't reach hc, so starting, waiting on, reading and
-# ending its reviewer run escalated. Only a read-only reviewer as the brief's Reviewer line gives it,
-# and only its own helpers (<task>-review, -helper) to wait on, read or end.
+# A Codex worker's review (#866): its sandbox can't reach hc. Keep the read-only launch shape
+# from the brief. Lifecycle requests from either provider check the actual child in the core.
 REVIEWERS = {"codex": (["codex", "--no-daemon", "--sandbox", "read-only", "--ask-for-approval", "never"],
                        {"--disable": re.compile(r"hooks"), "-m": re.compile(r"[\w.:-]+"),
                         "-c": re.compile(r'projects=\{.*\}|model_reasoning_effort="?\w+"?', re.S)}),
              "claude": (["claude", "--permission-mode", "plan"], {"--model": re.compile(r"[\w.:\[\]-]+"), "--effort": re.compile(r"\w+")})}
 HELPER = re.compile(r"[\w.-]+-(?:review|helper)(?:-[\w.-]+)?")
+# hc reserves these addresses and never reuses them on a core. Names can change holders.
+TERMINAL_ADDRESS = re.compile(r"t[1-9][0-9bcdfghjkmnpqrstvwxyz]*")
+HELPER_ACTIONS = {"wait": "--timeout", "read": "--lines", "interrupt": "--timeout",
+                  "kill": None, "rm": None, "get": None}
 
 
-def helper_hc(words):
-    """Whether `hc ...` is a worker's own reviewer: run as the brief says, or waited on, read, ended."""
-    if len(words) >= 3 and words[1] in ("wait", "read", "kill"):
-        return bool(HELPER.fullmatch(words[2])) and all(w.startswith("--") or re.fullmatch(r"\d+", w) for w in words[3:])
+def helper_hc(words, sandboxed):
+    """Allow the existing Codex reviewer launch or a typed action on a verified local child."""
+    if len(words) < 2:
+        return False
+    if words[1] in HELPER_ACTIONS:
+        binary = shutil.which("hc")
+        if binary and os.path.isabs(binary) and words[0] in ("hc", binary):
+            address = helper_address(words[2:], HELPER_ACTIONS[words[1]])
+            return bool(address and own_helper(binary, address, words[1]))
+        return False
+    return sandboxed and words[0] == "hc" and reviewer_run(words)
+
+
+def helper_address(args, numeric_flag):
+    """One literal local address, optionally --json and the operation's numeric option."""
+    address, seen, i = None, set(), 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--json" and arg not in seen:
+            seen.add(arg)
+        elif arg == numeric_flag and arg not in seen and i + 1 < len(args) and re.fullmatch(r"[0-9]+", args[i + 1]):
+            seen.add(arg)
+            i += 1
+        elif address is None and TERMINAL_ADDRESS.fullmatch(arg):
+            address = arg
+        else:
+            return None
+        i += 1
+    return address
+
+
+def helper_terminal(binary, address, env=None):
+    result = subprocess.run([binary, "get", address, "--json"], env=env, text=True, capture_output=True, timeout=2)
+    terminal = json.loads(result.stdout) if result.returncode == 0 else None
+    return terminal if isinstance(terminal, dict) and terminal.get("address") == address else {}
+
+
+def own_helper(binary, address, verb):
+    """Read ownership from the caller's local core. A failed or ambiguous lookup leaves the ask alone."""
+    caller = os.environ.get("HC_TERMINAL_ID", "")
+    endpoint = os.environ.get("HC_TERMINAL_SOCKET", "")
+    chosen = os.environ.get("HC_SOCKET")
+    task = os.environ.get("HERDR_BROWSER_TASK")
+    if not task or not TERMINAL_ADDRESS.fullmatch(caller) or caller == address or not os.path.isabs(endpoint):
+        return False
+    if chosen and chosen != endpoint:
+        return False
+    try:
+        guard(["hc"])
+        if not stat.S_ISSOCK(os.stat(endpoint).st_mode):
+            return False
+        env = {**os.environ, "HC_SOCKET": endpoint}
+        worker = helper_terminal(binary, caller, env)
+        labels = worker.get("labels")
+        if worker.get("state") != "live" or not isinstance(labels, dict) or labels.get("herdr.task") != task:
+            return False
+        if not chosen:
+            # The command itself will use hc's default routing. Match the live worker on that
+            # route too, in case config points it at a different core with colliding addresses.
+            routed = helper_terminal(binary, caller)
+            if not worker.get("pid") or worker.get("created_ms") is None or any(
+                    routed.get(k) != worker.get(k) for k in ("pid", "created_ms", "state")):
+                return False
+        child = helper_terminal(binary, address, env)
+    except (Fail, OSError, ValueError, subprocess.SubprocessError):
+        return False
+    kid = child.get("labels")
+    if child.get("parent") != caller or not isinstance(kid, dict):
+        return False
+    space = labels.get("herdr.task.space") or labels.get("herdr.space")
+    return (kid.get("herdr.task") == task and kid.get("herdr.role") in HELPER_ROLES
+            and all(k not in kid or kid[k] == space for k in ("herdr.task.space", "herdr.space"))
+            and child.get("state") in (("finished",) if verb == "rm" else ("live", "finished")))
+
+
+def reviewer_run(words):
+    """Whether the worker starts a read-only reviewer in the existing allowed launch shape."""
     if len(words) < 4 or words[1] != "run" or "--" not in words:
         return False
     i = words.index("--")
@@ -311,6 +388,8 @@ def cmd_allow(args):
         data = json.loads(raw or b"{}")
     except ValueError:
         return
+    if not isinstance(data, dict):
+        return
     if os.environ.get("HERDR_TASK_HOOK_LOG"):
         with open(os.environ["HERDR_TASK_HOOK_LOG"], "a") as f:
             f.write(json.dumps(data) + "\n")
@@ -319,11 +398,12 @@ def cmd_allow(args):
         print(json.dumps(SHARED_ALLOW))
         return
     cmd = (data.get("tool_input") or {}).get("command") if isinstance(data.get("tool_input"), dict) else None
-    if isinstance(cmd, list):
-        # ["bash", "-lc", "<command>"] as some tools pass it.
-        cmd = cmd[2] if len(cmd) == 3 and cmd[1] in ("-c", "-lc") else shlex.join(cmd)
-    if own_command(args.command, cmd, getattr(args, "sandboxed", False)):
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow"}}}))
+    if isinstance(cmd, list) and all(isinstance(w, str) for w in cmd):
+        # Older requests can use argv. Unwrap only a recognized shell, never another executable.
+        cmd = cmd[2] if len(cmd) == 3 and cmd[0] in ("/bin/bash", "/bin/sh", "/bin/zsh", "bash", "sh", "zsh") \
+            and cmd[1] in ("-c", "-lc") else shlex.join(cmd)
+    if data.get("tool_name") == "Bash" and own_command(args.command, cmd, getattr(args, "sandboxed", False)):
+        print(json.dumps(SHARED_ALLOW))
         return
     out = ask_card(raw)
     if out:
@@ -577,7 +657,8 @@ def closing_line(s, task, parent=None, argv=None):
                  "(then end your turn), `herdr-secret run NAME -- <command>`, `herdr-secret list`; these run without asking too.")
     if argv and agent_key(argv) == "codex":
         text += (" Codex's sandbox can't reach Herdr nor write git's data, so give those commands, herdr-artifact's (your proof), "
-                 "`git add`/`git commit` and your review's `hc run`/`hc wait`/`hc read`/`hc kill` (its prompt in single quotes) "
+                 "`git add`/`git commit`, the reviewer's `hc run` (its prompt in single quotes), and lifecycle commands "
+                 "on your own helper's exact terminal address "
                  "sandbox_permissions \"require_escalated\" from the first try, each as one plain command (no && chains, no $(…), "
                  "no git options before the verb): then they run without asking.")
     if argv and agent_key(argv) == "cursor":
