@@ -7,13 +7,19 @@ import { fakeGpuiBase, fakeGpuiKit } from "./fake-gpui";
 
 const shared = new Map<string, any>();
 const sounds: string[] = [];
-const term = { address: "t7", state: "live", status: "blocked", labels: { "herdr.role": "coordinator", "herdr.space": "s1" }, report: { msg: "approve Bash: gh pr list" } };
+const ran: [string, unknown][] = [];
+let loginWorker = false;
+const term = { address: "t7", created_ms: 70, state: "live", status: "blocked", labels: { "herdr.role": "coordinator", "herdr.space": "s1" }, report: { msg: "approve Bash: gh pr list" } };
 mock.module("herdr", () => fakeHerdr({
   shared: (k: string) => shared.get(k), setShared: (k: string, v: unknown) => { shared.set(k, v); },
-  playSound: (s: string) => { sounds.push(s); }, settings: () => ({}), focused: () => null, window: () => ({ active: false }),
-  terminals: () => [term], agents: () => [], panes: () => [{ pane: "p1", tab: "tab1", mod: "chat" }],
+  playSound: (s: string) => { sounds.push(s); }, settings: () => ({}), focused: () => null, window: () => ({ active: false, platform: "macos" }),
+  terminals: () => [loginWorker ? { ...term, address: "t8", labels: { "herdr.task": "shop#4" } } : term], agents: () => [], panes: () => [{ pane: "p1", tab: "tab1", mod: "chat" }],
   spaces: () => [{ id: "s1", name: "inference", tabs: [{ id: "tab1" }] }], machines: () => [],
-  layout: () => ({ floating: [{ content: { mod: "toasts" } }] }), exec: async () => ({ code: 1, stdout: "", stderr: "" }),
+  run: (cmd: string, args: unknown) => { ran.push([cmd, args]); },
+  layout: () => ({ children: [{ id: "tasks-thread-body" }], floating: [{ content: { mod: "toasts" } }] }), exec: async (cmd: string, args: string[]) => {
+    ran.push([cmd, args]);
+    return { code: 0, stdout: cmd === "sh" ? args.at(-1) + "\n" : "", stderr: "" };
+  },
   hc: async () => ({ code: 1, stdout: "", stderr: "" }),
 }));
 mock.module("gpui-kit", () => fakeGpuiKit());
@@ -115,4 +121,41 @@ describe("a task's worker shown in a thread", () => {
     expect(toasts()).toEqual([["ask:t7.100.42", "Run: npm test"]]);
     expect(sounds).toEqual(["blocked"]);
   });
+});
+
+
+test("a sign-in toast goes to the chat and only the card click opens Chrome", async () => {
+  shared.clear(); ran.length = 0; pending = [];
+  shared.set("addons.off", ["browser"]);
+  const c: any = Object.create(Chat.prototype);
+  Object.assign(c, { addr: "t7", machine: null, askDir: "/fixture", myPane: () => "p1" });
+  const req = { tool_name: "HerdrLogin", owner: { created: 70, task: null },
+    tool_input: { kind: "site", origin: "https://example.invalid" } };
+  const a = { id: `t7.login.${Math.floor(Date.now() / 1000)}.42`, req, words: words(req) };
+  c.askAlert([a]);
+  expect(shared.get("toasts")[0]).toMatchObject({ go: { tab: "tab1", pane: "p1" }, body: "Sign-in needed" });
+  expect(ran).toEqual([]);
+  c.openLogin(a, cx);
+  await settle();
+  expect(ran).toContainEqual(["open", ["-a", "Google Chrome", "https://example.invalid"]]);
+
+  ran.length = 0;
+  c.addr = "t8";
+  c.openLogin(a, cx);
+  await settle();
+  expect(ran).toEqual([]);
+});
+
+test("the legacy Browser action points its panel at exactly the worker on the card", async () => {
+  loginWorker = true;
+  try {
+    shared.clear(); ran.length = 0; pending = [];
+    const c: any = Object.create(Chat.prototype);
+    Object.assign(c, { addr: "t7", machine: null, askDir: "/fixture" });
+    const req = { tool_name: "HerdrLogin", owner: { created: 70, task: "shop#4" }, tool_input: { kind: "browser" } };
+    c.openLogin({ id: `t8.login.${Math.floor(Date.now() / 1000)}.42`, terminal: "t8", ref: "SHOP-4", req, words: words(req) }, cx);
+    await settle();
+    expect(shared.get("tasks.thread")).toMatchObject({ terminal: "t8", task: "SHOP-4" });
+    expect(ran).toContainEqual(["layout.select", { stack: "tasks-thread-body", child: "tasks-thread-browser" }]);
+  } finally { loginWorker = false; }
 });

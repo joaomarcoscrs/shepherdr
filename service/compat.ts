@@ -16,7 +16,7 @@ const { senderName, briefLabel, firstUser, firstKeys, newsTimeline, resolveArtif
 import { mentionedIn } from "../core/send.js";
 import * as MEc from "../core/mentions.js";
 import * as SCc from "../core/screens.js";
-import { codexChoice, ALWAYS_CHOICE } from "../core/asks.js";
+import { codexChoice, ALWAYS_CHOICE, LOGIN_CHOICES } from "../core/asks.js";
 const { SCREEN } = SCc as any;
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -261,9 +261,22 @@ export class Compat {
   /** Open hook asks (service/asks.ts), set by main: they show as cards in their chat and in Needs you. */
   asks: { of(terminal: string): any[]; open: Map<string, any> } | null = null;
 
+  authQuestion(t: any, key: string): Question | undefined {
+    if (t?.state !== "live" || t.status?.state !== "blocked" || t.status?.kind !== "auth") return;
+    return { id: `auth:${t.address}`, title: "Signed out", kind: "Question", to: key,
+      login: { kind: "terminal", detail: "Sign in in the terminal, then follow the CLI’s instructions." }, choices: [] };
+  }
+
   /** A hook ask as 2.1's question card (core/asks.js words: a permission, a plan, or a question). */
   question(a: any, key: string): Question {
     const w = a.words;
+    if (w.kind === "login") {
+      const unavailable = w.login?.kind === "browser" && a.machine
+        ? "Open this task’s Browser in Herdr on " + a.machine + "." : undefined;
+      return { id: a.id, title: w.title, kind: "Question", to: key, noNote: true,
+        login: { ...w.login, detail: unavailable ?? w.detail, ...(unavailable ? { unavailable: true } : {}) },
+        choices: LOGIN_CHOICES.map((label) => ({ label })) };
+    }
     if (w.kind === "questions") {
       const q = w.questions[0];
       const choices = (x: any) => x.options.map((o: any) => ({ label: o.name, ...(o.description ? { description: o.description } : {}), ...(o.recommended ? { recommended: true } : {}), ...(o.preview ? { preview: o.preview } : {}) }));
@@ -432,7 +445,7 @@ export class Compat {
       const key = keyOf.get(a.terminal);
       if (!key) continue;
       const task = key.endsWith("/worker") ? key.slice(0, -7) : undefined;
-      const place = task ? tasks.find((x) => x.id === task)?.place ?? "" : places.find((p) => p.chat === key)?.id ?? "";
+      const place = task ? tasks.find((x) => x.id === task)?.place ?? "" : places.find((p) => p.chat === key || p.tabs?.some((t) => t.term === key))?.id ?? "";
       needs.push({ id: a.id, chat: key, place, ...(task ? { task } : {}), at: a.at, question: this.question(a, key) });
     }
 
@@ -440,7 +453,7 @@ export class Compat {
       const key = keyOf.get(a.address);
       if (!key) continue;
       const task = key.endsWith("/worker") ? key.slice(0, -7) : undefined;
-      const place = task ? tasks.find((x) => x.id === task)?.place ?? "" : places.find((p) => p.chat === key)?.id ?? "";
+      const place = task ? tasks.find((x) => x.id === task)?.place ?? "" : places.find((p) => p.chat === key || p.tabs?.some((t) => t.term === key))?.id ?? "";
       needs.push({ id: `secret:${a.address}:${a.name}`, chat: key, place, ...(task ? { task } : {}), at: Date.now(), secret: this.secretAsk(a) });
     }
 
@@ -449,6 +462,17 @@ export class Compat {
     const carded = new Set(needs.filter((x) => x.id !== "attention").map((x) => x.chat));
     for (let i = needs.length - 1; i >= 0; i--) if (needs[i].id === "attention" && carded.has(needs[i].chat)) needs.splice(i, 1);
 
+    for (const [key, address] of chats) {
+      const q = this.authQuestion((this as any).terminalsOf?.(address), key);
+      if (!q || carded.has(key)) continue;
+      const task = key.endsWith("/worker") ? key.slice(0, -7) : undefined;
+      const place = task ? tasks.find((t) => t.id === task)?.place : places.find((p) => p.chat === key || p.tabs?.some((t) => t.term === key))?.id;
+      if (place === undefined) continue;
+      const i = needs.findIndex((n) => n.id === "attention" && n.chat === key);
+      const need = { id: q.id, chat: key, place, ...(task ? { task } : {}), at: Date.now(), question: q };
+      if (i >= 0) needs[i] = { ...need, at: needs[i].at };
+      else needs.push(need);
+    }
     const pinned = spaces.filter((s) => s.pinned).map((s) => s.id);
     const sections: Section[] = [
       ...(pinned.length ? [{ id: "pinned", name: "Pinned", spaces: pinned }] : []),
@@ -658,7 +682,10 @@ export class Compat {
       if (!s && q.images) messages.push({ id: `${q.id}:n`, images: q.images, ...mark } as Message);
     }
     // what the agent asks now, as cards at the end of its chat
-    for (const a of addr && !nativeCursor ? this.asks?.of(addr) ?? [] : []) messages.push({ id: `ask:${a.id}`, who: "agent", at: a.at, question: this.question(a, key) });
+    const ownedAsks = (addr ? this.asks?.of(addr) ?? [] : []).filter((a) => !nativeCursor || a.words.kind === "login");
+    for (const a of ownedAsks) messages.push({ id: `ask:${a.id}`, who: "agent", at: a.at, question: this.question(a, key) });
+    const auth = ownedAsks.length ? undefined : this.authQuestion(t, key);
+    if (auth) messages.push({ id: auth.id, who: "agent", at: t.status_ms ?? Date.now(), question: auth });
     if (codexCard) messages.push({ id: `ask:cq:${codexCard.id}`, who: "agent", at: codexCard.at ?? Date.now(), question: codexQuestion(codexCard, key) });
     for (const a of (this.secrets?.asks() ?? []).filter((x) => x.address === addr)) messages.push({ id: `secret:${a.address}:${a.name}`, who: "agent", at: Date.now(), secret: this.secretAsk(a) } as Message);
     // asks that closed, as the window's quiet lines ("✓ Run: npm test · Allowed in the chat"); a question's own line is
@@ -679,8 +706,8 @@ export class Compat {
     if (space) for (const r of spaceRows.filter((r) => r.worker)) {
       const by = { ref: r.ref, title: r.title, chat: `${taskId(r)}/worker` };
       const nativeWorker = nativeCursorTerminal(term(r.worker));
-      const a = nativeWorker ? null : (this.asks?.of(r.worker) ?? []).sort((p: any, q: any) => p.at - q.at)[0];
-      if (a) messages.push({ id: `ask:${a.id}`, who: "agent", at: a.at, question: { ...this.question(a, key), by } as any });
+      const a = (this.asks?.of(r.worker) ?? []).filter((a) => !nativeWorker || a.words.kind === "login").sort((p: any, q: any) => p.at - q.at)[0];
+      if (a) messages.push({ id: `ask:${a.id}`, who: "agent", at: a.at, question: { ...this.question(a, a.words.kind === "login" ? by.chat : key), by } });
       else for (const s of (this.secrets?.asks() ?? []).filter((x) => x.address === r.worker)) messages.push({ id: `secret:${s.address}:${s.name}`, who: "agent", at: Date.now(), secret: { ...this.secretAsk(s), by } } as Message);
       for (const e of (this.asks as any)?.endsOf?.(r.worker) ?? []) messages.push(quiet(`ae:${e.id}`, e.at, `${r.ref} · ${e.title} · ${e.how}`));
       if (!nativeWorker) screens(r.worker, r.ref, by);

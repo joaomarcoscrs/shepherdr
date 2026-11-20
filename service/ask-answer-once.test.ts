@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { fakeHerdr } from "./fake-herdr";
 
 mock.module("herdr", () => fakeHerdr({}));
-const { ANSWER_ONCE, askId } = await import("../lib/answers.js");
+const { ANSWER_ONCE, askId } = await import("../mods/chat/answers.js");
 
 const hook = Bun.spawn(["sleep", "60"]);
 afterAll(() => hook.kill());

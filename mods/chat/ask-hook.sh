@@ -58,7 +58,16 @@ ended() { printf '%s\n' "$1" > "$end.tmp" 2>/dev/null && mv "$end.tmp" "$end" 2>
 # Claude stops the hook itself when its prompt is refused or interrupted in the terminal.
 trap 'ended "$(how declined)"' TERM INT HUP
 mkdir -p "$d/req" "$d/ans" "$d/end" 2>/dev/null || exit 0
-cat > "$req.tmp" 2>/dev/null || done_
+raw=$(cat) || done_
+# A sign-in Ask is allowed without a separate prompt. Invalid invocations are refused in memory:
+# even a redirect mistakenly passed by the agent should never land in the request files.
+if [ -z "$HERDR_ASK_CHAINED" ] && case "$raw" in *ask-login*) true ;; *) false ;; esac; then
+  task=$(command -v herdr-task 2>/dev/null) || task="$HOME/.local/bin/herdr-task"
+  ok=$([ -x "$task" ] && printf '%s' "$raw" | "$task" _login-allow 2>/dev/null) || ok=
+  [ -z "$ok" ] || { printf '%s\n' "$ok"; done_; }
+fi
+printf '%s' "$raw" > "$req.tmp" 2>/dev/null || done_
+unset raw
 # SHEP-1: a picture the person shared in a chat (a screenshot a message or a brief names) is read without asking, by
 # any agent: herdr-task decides it (shared.py); a task worker's own hook already asked it (chained).
 if [ -z "${HERDR_ASK_CHAINED:-}" ] && grep -q '"tool_name" *: *"Read"' "$req.tmp" 2>/dev/null; then

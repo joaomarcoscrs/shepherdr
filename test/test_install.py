@@ -63,6 +63,26 @@ class Install(unittest.TestCase):
     def p(self, *rel):
         return os.path.join(self.root, *rel)
 
+    def test_cursor_login_rule_preserves_the_users_permissions(self):
+        os.makedirs(self.p(".cursor"))
+        config = self.p(".cursor", "cli-config.json")
+        original = {"version": 1, "permissions": {"allow": ["Shell(ls)", "Shell(herdr-task:ask-login --terminal)"],
+                                                  "deny": ["Shell(rm)"]}}
+        with open(config, "w") as f:
+            json.dump(original, f)
+        run("install", "--root", self.root, "--yes")
+        with open(config) as f:
+            got = json.load(f)
+        self.assertIn("Shell(herdr-task:ask-login --site http*)", got["permissions"]["allow"])
+        self.assertNotIn("Shell(herdr-task)", got["permissions"]["allow"])
+        self.assertEqual(got["permissions"]["deny"], original["permissions"]["deny"])
+        run("install", "--root", self.root, "--yes")
+        with open(config) as f:
+            self.assertEqual(json.load(f), got)
+        run("uninstall", "--root", self.root)
+        with open(config) as f:
+            self.assertEqual(json.load(f), original)
+
     def test_install_again_update_uninstall(self):
         os.makedirs(self.p(".codex"))
         out = run("install", "--root", self.root, "--yes").stdout

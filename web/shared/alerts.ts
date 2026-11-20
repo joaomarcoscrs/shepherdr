@@ -60,6 +60,7 @@ export const sendsOnTap = (q: Question) => q.kind !== 'Plan' && !q.multi && q.no
  *  for good, never a terminal menu (its first choices all say yes, and an old alert's button would press keys in whatever menu is up then);
  *  two at most */
 export function quickChoices(q: Question): { label: string; choice: number }[] {
+  if (q.login) return []
   if (q.multi || q.id.startsWith('menu:')) return []
   return q.choices
     .map((c, i) => ({ label: short(q, i), choice: i }))
@@ -161,10 +162,11 @@ export function notifies(snap: Pick<Snapshot, 'settings'>, a: Pick<Alert, 'go' |
 }
 
 /** where a tap on an alert opens: the place, the task and the card to bring into view */
-export function alertUrl(go: Alert['go']) {
+export function alertUrl(go: Alert['go'], tabChat?: string) {
   const q = new URLSearchParams({ place: go.place })
   if (go.task) q.set('task', go.task)
   if (go.focus) q.set('focus', go.focus)
+  if (tabChat?.startsWith('t:')) q.set('chat', tabChat)
   return `./?${q}`
 }
 

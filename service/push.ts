@@ -22,7 +22,7 @@ export function alertsOf(snap: any, woke: Set<string> = new Set()): Map<string, 
   const who = (n: any) => n.task ? taskWho(snap, n.task) : T.assistantWho(snap.places?.find((p: any) => p.id === n.place)?.name);
   for (const n of snap.needs ?? []) {
     if (snap.settings && !notifies(snap, { go: { place: n.place }, task: n.task ? true : undefined })) continue;
-    now.set(`need:${n.chat}:${n.id}`, { title: T.toastTitle(who(n), T.NEEDS_YOU), body: T.needReason(n), tag: n.task ?? n.chat, topic: "needs", place: n.place, waits: true });
+    now.set(`need:${n.chat}:${n.id}`, { title: T.toastTitle(who(n), T.NEEDS_YOU), body: T.needReason(n), tag: n.task ?? n.chat, topic: "needs", place: n.place, waits: true, ...(n.question?.login ? { url: alertUrl({ place: n.place, task: n.task, focus: n.question.id }, n.chat) } : {}) });
   }
   for (const t of snap.tasks ?? []) if (t.status === "ready" && !t.archived)
     now.set(`ready:${t.id}`, { title: T.toastTitle(taskWho(snap, t.id), T.FINISHED), body: t.name, tag: t.id, topic: "ready", place: t.place, url: `./#accept=${encodeURIComponent(t.id)}` });

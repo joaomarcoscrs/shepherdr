@@ -11,7 +11,7 @@
 
 import { div } from "gpui-kit";
 import { InputState } from "gpui-base";
-import { allow, allowAlways, deny, answer, answers, annotationsOf, chatAbout, dismiss, release } from "./core/asks.js";
+import { allow, allowAlways, deny, answer, answers, annotationsOf, chatAbout, dismiss, release, LOGIN_CHOICES, loginAnswer } from "./core/asks.js";
 
 // A card's first strip. opts: { who ("Claude", "HERD-12"), asks (false: what follows `who`
 // instead, e.g. "Kept"), dot (its color; default red), links ([ctl] at the right) }.
@@ -44,6 +44,17 @@ export class AskCards {
     const w = ask.words;
     if (w.kind === "questions" && w.questions.length) return this.questions(ask, opts);
     const id = ask.id;
+    if (w.kind === "login") {
+      const open = { site: "Open in Chrome", browser: "Open task browser", terminal: "Open session" }[w.login?.kind];
+      return [
+        headStrip({ who: opts.who, links: [...(opts.links ?? []), ...(open ? [linkCtl(`login-open-${id}`, open, (cx) => this.host.openLogin(ask, cx))] : [])] }),
+        { key: "title", kind: "title", text: w.title },
+        { key: "detail", kind: "text", tone: "dim", text: w.detail },
+        { key: "actions", kind: "controls", align: "start", ctls: LOGIN_CHOICES.map((label, i) => ({
+          id: `login-${i}-${id}`, label, look: i === 0 ? "primary" : "secondary", fn: (cx) => this.host.reply(ask, loginAnswer(i === 0), cx),
+        })) },
+      ];
+    }
     const long = Boolean(w.detail) && longDetail(w.detail);
     const open = this.open.has(id);
     const links = [...(opts.links ?? []),
@@ -87,7 +98,7 @@ export class AskCards {
 
   dismiss(ask, cx) {
     this.drop(ask);
-    this.host.reply(ask, dismiss(ask.words.kind), cx);
+    this.host.reply(ask, ask.words.kind === "login" ? loginAnswer(false) : dismiss(ask.words.kind), cx);
   }
 
   // ---- questions (AskUserQuestion) ----------------------------------------------------------

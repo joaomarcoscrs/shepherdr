@@ -226,7 +226,8 @@ export async function act(hub: Hub, b: any, compat: Compat): Promise<unknown> {
   };
   if (b?.type === "answer" && b.terminal !== true && typeof b.chat === "string") {
     const a = compat.addrOf(b.chat);
-    if (a && terminalOnly(hub, compat, a)) throw new Error(WORDS.cursorTerminal);
+    const login = compat.asks?.open?.get(b.question)?.words?.kind === "login";
+    if (a && !login && terminalOnly(hub, compat, a)) throw new Error(WORDS.cursorTerminal);
   }
   if (b?.type === "answer" && typeof b.question === "string" && b.question.startsWith("scr-")) {
     // a CLI's start screen (service/watch.ts): a tap presses that choice, only on the screen the card was drawn from;
@@ -251,7 +252,7 @@ export async function act(hub: Hub, b: any, compat: Compat): Promise<unknown> {
       choices: Array.isArray(b.choices) ? b.choices.filter((n: unknown) => typeof n === "number") : undefined,
       note: typeof b.note === "string" ? b.note.slice(0, 4000) : undefined, other: typeof b.other === "string" ? b.other.slice(0, 4000) : undefined,
       answers: Array.isArray(b.answers) ? b.answers.slice(0, 20).map((x: unknown) => String(x ?? "").slice(0, 4000)) : undefined,
-      terminal: b.terminal === true, talk: b.talk === true, dismiss: b.dismiss === true });
+      terminal: b.terminal === true, talk: b.talk === true, dismiss: b.dismiss === true }, compat.addrOf(b.chat) ?? undefined);
     return { ok: true };
   }
   if (b?.type === "react" && typeof b.chat === "string" && typeof b.message === "string" && typeof b.emoji === "string" && b.emoji.length <= 16) {

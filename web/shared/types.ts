@@ -483,6 +483,8 @@ export interface Question {
   /** CLI prompt context, read from its visible screen. */
   screen?: string
   terminal?: boolean
+  /** An explicit sign-in handoff or a provider waiting on its terminal. */
+  login?: { kind: "site" | "browser" | "terminal"; origin?: string; detail: string; unavailable?: boolean }
   /** A CLI's own menu: a tap presses that choice at once. */
   press?: boolean
   /** a task worker's ask in its Assistant's chat (3.0's): headed by its task, "Open chat" goes to its own chat */

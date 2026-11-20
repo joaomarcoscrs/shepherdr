@@ -843,7 +843,7 @@ export default class Tasks extends View {
   // Reads what each ask asks, once (the hook's request file; the chat shows the same card).
   readAsks(list, cx) {
     for (const it of list) {
-      if (it.kind !== "ask" || this.asks.has(it.id) || this.reading.has(it.id)) continue;
+      if (it.kind !== "ask" || it.why || this.asks.has(it.id) || this.reading.has(it.id)) continue;
       this.reading.add(it.id);
       cx.spawn(async (cx) => {
         const text = await readTextFile(`${ASKS()}/req/${it.id}.json`).catch(() => null);

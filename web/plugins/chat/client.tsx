@@ -1378,6 +1378,8 @@ export function CardShell({ title, plan, icon, action, source, head, children }:
  *  the CLI asks in its terminal, which then shows) and "Dismiss" (or Esc on the card: closed without an answer, as Esc
  *  in the CLI's prompt; the agent hears it was declined and carries on). A CLI's start screen has no Dismiss. */
 function askHead(q: Question, chat: Chat) {
+  if (q.login) return { who: q.by?.ref ?? (chat.cli === 'cursor' ? 'Cursor' : chat.cli === 'codex' ? 'Codex' : 'Claude'),
+    links: q.by ? [{ label: 'Open chat', fn: () => goChat(q.to) }] : [] }
   const dismiss = q.press ? undefined : () => void act({ type: 'answer', chat: chat.key, question: q.id, dismiss: true } as never).catch(() => undefined)
   const last = dismiss ? [{ label: 'Dismiss', fn: dismiss }] : []
   // a task worker's, in its Assistant's chat: headed by its task, its own chat a link (no terminal link)
@@ -1409,7 +1411,11 @@ function answeredHow(q: Question) {
 
 /** a task's terminal is in its panel, a space's in its chat */
 function openTerminal(key: string) {
-  if (!key.includes('/')) return setUI({ term: key, arts: null, kb: true })
+  if (key.startsWith('t:')) {
+    goChat(key)
+    return setUI((ui) => ({ tabView: { ...ui.tabView, [key]: 'terminal' } }))
+  }
+  if (!key.includes('/')) { goChat(key); return setUI({ term: key, arts: null, kb: true }) }
   goChat(key)
   openItem('terminal')
 }
@@ -1592,7 +1598,7 @@ function OneQuestionCard({ q, chat, msg, from, source, steady }: { q: Question; 
     setErr('')
     let accepted = false
     try {
-      const r = await act({ type: 'answer', chat: chat.key, question: q.id, choice: reject ? -1 : choice, choices: q.multi ? (reject ? [] : sel) : undefined, note: note.trim() || undefined, other: other.trim() || undefined })
+      const r = await act({ type: 'answer', chat: q.login ? q.to : chat.key, question: q.id, choice: reject ? -1 : choice, choices: q.multi ? (reject ? [] : sel) : undefined, note: note.trim() || undefined, other: other.trim() || undefined })
       if (r?.ok === false) setErr(r.error ?? "That didn't go through.")
       else {
         accepted = true
@@ -1612,8 +1618,17 @@ function OneQuestionCard({ q, chat, msg, from, source, steady }: { q: Question; 
   useEffect(() => {
     if (composing) noteRef.current?.focus()
   }, [composing])
+  const login = q.login
+  const browser = login?.kind === 'browser' && !login.unavailable && has('browser') && taskChatId(q.to)
   return (
     <CardShell title={q.title} plan={q.kind === 'Plan'} source={source} head={sent ? undefined : askHead(q, chat)}>
+      {login && !sent ? <div className="flex flex-col gap-2 break-words text-sm text-fg2">
+        <p>{login.detail}</p>
+        {login.kind === 'site' && login.origin ? <a href={login.origin} target="_blank" rel="noreferrer" className="self-start text-accent hover:underline">Open site</a> : null}
+        {browser ? <button type="button" className="self-start text-accent hover:underline" onClick={() => { goChat(q.to); openItem('browser') }}>Open task browser</button> : null}
+        {login.kind === 'browser' && !browser && !login.unavailable ? <p>Open this task’s Browser in the Herdr window.</p> : null}
+        {login.kind === 'terminal' && has('terminal') ? <button type="button" className="self-start text-accent hover:underline" onClick={() => openTerminal(q.to)}>Open session</button> : null}
+      </div> : null}
       {q.screen ? <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs text-fg2">{q.press ? q.screen.split(/(https?:\/\/\S+)/).map((part, j) => j % 2 ? <a key={j} href={part} target="_blank" rel="noreferrer" className="text-accent">{part}</a> : part) : q.screen}</pre> : null}
       {q.terminal && !sent && has('terminal') ? <button type="button" className="text-left text-accent" onClick={() => openTerminal(chat.key)}>{WORDS.openTerminal}</button> : null}
       {q.evidence ? <Evidence e={q.evidence} open={!sent} /> : null}
@@ -2885,6 +2900,7 @@ function StickToBottom({ chatKey, children }: { chatKey: string; children: React
 function placeholderOf(chatKey: string, chat: Chat | undefined, fallback: string) {
   // a card asks, or the agent asks in its terminal: words written here answer it
   // (Cursor's chat bridge: words wait until it is answered instead, SHEP-17)
+  if (chat?.messages.some((m) => m.question?.login && m.question.choices.length && m.question.sent === undefined && !m.question.closed)) return 'Confirm or cancel sign-in above'
   if (chat?.blocked !== undefined || chat?.messages.some((m) => m.question && m.question.sent === undefined && !m.question.closed)) return chat?.cli === 'cursor' ? WORDS.waitsForAnswer : WORDS.replyInstead
   if (chatKey.startsWith('p:')) return 'Message the Assistant'
   const task = taskChatId(chatKey)

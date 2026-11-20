@@ -9,23 +9,12 @@
 // Edit lib/answers.js, never a mod's copy, then run bin/sync-shared.
 
 import { exec, appHome } from "herdr";
+import { ANSWER_ONCE, LOGIN_WAITING_SH } from "./core/asks.js";
+export { ANSWER_ONCE };
 
 export const ASKS_DIR = () => `${appHome()}/data/chat-asks`;
 // A request's id as the hook and the bridge make it: never a path.
 export const askId = (id) => typeof id === "string" && /^[\w.-]+$/.test(id) && !id.includes("..") && id.split(".").length >= 3;
-
-// $1 the folder, $2 the id, $3 how it went ("" for none), $4 the answer ("" is no decision: the terminal asks).
-// Exit 0 sent, 3 no longer waiting, 4 answered already, 5 couldn't write.
-export const ANSWER_ONCE = `d=$1; id=$2; req="$d/req/$id.json"; ans="$d/ans/$id.json"
-[ -f "$req" ] || exit 3
-kill -0 "\${id##*.}" 2>/dev/null || exit 3
-[ -e "$ans" ] && exit 4
-mkdir -p "$d/ans" "$d/end" || exit 5
-tmp="$d/ans/.$id.$$.tmp"
-printf '%s' "$4" > "$tmp" || { rm -f "$tmp"; exit 5; }
-if ln "$tmp" "$ans" 2>/dev/null; then rm -f "$tmp"; else rm -f "$tmp"; exit 4; fi
-[ -z "$3" ] || { printf '%s\\n' "$3" > "$d/end/$id.tmp" && mv "$d/end/$id.tmp" "$d/end/$id"; }
-exit 0`;
 
 // -> "sent" | "gone" (no longer waiting) | "taken" (answered already) | "failed".
 export async function answerOnce(id, text, how, dir = ASKS_DIR()) {
@@ -41,7 +30,8 @@ export const answerAsk = (dir, id, text, how) => answerOnce(id, text, how, dir);
 export async function stillWaiting(ids, dir = ASKS_DIR()) {
   const ok = ids.filter(askId);
   if (!ok.length) return new Set();
-  const r = await exec("sh", ["-c", 'd=$1; shift; for id; do [ -f "$d/req/$id.json" ] && [ ! -e "$d/ans/$id.json" ] && kill -0 "${id##*.}" 2>/dev/null && echo "$id"; done; true', "x", dir, ...ok]).catch(() => null);
+  const r = await exec("sh", ["-c", `${LOGIN_WAITING_SH}
+d=$1; shift; for id; do [ -f "$d/req/$id.json" ] && [ ! -e "$d/ans/$id.json" ] && kill -0 "\${id##*.}" 2>/dev/null && login_waiting "$id" && echo "$id"; done; true`, "x", dir, ...ok]).catch(() => null);
   if (!r || r.code !== 0) return null;
   return new Set(String(r.stdout ?? "").split("\n").filter(Boolean));
 }

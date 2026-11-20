@@ -601,6 +601,8 @@ def ask_reason(task, address, req=None, kind=None, msg=None):
                 done.add(p.get("call_id"))
         if pending and pending.get("id") not in done:
             tool, value = pending.get("name"), pending.get("input") if isinstance(pending.get("input"), dict) else {}
+    if tool == "HerdrLogin":
+        return "Sign-in needed"
     if tool == "ExitPlanMode":
         return REASONS["plan"]
     if tool in ("AskUserQuestion", "request_user_input"):
@@ -625,7 +627,9 @@ HELD_MAX_MS = 31 * 60_000
 
 def held_ask(address):
     """The ask Herdr's chat hook holds for this terminal (mods/chat/ask-hook.sh), or None."""
-    d = os.path.join(HOME, ".config", "herdr-app", "data", "chat-asks", "req")
+    from .login import ask_dir
+    root = ask_dir()
+    d = root / "req"
     try:
         names = sorted(n for n in os.listdir(d) if n.startswith(address + ".") and n.endswith(".json"))
     except OSError:
@@ -635,6 +639,13 @@ def held_ask(address):
             p = os.path.join(d, n)
             if now() - os.path.getmtime(p) * 1000 > HELD_MAX_MS:
                 continue
+            if ".login." in n:
+                if (root / "ans" / n).exists():
+                    continue
+                pid = int(n.removesuffix(".json").rsplit(".", 1)[1])
+                if pid <= 0:
+                    continue
+                os.kill(pid, 0)
             with open(p) as f:
                 return json.load(f)
         except (OSError, ValueError):

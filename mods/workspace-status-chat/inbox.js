@@ -33,10 +33,11 @@
 // Edit lib/inbox.js, never a mod's copy, then run bin/sync-shared.
 
 import { LINE_MAX, REASONS, fit, reqReason, reportReason } from "./core/needs.js";
+import { loginId, liveLoginId, ownsLogin, LOGIN_WAITING_SH } from "./core/asks.js";
 import { SH } from "./core/paths.js";
 import { dirsReady } from "./dirs.js";
 import { notifies, spaceOfTerminal } from "./notify.js";
-import { toast, toastWho as whoOf } from "./ui.js";
+import { toast, toastUp, toastWho as whoOf } from "./ui.js";
 import { exec, appHome, home, focused, shared, setShared, watchFolder, readTextFile, writeTextFile, playSound, settings, run, layout } from "herdr";
 import { terminals, agents, panes, spaces } from "./live.js";
 import { chatPane } from "./core/spaces.js";
@@ -114,25 +115,63 @@ async function flags() {
 
 // The waiting requests (<terminal>.<time>.<hook pid>.json): one whose hook is gone is dropped.
 async function readAsks() {
-  const r = await exec("sh", ["-c", 'cd "$1/req" 2>/dev/null || exit 0; for f in *.json; do [ -f "$f" ] || continue; p=${f%.json}; p=${p##*.}; if kill -0 "$p" 2>/dev/null; then echo "$f"; else rm -f "$f"; fi; done; true', "x", ASKS()]);
+  const all = terminals();
+  const r = await exec("sh", ["-c", `${LOGIN_WAITING_SH}
+cd "$1/req" 2>/dev/null || exit 0
+for f in *.json; do
+  [ -f "$f" ] || continue
+  id=\${f%.json}; p=\${id##*.}
+  if kill -0 "$p" 2>/dev/null; then
+    case "$id" in *.login.*.*) login_waiting "$id" && [ ! -f "../ans/$f" ] || continue ;; esac
+    echo "$f"
+  else rm -f "$f"
+  fi
+done; true`, "x", ASKS()]);
   const ids = r.stdout.split("\n").filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5)).sort();
-  const asks = ids.map((id) => ({ id, terminal: id.split(".")[0] }));
+  const asks = (await Promise.all(ids.map(async (id) => {
+    const terminal = id.split(".")[0];
+    if (!loginId(id)) return { id, terminal };
+    const owner = all.find((k) => k.address === terminal);
+    const req = await readLogin(id);
+    return ownsLogin(req, owner, id) ? { id, terminal, why: reqReason(req) } : null;
+  }))).filter(Boolean);
+  const candidates = all.filter((k) => k.address.includes("/") && k.state === "live" && liveLoginId(k.labels?.["herdr.login.ask"]));
+  const remote = await Promise.all(candidates.map(async (k) => {
+    const id = k.labels["herdr.login.ask"], machine = k.address.split("/")[0];
+    const req = await readLogin(id, machine);
+    return ownsLogin(req, k, id) ? { id, terminal: k.address, machine, why: reqReason(req) } : null;
+  }));
+  asks.push(...remote.filter(Boolean));
   // Codex's (it waits on the hook) that came on screen as a terminal goes back to it; Claude's
   // terminal shows its prompt anyway, and releasing it would close its card on the web too.
-  const shown = asks.filter((a) => onScreen(a.terminal));
+  const shown = asks.filter((a) => !loginId(a.id) && onScreen(a.terminal));
   if (shown.length) {
     const r = await exec("sh", ["-c", 'cd "$1/req" && shift && for i; do grep -q \'"turn_id"\' "$i.json" 2>/dev/null && echo "$i"; done; true', "x", ASKS(), ...shown.map((a) => a.id)]).catch(() => null);
     for (const id of (r?.stdout ?? "").split("\n").filter(Boolean)) await release(id);
   }
-  const left = asks.filter((a) => !onScreen(a.terminal));
+  const left = asks.filter((a) => loginId(a.id) || !onScreen(a.terminal));
   // A few seconds in, an ask Herdr shows no agent waiting for gets its own alert.
   const now = Date.now();
   for (const a of left) {
-    if (!seenAt.has(a.id)) seenAt.set(a.id, now);
-    else if (now - seenAt.get(a.id) >= 3000 && !alerted.has(a.id)) { alerted.add(a.id); alert(a).catch(() => {}); }
+    const key = askKey(a);
+    if (!seenAt.has(key)) seenAt.set(key, now);
+    else if (now - seenAt.get(key) >= 3000 && !alerted.has(key)) { alerted.add(key); alert(a).catch(() => {}); }
   }
-  for (const id of seenAt.keys()) if (!left.some((a) => a.id === id)) { seenAt.delete(id); alerted.delete(id); }
+  for (const id of seenAt.keys()) if (!left.some((a) => askKey(a) === id)) { seenAt.delete(id); alerted.delete(id); }
   put("inbox.asks", left);
+}
+
+const askKey = (a) => a.machine ? `${a.machine}/${a.id}` : a.id;
+
+async function readLogin(id, machine) {
+  try {
+    if (!machine) return JSON.parse(await readTextFile(`${ASKS()}/req/${id}.json`) ?? "");
+    const sh = `${LOGIN_WAITING_SH}
+d="\${HERDR_APP_HOME:-$HOME/.config/herdr-app}/data/chat-asks"
+login_waiting "$1" && [ ! -e "$d/ans/$1.json" ] && cat "$d/req/$1.json"`;
+    const r = await exec("hc", ["exec", "--on", machine, "--timeout", "3", "sh", "-c", sh, "x", id]);
+    return r.code === 0 ? JSON.parse(r.stdout) : null;
+  } catch { return null; }
 }
 
 // No decision: Claude asks in its terminal.
@@ -142,17 +181,20 @@ const release = (id) => writeTextFile(`${ASKS()}/ans/${id}.json`, "", null).catc
 // already gave them (the agent shows as blocked). An open chat alerts by itself. It says why, as
 // the Tasks row does.
 async function alert(a) {
-  if (chatOf(a.terminal) || threadShown(a.terminal) || terminals().find((k) => k.address === a.terminal)?.status === "blocked") return;
+  const login = loginId(a.id);
+  if (login) {
+    if ((chatOf(a.terminal) && chatOf(a.terminal) === focused()?.pane) || threadShown(a.terminal) || toastUp(`ask:${askKey(a)}`)) return;
+  } else if (chatOf(a.terminal) || threadShown(a.terminal) || terminals().find((k) => k.address === a.terminal)?.status === "blocked") return;
   // An Assistant whose space's Notify is Off stays quiet.
   if (!notifies(terminals().find((k) => k.address === a.terminal), "need")) return;
   let req = null;
-  try { req = JSON.parse(await readTextFile(`${ASKS()}/req/${a.id}.json`) ?? ""); } catch {}
+  if (!a.why) try { req = JSON.parse(await readTextFile(`${ASKS()}/req/${a.id}.json`) ?? ""); } catch {}
   if (settings()?.sounds?.enabled !== false) playSound("blocked");
   const k = terminals().find((x) => x.address === a.terminal);
   // Its own toast (key "ask:<id>", the request's id only: mods/toasts offers its card's choices when they fit), in
   // place of its agent's Needs you if that came first; a click elsewhere on it goes to the agent's card.
-  toast({ title: `${whoOf(k)} · Needs you`, body: req ? reqReason(req) : REASONS.question, level: "alert",
-    key: `ask:${a.id}`, covers: [`need:${a.terminal}`], terminal: a.terminal, ask: { id: a.id },
+  toast({ title: `${whoOf(k)} · Needs you`, body: a.why ?? (req ? reqReason(req) : REASONS.question), level: "alert",
+    key: `ask:${askKey(a)}`, covers: [`need:${a.terminal}`], terminal: a.terminal, ask: { id: a.id, ...(a.machine ? { machine: a.machine } : {}) },
     action: { name: `tabs-tasks.alert-${a.terminal.replace(/\//g, "~")}` } });
 }
 
@@ -303,7 +345,7 @@ async function json(cmd, args) {
 export function items() {
   const asks = shared("inbox.asks") ?? [];
   const asking = new Set(asks.map((a) => a.terminal));
-  const out = asks.map((a) => ({ key: `ask:${a.id}`, kind: "ask", id: a.id, terminal: a.terminal, at: Number(a.id.split(".")[1]) * 1000 || 0 }));
+  const out = asks.map((a) => ({ key: `ask:${askKey(a)}`, kind: "ask", id: a.id, terminal: a.terminal, why: a.why, at: Number(a.id.split(".").at(-2)) * 1000 || 0 }));
   const all = terminals();
   forgetUnblocked(all);
   for (const k of all)

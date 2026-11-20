@@ -401,6 +401,8 @@ function saveSide(side: UI['side']) {
 }
 
 const params = new URLSearchParams(location.search)
+const tabChatOf = (q: URLSearchParams) => /^t:[\w./-]+$/.test(q.get('chat') ?? '') ? q.get('chat') : null
+const tabChatParam = tabChatOf(params)
 // a reload for a new build draws at once what it showed: the last snapshot and the chats on screen, until the server's
 const { text: keptText, snap: keptSnap, chats: keptChats, ...keptUI } = kept()
 let state: State = {
@@ -424,7 +426,8 @@ let state: State = {
     photo: null,
     search: false,
     adding: false,
-    term: null,
+    term: tabChatParam,
+    ...(tabChatParam ? { tabView: { [tabChatParam]: 'chat' as const } } : {}),
     arts: null,
     sheet: params.get('task') && deviceFor(innerWidth) !== 'desktop' ? itemOfUrl(params.get('item')) : null,
     taskMenu: false,
@@ -670,7 +673,9 @@ export function openLink(href: string) {
   const closed = { settings: null, drawer: false, search: false, adding: false, menu: false, pick: null, pickAll: false, viewer: null, photo: null, cur: 0 }
   // a task elsewhere comes with its place as a step before it, so Back from it goes to its place
   if (task && (state.ui.place !== place || state.ui.task)) setUI({ ...closed, place, task: null, tab: 'chat' })
-  setUI({ ...closed, place, task, tab: 'chat', jump: q.get('focus') })
+  const tabChat = tabChatOf(q)
+  setUI((ui) => ({ ...closed, place, task, tab: 'chat', jump: q.get('focus'), term: tabChat,
+    ...(tabChat ? { tabView: { ...ui.tabView, [tabChat]: 'chat' } } : {}) }))
   forgetJump()
 }
 
@@ -1495,9 +1500,17 @@ export function chatPlace(snap: Snapshot, key: string): string | null {
 }
 
 export function goChat(key: string) {
+  if (key.startsWith('t:')) {
+    const place = state.snap?.places.find((p) => p.tabs?.some((t) => t.term === key))
+    if (place) {
+      goPlace(place.id)
+      setUI((ui) => ({ term: key, tabView: { ...ui.tabView, [key]: 'chat' } }))
+    }
+    return
+  }
   if (key.includes('/')) openTask(taskChatId(key)!)
   // a space's chat key (p:<id>) goes to its space (SHEP-51: it went to the home space)
-  else setUI({ place: state.snap?.places.find((p) => p.chat === key)?.id ?? key, task: null, tab: 'chat', drawer: false })
+  else setUI({ place: state.snap?.places.find((p) => p.chat === key)?.id ?? key, task: null, tab: 'chat', term: null, drawer: false })
 }
 
 export type Children = { children?: ReactNode }
