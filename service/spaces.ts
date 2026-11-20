@@ -8,7 +8,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { Hub } from "./hub.ts";
 import { HOME } from "./paths.ts";
-import { exec } from "./model.ts";
+import { codexAuto, exec } from "./model.ts";
 import * as NS from "../core/newspace.js";
 import * as SP from "../core/spaces.js";
 import { AGENT_PATH, cleanCommand } from "../core/clean-env.js";
@@ -82,7 +82,9 @@ export async function execTemplate(hub: Hub, name: string, machine: string | nul
   if (pick?.agent === "claude" || pick?.agent === "codex" || pick?.agent === "cursor") {
     // Cursor: its CLI as either name, and as an Assistant it runs behind its chat bridge (herdr-task cursor-chat, SHEP-6)
     const there = pick.agent === "cursor" ? (await has("cursor-agent")) || (await has("agent")) : await has(pick.agent);
-    if (there) cmd = argvFor(pick, { agent: null, argv: [] }, { chat: true }).argv.map(shellWord).join(" ");
+    if (there) cmd = argvFor(pick, { agent: null, argv: [] }, {
+      chat: true, codexAuto: pick.agent === "codex" && !!pick.perm && await codexAuto(hub, machine),
+    }).argv.map(shellWord).join(" ");
     else if (!(await has(own.split(/\s+/)[0]))) {
       throw new Error(`${(NAMES as Record<string, string>)[pick.agent] ?? pick.agent} isn't installed on ${machine ?? "this computer"}. Install it, or pick another agent for the Assistant in Settings › Agents.`);
     }

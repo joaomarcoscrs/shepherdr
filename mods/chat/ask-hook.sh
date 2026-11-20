@@ -58,7 +58,6 @@ ended() { printf '%s\n' "$1" > "$end.tmp" 2>/dev/null && mv "$end.tmp" "$end" 2>
 # Claude stops the hook itself when its prompt is refused or interrupted in the terminal.
 trap 'ended "$(how declined)"' TERM INT HUP
 mkdir -p "$d/req" "$d/ans" "$d/end" 2>/dev/null || exit 0
-find "$d/end" -type f -mmin +1440 -delete 2>/dev/null
 cat > "$req.tmp" 2>/dev/null || done_
 # SHEP-1: a picture the person shared in a chat (a screenshot a message or a brief names) is read without asking, by
 # any agent: herdr-task decides it (shared.py); a task worker's own hook already asked it (chained).
@@ -67,6 +66,10 @@ if [ -z "${HERDR_ASK_CHAINED:-}" ] && grep -q '"tool_name" *: *"Read"' "$req.tmp
   ok=$([ -x "$task" ] && "$task" _shared-read < "$req.tmp" 2>/dev/null) || ok=
   case "$ok" in *'"allow"'*) printf '%s\n' "$ok"; done_ ;; esac
 fi
+# A worker calls this after its scoped allow checks. Leave no hook decision for a request Codex can
+# review on its own. Codex still applies any managed human checkpoint in its own approval flow.
+python3 "$(dirname "$0")/ask-auto.py" < "$req.tmp" 2>/dev/null && done_
+find "$d/end" -type f -mmin +1440 -delete 2>/dev/null
 mv "$req.tmp" "$req" 2>/dev/null || done_
 
 # Claude's own status now: blocked, working, idle, done; "gone" once the terminal ended.

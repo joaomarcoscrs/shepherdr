@@ -130,6 +130,7 @@ export default class ModelMenu extends View {
     if (this.level(s) && this.level(s) !== this.level(w)) out.push(LEVEL[this.level(s)] ?? this.level(s));
     if (s.fast !== w.fast) out.push(s.fast ? "Fast" : "Standard");
     if (s.perm && s.perm !== w.perm) out.push(this.p.menus?.[s.agent]?.perms?.find((x) => x.id === s.perm)?.label ?? s.perm);
+    else if (this.p.codexAutoUpgrade && s.agent === "codex" && s.perm === "auto") out.push("Auto review");
     return out;
   }
 

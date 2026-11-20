@@ -9,13 +9,19 @@
 
 import { exec, hc, appHome } from "herdr";
 // The rules (names, menus, argv) are core/agents.js, shared with the web app.
-import { DEFAULTS, parseDefaults } from "./core/agents.js";
+import { CODEX_AUTO_CHECK, DEFAULTS, parseDefaults } from "./core/agents.js";
 import { chatLabel } from "./core/spaces.js";
 export * from "./core/agents.js";
 
 export async function defaults(kind, machine) {
   const r = await exec("sh", ["-c", DEFAULTS, "defaults", kind], { on: machine }).catch(() => null);
   return parseDefaults(kind, r?.stdout ?? "");
+}
+
+export async function codexAuto(pick, machine) {
+  if (pick.agent !== "codex" || !pick.perm) return false;
+  const r = await exec("sh", ["-c", CODEX_AUTO_CHECK], { on: machine }).catch(() => null);
+  return r?.code === 0;
 }
 
 // Restarts the agent `t` (hc get's record) with `argv`, parked behind chat pane `pane`.

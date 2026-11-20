@@ -10,6 +10,7 @@ import { HOME, settingsFile, where } from "./paths.ts";
 import { READ_LISTS, taskLists, fileIn } from "../core/tasklists.js";
 import * as T from "../core/tasks.js";
 import { isHelper, subagentsOf } from "../core/chat-view.js";
+import { CODEX_AUTO_CHECK } from "../core/agents.js";
 // The core is plain JavaScript; its defaults read as narrow types to TypeScript.
 const { place, refOf, taskKey, autoPrefix, reportOf, secondLine, leftOf, queueReason, machineOf, autoAcceptOn, autoAcceptStopped, openPr, reviewOf, deployOf } = T as any;
 import * as S from "../core/spaces.js";
@@ -40,6 +41,11 @@ export async function exec(hub: Hub, argv: string[], on: string | null = null, t
 }
 
 export const sh = (hub: Hub, script: string, args: string[], on: string | null) => exec(hub, ["sh", "-c", script, ...args], on);
+
+export async function codexAuto(hub: Hub, machine: string | null): Promise<boolean> {
+  const r = await exec(hub, ["sh", "-c", CODEX_AUTO_CHECK], machine, 5).catch(() => null);
+  return r?.code === 0;
+}
 
 type List = any;
 

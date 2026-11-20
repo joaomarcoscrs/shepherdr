@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { argvFor, canFork, current, fitPerm, forkArgv, FORK_LIVE, isCursorChat, line, liveTaskAgent, menuFor, modelSections, parseDefaults, parsePicks, permAcross, pickKey, resumeArgv, rowFor, sessionOf, withPin, withRecent } from "./agents.js";
+import { argvFor, canFork, current, fitPerm, forkArgv, FORK_LIVE, freshArgv, isCursorChat, line, liveTaskAgent, menuFor, modelSections, parseDefaults, parsePicks, permAcross, pickKey, resumeArgv, rowFor, sessionOf, withPin, withRecent } from "./agents.js";
 
 const codex = { models: Array.from({ length: 250 }, (_, i) => ({ id: `gpt-${i}`, label: `GPT ${i}`, efforts: ["low", "high"] })) };
 const menus = { claude: menuFor("claude", {}), codex: menuFor("codex", codex) };
@@ -85,6 +85,32 @@ test("#1001: a restart keeps only the agent's own flags, never its launcher's (b
   const c = argvFor({ agent: "claude", model: "opus" }, { agent: "claude", argv: wrapped("claude", "--add-dir", "/x", "hi"), session: "S2" }).argv;
   expect(c).toEqual(["claude", "--add-dir", "/x", "--model", "opus", "--settings", '{"fastMode":false}', "--resume", "S2"]);
   expect(forkArgv("codex", wrapped("codex", "-m", "gpt-6-sol"), "S3")).toEqual(["codex", "fork", "-m", "gpt-6-sol", "--no-daemon", "S3"]);
+});
+
+test("Codex Auto uses the supported native flag on fresh starts and resumes", () => {
+  const pick = { agent: "codex", perm: "auto" };
+  for (const chat of [true, false]) {
+    const { base } = argvFor(pick, { agent: "claude", argv: ["claude"] }, { chat, codexAuto: true });
+    expect(base).toEqual(["codex", "--no-daemon", "-c", 'service_tier="default"', "--approve-for-me"]);
+    const { argv } = argvFor(pick, { agent: "codex", argv: base, session: "S1" }, { chat, codexAuto: true });
+    expect(argv).toEqual(["codex", "resume", ...base.slice(1), "S1"]);
+    expect(resumeArgv("codex", argv, "S2")).toEqual(["codex", "resume", ...base.slice(1), "S2"]);
+    expect(freshArgv("codex", argv)).toEqual(base);
+  }
+  const oldCli = argvFor(pick, { agent: "claude" }, { codexAuto: false }).argv;
+  expect(oldCli.slice(-4)).toEqual(["-s", "workspace-write", "-a", "on-request"]);
+  expect(oldCli).not.toContain("--approve-for-me");
+});
+
+test("switching Codex away from Auto replaces only its managed permission options", () => {
+  const old = { agent: "codex", session: "S1", argv: wrapped("codex", "resume", "--approve-for-me", "--not-so-yolo",
+    "--full-auto", "--sandbox=workspace-write", "-aon-request", "-c", 'approvals_reviewer="auto_review"',
+    '--config=approvals_reviewer="guardian_subagent"', '-capproval_policy="on-request"', "--config", 'sandbox_mode="workspace-write"',
+    "--add-dir", "/keep", "-c", "hooks.state={}", "S0") };
+  const common = ["codex", "resume", "--add-dir", "/keep", "-c", "hooks.state={}", "--no-daemon", "-c", 'service_tier="default"'];
+  const choose = (perm) => argvFor({ agent: "codex", perm }, old, { codexAuto: true }).argv;
+  expect(choose("read-only")).toEqual([...common, "-s", "read-only", "-a", "on-request", "-c", 'approvals_reviewer="user"', "S1"]);
+  expect(choose("full")).toEqual([...common, "--dangerously-bypass-approvals-and-sandbox", "-c", 'approvals_reviewer="user"', "S1"]);
 });
 
 test("#973: Fable 5.2 is in Claude's model menu, the fable alias its row", () => {

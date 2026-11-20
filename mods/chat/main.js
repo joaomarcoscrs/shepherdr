@@ -1849,7 +1849,8 @@ export default class Chat extends View {
         const head = /^---\n([\s\S]*?)\n---\n?/.exec(src);
         const body = head ? src.slice(head[0].length) : src;
         const own = /^command:[ \t]*(.+)$/m.exec(head?.[1] ?? "")?.[1]?.trim();
-        const cmd = st?.agent && there ? agent.argvFor(st, { agent: null, argv: [] }, { chat: true }).argv.map(q).join(" ") : own;
+        const cmd = st?.agent && there ? agent.argvFor(st, { agent: null, argv: [] },
+          { chat: true, codexAuto: await agent.codexAuto(st, machine) }).argv.map(q).join(" ") : own;
         if (body.trim() && cmd) {
           words = body.trim();
           oneOff = `herdr-${template}-${Date.now().toString(36)}`;
@@ -2875,6 +2876,8 @@ export default class Chat extends View {
         // its machine out of reach now: the menu says so once a change is chosen (the restart waits for it)
         const offline = this.machine && !online(this.machine) ? this.machine : null;
         const currentRow = agent.rowFor(c.agent, c);
+        const codexAutoUpgrade = !offline && c.agent === "codex" && c.perm === "auto" && !agent.hasCodexAuto(this.argv)
+          && await agent.codexAuto(c, this.machine);
         // Installed agents only (and always the one running).
         // Cursor for a task's worker (its own terminal UI) and a chat agent such as an Assistant (its chat bridge,
         // herdr-task cursor-chat, SHEP-6), never a reviewer or a helper (core/settings.js forRole)
@@ -2889,6 +2892,7 @@ export default class Chat extends View {
         openOverlay({ mod: "chat-models", kind: "popup", frame: "none", width: W, height: H,
           at: at ? { x: Math.max(8, at.x - W + 90), y: Math.max(8, at.y - H - 10) } : "pointer",
           props: { pane: this.pickKey(), offline, width: W, height: H, select: name ? findModel(menus, name) : null,
+            codexAutoUpgrade,
             // chat: Cursor runs behind its chat bridge here (herdr-task cursor-chat): its model can switch in place (/model)
             current: { agent: c.agent, model: currentRow, effort: c.effort ?? null, fast: c.fast, perm: c.perm ?? null,
               ...(c.agent === "cursor" && agent.isCursorChat(this.argv) ? { chat: true } : {}) },
@@ -2935,7 +2939,8 @@ export default class Chat extends View {
       try {
         const t = JSON.parse((await hc(["get", this.addr, "--json"])).stdout);
         // a chat's own agent: Cursor runs behind its chat bridge (herdr-task cursor-chat), which this chat reads
-        const built = agent.argvFor(pick, { agent: this.kind, argv: t.foreground?.argv ?? [], session: agent.sessionOf(this.kind, this.path) }, { chat: true });
+        const built = agent.argvFor(pick, { agent: this.kind, argv: t.foreground?.argv ?? [], session: agent.sessionOf(this.kind, this.path) },
+          { chat: true, codexAuto: await agent.codexAuto(pick, this.machine) });
         this.swapping = true;
         const next = await agent.restart(t, built, mine);
         this.follow_to(next);
@@ -2965,8 +2970,9 @@ export default class Chat extends View {
         const ref = k?.id != null ? String(k.id) : t.labels?.["herdr.task"];
         const folder = k?.folder ?? t.foreground?.cwd ?? t.cwd;
         if (!ref || !folder) throw new Error("This chat's task wasn't found.");
-        const built = agent.argvFor(pick, { agent: this.kind, argv: t.foreground?.argv ?? [] });
         const on = k?.machine ?? this.machine;
+        const built = agent.argvFor(pick, { agent: this.kind, argv: t.foreground?.argv ?? [] },
+          { codexAuto: await agent.codexAuto(pick, on) });
         this.swapping = true;
         const cli = (a) => exec(`${appHome()}/mods/tasks/bin/herdr-task`, a);
         const r = await settle(cli, await cli([...(on ? ["--on", on] : []), "switch", ref, "--folder", folder,

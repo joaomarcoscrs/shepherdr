@@ -29,7 +29,7 @@ core/mouse-leak.js: chat shepherdr-settings tabs-tasks
 core/spaces.js: chat spaces-chat shepherdr-settings jump pane-chat tasks newspace coordinator menu-tasks new-menu-tasks tabs-tasks workspace-status-chat
 core/autopilot.js: pane-chat shepherdr-settings
 core/chat-reader.js: chat
-core/clean-env.js: chat
+core/clean-env.js: chat chat-models newspace shepherdr-settings coordinator
 core/worktree.js: task-pr
 core/recipe.js: artifacts chat
 core/task-artifacts.js: chat task-artifacts

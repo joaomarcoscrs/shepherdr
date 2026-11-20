@@ -3,6 +3,18 @@
 // settings and restarting it run where each side runs commands (lib/agent.js, service/agents.ts).
 // Shared core: the source is core/agents.js; bin/sync-shared copies it into the mods in lib/COPIES.
 import { SH } from "./paths.js";
+import { AGENT_PATH } from "./clean-env.js";
+
+// Probe on the machine that will launch Codex. Use a flag supported by both new sessions and resumes.
+export const CODEX_AUTO_CHECK = `${AGENT_PATH}
+supports_auto() {
+  help=$(LC_ALL=C codex "$@" --help 2>/dev/null) || return 1
+  printf '%s\\n' "$help" | grep -Eq '^[[:space:]]*--approve-for-me([[:space:]]|$)'
+}
+supports_auto && supports_auto resume`;
+const CODEX_AUTO_FLAGS = new Set(["--approve-for-me", "--not-so-yolo"]);
+const CODEX_PERM_FLAGS = new Set(["-s", "--sandbox", "-a", "--ask-for-approval"]);
+const CODEX_PERM_CONFIG = /^(?:approvals_reviewer|approval_policy|sandbox_mode)\s*=/;
 
 export const NAMES = { claude: "Claude Code", codex: "Codex", cursor: "Cursor" };
 // The agent kind a program word is: Cursor Agent's CLI is `cursor-agent`, or `agent` as newer installs (and Herdr's own
@@ -200,7 +212,7 @@ export function current(kind, argv, meta, dflt) {
   const tier = o.service_tier;
   const model = meta.model ?? flag(argv, "-m", "--model") ?? o.model ?? dflt.model;
   const sandbox = flag(argv, "-s", "--sandbox") ?? o.sandbox_mode ?? dflt.sandbox;
-  const perm = argv.includes("--dangerously-bypass-approvals-and-sandbox") || sandbox === "danger-full-access" ? "full"
+  const perm = argv.includes("--dangerously-bypass-approvals-and-sandbox") || argv.includes("--yolo") || sandbox === "danger-full-access" ? "full"
     : sandbox === "read-only" ? "read-only" : "auto";
   return { agent: "codex", model, label: dflt.models?.find((m) => m.id === model)?.label ?? null, perm,
     effort: meta.effort ?? o.model_reasoning_effort ?? dflt.effort,
@@ -369,7 +381,7 @@ function agentAt(argv) {
 
 // The old agent's flags worth keeping (permissions, folders, ...), without what is chosen again
 // or a first message.
-function kept(kind, argv) {
+function kept(kind, argv, { replaceCodexPerm = true } = {}) {
   const out = [];
   const rest = argv.slice(Math.max(agentAt(argv), 0) + 1);
   for (let i = 0; i < rest.length; i++) {
@@ -390,9 +402,20 @@ function kept(kind, argv) {
       if (a.startsWith("-")) out.push(a);
     } else {
       if (i === 0 && (a === "resume" || a === "fork")) { if (rest[1] && !rest[1].startsWith("-")) i++; continue; }
-      if (a === "--no-daemon" || a === "--dangerously-bypass-approvals-and-sandbox" || a === "--full-auto") continue;
-      if (["-m", "--model", "-s", "--sandbox", "-a", "--ask-for-approval"].includes(a)) { i++; continue; }
-      if ((a === "-c" || a === "--config") && /^(model|model_reasoning_effort|service_tier)=/.test(rest[i + 1] ?? "")) { i++; continue; }
+      if (a === "--no-daemon") continue;
+      if (a === "-m" || a === "--model") { i++; continue; }
+      if (replaceCodexPerm) {
+        if (CODEX_AUTO_FLAGS.has(a) || ["--dangerously-bypass-approvals-and-sandbox", "--yolo", "--full-auto"].includes(a)) continue;
+        if (CODEX_PERM_FLAGS.has(a)) { i++; continue; }
+        if (/^(?:--(?:sandbox|ask-for-approval)=|-[as][^-])/.test(a)) continue;
+      }
+      const separateConfig = a === "-c" || a === "--config";
+      const config = separateConfig ? rest[i + 1] : /^(?:--config=|-c=?)(.+)$/.exec(a)?.[1];
+      if (/^(model|model_reasoning_effort|service_tier)\s*=/.test(config ?? "") ||
+          (replaceCodexPerm && CODEX_PERM_CONFIG.test(config ?? ""))) {
+        if (separateConfig) i++;
+        continue;
+      }
       if (CODEX_VALUE.has(a)) { out.push(a, rest[++i]); continue; }
       if (a.startsWith("-")) out.push(a);
     }
@@ -444,10 +467,10 @@ function stripSession(kind, argv) {
 // How to start the chosen agent: { argv, resume } (resume: argv already continues the session).
 // `session`: the old conversation's id when it can be resumed (same agent only).
 // opts.chat: it runs in a chat (an Assistant): Cursor then runs behind herdr-task's chat bridge (CURSOR_CHAT), as it
-// did already when old argv ran it so.
+// did already when old argv ran it so. opts.codexAuto: CODEX_AUTO_CHECK passed on the launch machine.
 export function argvFor(pick, old, opts = {}) {
   const same = pick.agent === old.agent;
-  const flags = same ? kept(pick.agent, old.argv ?? []) : [];
+  const flags = same ? kept(pick.agent, old.argv ?? [], { replaceCodexPerm: Boolean(pick.perm) }) : [];
   if (pick.agent === "claude") {
     const a = ["claude", ...flags];
     if (pick.model) a.push("--model", pick.model);
@@ -480,9 +503,17 @@ export function argvFor(pick, old, opts = {}) {
   a.push("-c", `service_tier="${pick.fast ? "fast" : "default"}"`);
   if (pick.perm === "full") a.push("--dangerously-bypass-approvals-and-sandbox");
   else if (pick.perm === "read-only") a.push("-s", "read-only", "-a", "on-request");
+  else if (pick.perm === "auto" && opts.codexAuto) a.push("--approve-for-me");
   else if (pick.perm) a.push("-s", "workspace-write", "-a", "on-request");
+  // A resume can restore its previous reviewer. An explicit non-Auto pick replaces it for this launch.
+  if (opts.codexAuto && (pick.perm === "read-only" || pick.perm === "full")) a.push("-c", 'approvals_reviewer="user"');
   if (same && old.session) return { argv: ["codex", "resume", ...a, old.session], resume: true, base: ["codex", ...a] };
   return { argv: ["codex", ...a], resume: false, base: ["codex", ...a] };
+}
+
+// The old workspace-write mode was also labeled Auto. An explicit Auto pick can upgrade it only by restarting.
+export function hasCodexAuto(argv) {
+  return argv?.some((a) => CODEX_AUTO_FLAGS.has(a)) ?? false;
 }
 
 function argvWord(argv) {

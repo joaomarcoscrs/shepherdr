@@ -5060,7 +5060,7 @@ class CodexAsksOnTheCard(unittest.TestCase):
         from herdr_task import machines
         app = tempfile.mkdtemp()
         os.makedirs(os.path.join(app, "mods", "chat"))
-        for name in ("ask-hook.sh", "ask-end.py"):
+        for name in ("ask-hook.sh", "ask-end.py", "ask-auto.py"):
             with open(os.path.join(app, "mods", "chat", name), "w") as f:
                 f.write(f"# {name}\n")
         from unittest import mock
@@ -5069,6 +5069,7 @@ class CodexAsksOnTheCard(unittest.TestCase):
         self.assertEqual(files[".local/share/herdr/ask/ask-hook.sh"]["data"], b"# ask-hook.sh\n")
         self.assertEqual(files[".local/share/herdr/ask/ask-hook.sh"]["mode"], 0o755)
         self.assertIn(".local/share/herdr/ask/ask-end.py", files)
+        self.assertIn(".local/share/herdr/ask/ask-auto.py", files)
 
     def test_codex_waits_as_long_as_the_card(self):
         sys.path.insert(0, BIN)
@@ -5166,6 +5167,44 @@ class CodexAsksOnTheCard(unittest.TestCase):
         self.assertIs(st["idleCompaction"], False)
         mine = launch.own_argv(["claude", "--settings", json.dumps({"idleCompaction": True}), "go"])
         self.assertIs(json.loads(mine[2])["idleCompaction"], True)  # the person's own argv says otherwise: theirs
+
+class CodexAutoWorker(unittest.TestCase):
+    def test_native_flag_requires_support_for_fresh_start_and_resume(self):
+        from unittest import mock
+        sys.path.insert(0, BIN)
+        from herdr_task import launch, revive, settings
+
+        def probe(argv, **kwargs):
+            reply = "      --approve-for-me\n" if len(argv) == 2 or resume_support else "  -s, --sandbox <MODE>\n"
+            return subprocess.CompletedProcess(argv, 0, reply)
+
+        pick = {"agent": "codex", "model": "gpt-x", "effort": "high", "perm": "auto"}
+        with mock.patch.object(settings.shutil, "which", return_value="/fake/codex"), mock.patch.object(settings.subprocess, "run", side_effect=probe):
+            resume_support = False
+            old = settings.argv_for(pick)
+            self.assertEqual(old[-4:], ["-s", "workspace-write", "-a", "on-request"])
+            self.assertNotIn("--approve-for-me", old)
+
+            resume_support = True
+            auto = settings.argv_for(pick)
+            self.assertEqual(auto, ["codex", "--no-daemon", "-m", "gpt-x", "-c", 'model_reasoning_effort="high"',
+                                    "-c", 'service_tier="default"', "--approve-for-me"])
+            resumed = launch.resume_argv(auto, "S1")
+            self.assertEqual(resumed, ["codex", "resume", *auto[1:], "S1"])
+            self.assertEqual(revive.base_argv(resumed), ("codex", auto))
+            self.assertEqual(revive.resume_argv("codex", auto, "S2"), ["codex", "resume", *auto[1:], "S2"])
+            for mode, flag in (("read-only", "read-only"), ("full", "--dangerously-bypass-approvals-and-sandbox")):
+                other = settings.argv_for({**pick, "perm": mode})
+                self.assertIn(flag, other)
+                self.assertNotIn("--approve-for-me", other)
+                self.assertEqual(other[-2:], ["-c", 'approvals_reviewer="user"'])
+
+    def test_existing_explicit_argv_remains_the_persons_choice(self):
+        sys.path.insert(0, BIN)
+        from herdr_task import settings
+        raw = ["codex", "-a", "never", "-s", "read-only"]
+        self.assertEqual(settings.argv_for({"agent": "codex", "perm": "auto", "argv": raw}), raw)
+
 
 class TaskFlow(unittest.TestCase):
     """SHEP-170's task flow fixes, in a throwaway git repo and store; hc and gh are never run."""
@@ -8778,7 +8817,8 @@ class AssistantTaskProvider(unittest.TestCase):
         })
         self.caller("codex")
         task = self.add("Settings from a different repository's space", here=True, space=self.dest)
-        self.start(task["id"], now=True)
+        with self.mock.patch.object(self.settings, "codex_auto_supported", return_value=False):
+            self.start(task["id"], now=True)
         codex = self.worker(task["id"])["argv"]
         self.assertEqual(codex, ["codex", "--no-daemon", "-m", "gpt-5", "-c", 'model_reasoning_effort="medium"',
                                  "-c", 'service_tier="default"', "-s", "read-only", "-a", "on-request"])
