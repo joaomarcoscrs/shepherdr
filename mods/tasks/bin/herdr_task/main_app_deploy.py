@@ -80,11 +80,11 @@ class Ledger:
                 env, target = row["environment"], row["target"]
                 existing = db.execute("""SELECT request, state, run FROM receipts
                     WHERE environment = ? AND target = ?""", (env, target))
-                # A later, verified dispatch at exactly the earlier planned head (or a newer
-                # on-branch head) can close an earlier tracked claim. An untracked POST stays held.
+                # A new baseline can close a completed run or a definite rejection. An
+                # untracked POST that GitHub may have accepted stays held.
                 safe = set(row["clears"])
                 unseen = [(other, state, run) for other, state, run in existing
-                          if other == request or (state != "not_sent" and (state != "submitted" or run not in safe))]
+                          if other == request or (state != "not_sent" and other not in safe)]
                 if unseen:
                     held[(env, target)] = unseen
                     continue
@@ -107,11 +107,12 @@ class Ledger:
                 WHERE request = ? AND environment = ? AND target = ? AND state = 'reserved'""",
                        (state, run, reason, request, row["environment"], row["target"]))
 
-    def tracked_runs(self, env, target):
+    def prior_submissions(self, env, target):
         with self.reader() as db:
             if db is None:
                 return []
-            return db.execute("SELECT DISTINCT head, run FROM receipts WHERE environment = ? AND target = ? AND state = 'submitted'",
+            return db.execute("""SELECT request, head, run FROM receipts
+                WHERE environment = ? AND target = ? AND state IN ('submitted', 'rejected')""",
                               (env, target)).fetchall()
 
 
@@ -246,13 +247,14 @@ def start_or_resume(g, ledger, selection, head, plan_id, *, resume=False):
         env, target = row["environment"], row["target"]
         if row["state"] != "ready" or (env, target) not in allowed:
             continue
-        before = ledger.tracked_runs(env, target)
+        before = ledger.prior_submissions(env, target)
         base = row["baseline"]["sha"]
         cleared = []
-        for sha, run_id in before:
+        for request_id, sha, run_id in before:
             try:
-                if (sha == base or g.contains(sha, base)) and g.exact_run(run_id)["status"] == "completed":
-                    cleared.append(run_id)
+                if (sha == base or g.contains(sha, base)) and (
+                        run_id is None or g.exact_run(run_id)["status"] == "completed"):
+                    cleared.append(request_id)
             except deploy.GitHubError:
                 continue
         ready.append({**row, "clears": cleared})

@@ -100,8 +100,10 @@ receipt. Both selections share the same reservations on the dispatch machine. Th
 poll the same request after an interruption. A missing receipt is held indefinitely for operator
 inspection since there is no reliable way to attribute a matching external run to that POST.
 Failed submissions and runs are not retried automatically. An operator can use the reported
-workflow or exact run link to investigate and recover. The guarantees cover requests using this
-ledger. Actions started elsewhere are observed through GitHub and can race the CLI.
+workflow or exact run link to investigate and recover. Once recovery establishes a verified
+baseline covering the earlier request, a later click can deploy newly merged changes. The
+guarantees cover requests using this ledger. Actions started elsewhere are observed through
+GitHub and can race the CLI.
 
 GitHub's dispatch API version supplies the run ID in the response.
 [GitHub workflow dispatch API](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event)

@@ -327,6 +327,20 @@ class ReleaseTests(unittest.TestCase):
         self.resume(plan)
         self.assertEqual(self.g.posts.count(("prod", HOSTING)), 1)
 
+    def test_new_changes_can_use_a_verified_baseline_after_manual_recovery(self):
+        self.g.outcomes[("prod", HOSTING)] = "rejected"
+        prior = self.plan("prod")
+        answer = self.start(prior)
+        self.assertEqual(row(answer, "prod", HOSTING)["state"], "rejected")
+        self.start(prior)
+        self.assertEqual(self.g.posts.count(("prod", HOSTING)), 1)
+        self.g.add(HOSTING, "prod", C)
+        self.g.master = NEW
+        self.g.changes[NEW] = self.g.source(NEW, 104, "Hosting", "app/src/new.js")
+        self.g.outcomes.pop(("prod", HOSTING))
+        answer = self.start(self.plan("prod"))
+        self.assertEqual(row(answer, "prod", HOSTING)["state"], "submitted")
+
     def test_concurrent_database_reservations_are_disjoint(self):
         plan = self.plan()
         stage = self.plan("staging")
