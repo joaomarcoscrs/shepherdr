@@ -153,6 +153,9 @@ def remote(machine, argv):
 def main():
     argv = sys.argv[1:]
     if argv[:1] == ["--on"] and len(argv) > 1:
+        if argv[2:3] == ["main-app-deploy"]:
+            print(json.dumps({"schema": 1, "error": "Run this command directly on the Comando dispatch machine."}))
+            return 1
         try:
             return remote(argv[1], argv[2:])
         except Fail as e:
@@ -249,6 +252,22 @@ def main():
     c.add_argument("--yes", action="store_true", help="the person's go: dispatch them now (only when they ask; refused when "
                                                        "its plan is unclear or anything can't be verified)")
     c.add_argument("--only", help="comma-separated targets or workflows to dispatch (default: every one ready or failed)")
+    from .main_app_deploy import cmd_release
+    from .main_app_release import ENVIRONMENTS
+    release = sub.add_parser("main-app-deploy", help="plan, dispatch or inspect a master release for roboflow/roboflow")
+    actions = release.add_subparsers(dest="operation", required=True)
+    for operation in ("plan", "dispatch", "status"):
+        c = actions.add_parser(operation)
+        c.set_defaults(fn=cmd_release, json=True)
+        c.add_argument("--json", action="store_true", help="output JSON (the default)")
+        if operation in ("plan", "dispatch"):
+            c.add_argument("--environment", choices=ENVIRONMENTS, required=operation == "plan")
+        if operation == "dispatch":
+            c.add_argument("--head", help="the approved plan's exact master head")
+            c.add_argument("--plan-id", help="the approved plan ID")
+            c.add_argument("--resume", help="advance prerequisites for this approved request ID")
+        if operation == "status":
+            c.add_argument("--request-id", required=True)
     c = cmd("start", cmd_start, "start a task's agent (no tab: an hc child of the space's coordinator)")
     agent_opts(c)
     c.add_argument("--space")

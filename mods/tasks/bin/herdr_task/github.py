@@ -13,10 +13,10 @@ from .agents import agent_running, detail, live_agents, live_helpers, mid_turn_a
 
 # ---- GitHub ---------------------------------------------------------------------------------
 
-def gh(*args, cwd=None):
+def gh(*args, cwd=None, timeout=None):
     # gh not installed (or not on this caller's PATH, as a background service's): it doesn't work here, said plainly
     try:
-        r = run([GH, *args], cwd=cwd or STORE)
+        r = run([GH, *args], cwd=cwd or STORE, timeout=timeout)
     except FileNotFoundError:
         return False, "", "gh isn't installed here (GitHub CLI)"
     return r.returncode == 0, r.stdout.strip(), (r.stderr or r.stdout).strip()

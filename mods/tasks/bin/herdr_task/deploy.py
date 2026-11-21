@@ -261,10 +261,10 @@ class GitHub:
             self.cache["login"] = self.call("api", "user", "--jq", ".login").strip()
         return self.cache["login"]
 
-    def dispatch(self, file, ref, inputs):
+    def dispatch(self, file, ref, inputs, *, api_version=None):
         """POST the workflow_dispatch: (run id or None, run url or None)."""
-        args = ["api", "-X", "POST", f"repos/{self.repo}/actions/workflows/{file}/dispatches", "-f", f"ref={ref}",
-                "-F", "return_run_details=true"]
+        args = ["api", "-X", "POST", f"repos/{self.repo}/actions/workflows/{file}/dispatches", "-f", f"ref={ref}"]
+        args += ["-H", f"X-GitHub-Api-Version: {api_version}"] if api_version else ["-F", "return_run_details=true"]
         for k, v in inputs.items():
             args += ["-f", f"inputs[{k}]={v}"]
         out = self.call(*args)
