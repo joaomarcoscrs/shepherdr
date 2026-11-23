@@ -1,8 +1,23 @@
 import { expect, test } from "bun:test";
 import { planRows, meterWords, windowWords, whyWords, freshWords, healthReadWords, noHealthWords, noPlanWords, cliTitle, readOld,
-  meterSub, healthErrorWords, span } from "./machines.js";
+  meterSub, healthErrorWords, span, nextRead } from "./machines.js";
 
 const NOW = Date.UTC(2026, 10, 4, 12, 0);
+
+test("Codex keeps last good usage only for a verified matching workspace and user", () => {
+  const good = { state: "ok", at: NOW, codex_scope: "a", windows: [{ name: "Fast · Weekly", used: 33 }] };
+  const failure = { state: "unknown", at: NOW + 1000, why: "Try again" };
+  expect(nextRead(good, { ...failure, codex_scope: "a" }, "codex")).toEqual({ ...good, failed: failure.why });
+  expect(nextRead(good, { ...failure, codex_scope: "b" }, "codex")).toEqual({ ...failure, codex_scope: "b" });
+  expect(nextRead(good, failure, "codex")).toEqual(failure);
+  expect(nextRead({ ...good, codex_scope: undefined }, failure, "codex")).toEqual(failure);
+  expect(nextRead(good, { state: "signed-out" }, "codex")).toEqual({ state: "signed-out" });
+  expect(nextRead(good, { state: "no-plan" }, "codex")).toEqual({ state: "no-plan" });
+  expect(nextRead(good, { ...good, at: NOW - 1000, windows: [] }, "codex")).toBe(good);
+  const fresh = { ...good, at: NOW + 1000 };
+  expect(nextRead({ ...good, failed: failure.why }, fresh, "codex")).toBe(fresh);
+  expect(nextRead(good, failure, "claude")).toEqual({ ...good, failed: failure.why });
+});
 const health = { cpu: 12, load: 0.5, cores: 8, memory: 40, mem_used: 8 * 2 ** 30, mem_total: 32 * 2 ** 30, disk: 22, disks: [{ path: "/", pct: 22, free_gb: 300 }] };
 
 test("a machine's meter says its health, then each plan's least left", () => {

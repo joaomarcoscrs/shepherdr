@@ -77,7 +77,7 @@ export async function pollNow({ limits = false, force = false, only, limitsOlder
         delete out.error;
         if (d.limits) {
           const lim = {};
-          for (const [cli, fresh] of Object.entries(d.limits)) lim[cli] = nextRead(was.limits?.[cli], fresh);
+          for (const [cli, fresh] of Object.entries(d.limits)) lim[cli] = nextRead(was.limits?.[cli], fresh, cli);
           out.limits = lim;
           out.limitsAt = Date.now();
           // The agents people can start there, to say "No usage info" for those without a source.

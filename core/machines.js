@@ -13,8 +13,12 @@ export function holdOf(cfg, machine) {
 }
 
 // A read that didn't work keeps the last good numbers, marked as failed: never a guess.
-export function nextRead(prev, fresh) {
-  if (fresh.state === "unknown" && prev?.state === "ok") return { ...prev, failed: fresh.why };
+export function nextRead(prev, fresh, cli) {
+  const sameAccount = cli !== "codex" || (Boolean(fresh.codex_scope) && prev?.codex_scope === fresh.codex_scope);
+  if (prev?.state === "ok" && sameAccount) {
+    if (fresh.state === "unknown") return { ...prev, failed: fresh.why };
+    if (cli === "codex" && fresh.state === "ok" && fresh.at < prev.at) return prev;
+  }
   return fresh;
 }
 

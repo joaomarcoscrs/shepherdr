@@ -9,6 +9,9 @@ write nothing real (bwrap on Linux, sandbox-exec on a Mac): Claude Code's `/usag
 `account/rateLimits/read`. Never through a running agent, never a guess: a CLI it can't read says
 why. Only percentages, reset times, the plan's name and the signed-in account come back."""
 
+import base64
+import datetime
+import hashlib
 import json
 import os
 import re
@@ -364,126 +367,230 @@ def _window_name(minutes):
 def parse_codex(result):
     """account/rateLimits/read's answer. A limit of its own (one model's) says so before its name."""
     result = result or {}
-    snaps = list((result.get("rateLimitsByLimitId") or {}).values())
+    snaps = list((result.get("rateLimitsByLimitId") or {}).items())
     if not snaps and result.get("rateLimits"):
-        snaps = [result["rateLimits"]]
-    snaps.sort(key=lambda s: s.get("limitId") != "codex")
+        snaps = [("codex", result["rateLimits"])]
+    snaps.sort(key=lambda pair: (pair[1].get("limitId") or pair[0]) != "codex")
     windows = []
-    for s in snaps:
+    for key, s in snaps:
+        limit_id = s.get("limitId") or key
         for w in (s.get("primary"), s.get("secondary")):
             if not isinstance((w or {}).get("usedPercent"), (int, float)):
                 continue
-            named = s.get("limitName") if s.get("limitId") != "codex" and isinstance(s.get("limitName"), str) else ""
+            named = (s.get("limitName") or limit_id) if limit_id != "codex" else ""
+            named = named if isinstance(named, str) else ""
             x = {"name": (named[:40] + " · " if named else "") + _window_name(w.get("windowDurationMins")), "used": w["usedPercent"]}
             if isinstance(w.get("resetsAt"), (int, float)):
                 x["resets_at"] = int(w["resetsAt"] * 1000)
             windows.append(x)
-    plan = next((s.get("planType") for s in snaps if isinstance(s.get("planType"), str) and s.get("planType") != "unknown"), None)
+    plan = next((s.get("planType") for _, s in snaps if isinstance(s.get("planType"), str) and s.get("planType") != "unknown"), None)
     if not windows:
         return {"state": "unknown", "why": "Codex reported no limits"}
     return dict({"state": "ok", "windows": windows}, **({"plan": plan[:30]} if plan else {}))
 
 
-def _codex_due(auth, at):
-    import base64
+# rust-v0.171.0 login/src/auth/manager.rs: a readable JWT expiry supersedes the
+# scheduled age check. The same version routes managed refresh through the override
+# below. A file URL cannot send a refresh request, even if auth changes after preflight.
+CODEX_EXPIRY_READER = "codex-cli 0.171.0"
+CODEX_NO_REFRESH = "file:///dev/null"
+CODEX_CLAIMS = "https://api.openai.com/auth"
+CODEX_UNVERIFIED = {"state": "unknown", "why": "Couldn't verify which Codex account owns this usage. Read again."}
+
+
+def _jwt_payload(token):
     try:
-        if not auth.get("tokens"):
-            return False
-        part = auth["tokens"]["access_token"].split(".")[1]
-        end = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))["exp"] * 1000
-        last = auth.get("last_refresh") or ""
-        import datetime
-        refreshed = datetime.datetime.strptime(last[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=datetime.timezone.utc).timestamp() * 1000
-        return not (end - SOON > at and at - refreshed < WEEK)
-    except Exception:
-        return True
+        head, part, sig = token.split(".")
+        if head and part and sig:
+            claims = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
+            return claims if isinstance(claims, dict) else {}
+    except (AttributeError, ValueError):
+        pass
+    return {}
 
 
-def _ask_codex(argv, env=None, cwd=None):
+def _codex_due(auth, at, expiry_reader):
+    """Why the sealed reader must stop before asking Codex for usage, or None."""
+    tokens = auth.get("tokens")
+    if not tokens:
+        return None
+    expiry = _jwt_payload(tokens.get("access_token")).get("exp")
+    if type(expiry) is not int:
+        return "Couldn't check when Codex's sign-in expires. Check your sign-in in Codex, then read again."
+    if expiry * 1000 <= at:
+        return "Codex's sign-in has expired. Open Codex normally, and run codex login if it can't renew."
+    if expiry * 1000 - at <= SOON:
+        return "Codex's sign-in expires soon. Open Codex normally to check it, then read again."
+    if not expiry_reader:
+        try:
+            last = datetime.datetime.fromisoformat((auth.get("last_refresh") or "").replace("Z", "+00:00"))
+            if last.tzinfo and 0 <= at - last.timestamp() * 1000 < WEEK:
+                return None
+        except (AttributeError, ValueError, OverflowError):
+            pass
+        return "This Codex version may renew its sign-in during a read. Open Codex normally, then read again. If usage stays stale, run codex login."
+    return None
+
+
+def _codex_identity(auth):
+    """Workspace and user of the file-backed login, plus the legacy account/read email."""
+    tokens = auth.get("tokens") or {}
+    claims = _jwt_payload(tokens.get("id_token"))
+    ids = claims.get(CODEX_CLAIMS) or {}
+    return (tokens.get("account_id"), ids.get("chatgpt_user_id") or ids.get("user_id"),
+            claims.get("email") or (claims.get("https://api.openai.com/profile") or {}).get("email"))
+
+
+def _file_revision(path):
+    try:
+        st = os.stat(path)
+        return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+    except FileNotFoundError:
+        return None
+
+
+def _ask_codex(argv, env, cwd, identity, expiry_reader):
+    account_id, user_id, email = identity
     try:
         p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                              universal_newlines=True, env=env, cwd=cwd)
     except OSError:
-        return {"state": "unknown", "why": "Couldn't run it"}
+        return {"state": "unknown", "why": "Couldn't run the Codex usage reader. Read again."}
     timer = threading.Timer(30, p.kill)
     timer.start()
-    try:
-        for m in ({"id": 1, "method": "initialize", "params": {"clientInfo": {"name": "herdr", "title": "Herdr", "version": "1"}}},
-                  {"method": "initialized"}, {"id": 2, "method": "account/read", "params": {"refreshToken": False}},
-                  {"id": 3, "method": "account/rateLimits/read"}):
-            p.stdin.write(json.dumps(m) + "\n")
+
+    def send(method, args, request_id=None):
+        msg = {"method": method, **args}
+        if request_id is not None:
+            msg["id"] = request_id
+        p.stdin.write(json.dumps(msg) + "\n")
         p.stdin.flush()
-        extra = {}
+
+    def request(request_id, method, **args):
+        send(method, args, request_id)
         for line in p.stdout:
             try:
                 msg = json.loads(line)
             except ValueError:
                 continue
-            if msg.get("id") == 2:
-                acct = (msg.get("result") or {}).get("account")
-                if msg.get("error") or not acct:
-                    return {"state": "signed-out"}
-                if acct.get("type") == "apiKey":
-                    return {"state": "no-plan"}
-                if acct.get("planType") and acct["planType"] != "unknown":
-                    extra["plan"] = str(acct["planType"])[:30]
-                if acct.get("email"):
-                    extra["account"] = str(acct["email"])[:80]
-            if msg.get("id") == 3:
-                if msg.get("error"):
-                    if re.search(r"auth|log ?in|sign", (msg["error"] or {}).get("message") or "", re.I):
-                        return {"state": "signed-out"}
-                    return {"state": "unknown", "why": "This Codex can't report its limits"}
-                got = parse_codex(msg.get("result"))
-                return dict(extra, **got) if got["state"] == "ok" else got
-        return {"state": "unknown", "why": "Codex took too long to answer" if not timer.is_alive() else "Codex stopped before answering"}
+            if isinstance(msg, dict) and msg.get("id") == request_id:
+                return msg
+        return {}
+
+    try:
+        hello = request(1, "initialize", params={
+            "clientInfo": {"name": "herdr", "title": "Herdr", "version": "1"},
+            **({"capabilities": {"experimentalApi": True}} if expiry_reader else {}),
+        })
+        if "result" not in hello:
+            return {"state": "unknown", "why": "Codex usage reader couldn't start. Read again."}
+        send("initialized", {})
+        # Check the active config instead of forcing file mode and possibly picking a stale
+        # auth.json when the user's actual login is kept in a different credential store.
+        conf = (request(2, "config/read", params={}).get("result") or {}).get("config")
+        if not isinstance(conf, dict):
+            return {"state": "unknown", "why": "Couldn't verify Codex's configuration right now. Read again."}
+        if conf.get("cli_auth_credentials_store") not in (None, "file"):
+            return {"state": "unknown", "why": "Couldn't verify Codex's file-based sign-in. Check its sign-in in Codex.",
+                    "unverified": True}
+        info = request(3, "account/read", params={"refreshToken": False}).get("result")
+        if not isinstance(info, dict) or "account" not in info:
+            return {"state": "unknown", "why": "Couldn't verify Codex's sign-in right now. Read again."}
+        acct = info["account"]
+        if acct is None:
+            if account_id or user_id:
+                return {"state": "unknown", "why": "Codex couldn't load its saved sign-in. Check it in Codex.",
+                        "unverified": True}
+            return {"state": "signed-out" if info.get("requiresOpenaiAuth") else "no-plan"}
+        if acct.get("type") in ("apiKey", "amazonBedrock", "gcp"):
+            return {"state": "no-plan"}
+        workspace = (info.get("workspaceRouting") or {}).get("chatgptAccountId")
+        if workspace not in (None, account_id) or acct.get("type") != "chatgpt" or not account_id or not (
+            (user_id and info.get("userId") == user_id)
+            or (not info.get("userId") and email and acct.get("email") == email)
+        ):
+            return dict(CODEX_UNVERIFIED, unverified=True)
+        args = {"params": {"excludeResetCreditDetails": True}} if expiry_reader else {}
+        msg = request(4, "account/rateLimits/read", **args)
+        if "result" not in msg:
+            err = (msg.get("error") or {}).get("message") or ""
+            if re.search(r"\b401\b|\bunauthorized\b", err, re.I):
+                return {"state": "unknown", "why": "Codex rejected this sign-in. Sign in again with codex login, then read again."}
+            return {"state": "unknown", "why": "Couldn't read Codex usage right now. Please try again."}
+        result = msg["result"] or {}
+        usage_account = result.get("accountId")
+        if usage_account not in (None, account_id) or (expiry_reader and not (usage_account or workspace)):
+            return dict(CODEX_UNVERIFIED, unverified=True)
+        got = parse_codex(result)
+        if got["state"] == "ok":
+            if acct.get("email"):
+                got["account"] = acct["email"][:80]
+            if "plan" not in got and acct.get("planType") not in (None, "unknown"):
+                got["plan"] = acct["planType"][:30]
+        return got
+    except (OSError, ValueError, AttributeError):
+        return {"state": "unknown", "why": "Couldn't read Codex usage right now. Please try again."}
     finally:
         timer.cancel()
-        try:
-            p.kill()
-        except OSError:
-            pass
+        p.kill()
+        p.wait()
+        p.stdin.close()
+        p.stdout.close()
 
 
 def codex():
     binary = which("codex")
     if not binary:
         return None
-    missing = _no_seal()
-    if missing:
-        return {"state": "unknown", "why": missing}
-    home = os.environ.get("CODEX_HOME") or os.path.join(HOME, ".codex")
+    home = os.path.realpath(os.environ.get("CODEX_HOME") or os.path.join(HOME, ".codex"))
     if not os.path.isdir(home):
         return {"state": "signed-out"}
-    login = os.path.join(home, "auth.json")
-    if os.path.exists(login) and _codex_due(_json_file(login) or {}, now_ms()):
-        return DUE
-    kept = [p for p in (login, os.path.join(home, "config.toml")) if os.path.exists(p)]
-    if not MAC:
-        # Codex won't start without its own databases, so it gets empty ones.
-        folder = tempfile.mkdtemp(prefix="herdr-limits-")
-        try:
-            return _ask_codex(_seal(_quiet([binary, "app-server", "--disable", "plugins"]), (folder, home, kept)))
-        finally:
-            shutil.rmtree(folder, ignore_errors=True)
-    if not os.path.exists(login):
-        return {"state": "unknown", "why": "No Codex sign-in file here to check, so it wasn't run"}
-    seal = _mac_seal()
-    if not seal:
-        return {"state": "unknown", "why": "Can't read it safely here: the Mac seal wouldn't hold"}
-    opened, wrap, close = seal
-    try:
-        state = os.path.join(opened, "codex")
-        os.mkdir(state, 0o700)
-        for p in kept:
-            os.symlink(os.path.realpath(p), os.path.join(state, os.path.basename(p)))
-        env = dict(os.environ, CODEX_HOME=state, CODEX_SQLITE_HOME=state, TMPDIR=opened)
-        if os.path.exists("/etc/ssl/cert.pem"):
-            env["SSL_CERT_FILE"] = "/etc/ssl/cert.pem"
-        argv = _quiet([binary, "app-server", "--disable", "plugins", "-c", 'cli_auth_credentials_store="file"'])
-        return _ask_codex(wrap(argv), env, cwd=opened)
-    finally:
-        close()
+    login, config = (os.path.join(home, name) for name in ("auth.json", "config.toml"))
+    login_rev, config_rev = _file_revision(login), _file_revision(config)
+    auth = _json_file(login) if login_rev else {}
+    if not isinstance(auth, dict):
+        return {"state": "unknown", "why": "Couldn't read Codex's sign-in file. Check your sign-in in Codex."}
+    identity = _codex_identity(auth)
+    account_id, user_id, _ = identity
+    # Cache identity is opaque and tied to this workspace, user and credential source.
+    # An old cache with no identity can't confirm these were the same limits.
+    scope = (hashlib.sha256(json.dumps([home, account_id, user_id, config_rev]).encode()).hexdigest()
+             if account_id and user_id else None)
+    expiry_reader = _run([binary, "--version"], timeout=5).strip() == CODEX_EXPIRY_READER
+    reason = _no_seal() or _codex_due(auth, now_ms(), expiry_reader)
+    if reason:
+        got = {"state": "unknown", "why": reason}
+    else:
+        kept = [p for p, rev in ((login, login_rev), (config, config_rev)) if rev]
+        env = dict(os.environ, CODEX_HOME=home, CODEX_SQLITE_HOME=home,
+                   CODEX_REFRESH_TOKEN_URL_OVERRIDE=CODEX_NO_REFRESH)
+        command = _quiet([binary, "app-server", "--disable", "plugins"])
+        if not MAC:
+            # Codex won't start without its own databases, so it gets empty ones and two read-only mounts.
+            with tempfile.TemporaryDirectory(prefix="herdr-limits-") as folder:
+                got = _ask_codex(_seal(command, (folder, home, kept)), dict(env, TMPDIR="/tmp"), None, identity, expiry_reader)
+        else:
+            seal = _mac_seal()
+            if seal:
+                opened, wrap, close = seal
+                try:
+                    state = os.path.join(opened, "codex")
+                    os.mkdir(state, 0o700)
+                    for p in kept:
+                        os.symlink(os.path.realpath(p), os.path.join(state, os.path.basename(p)))
+                    env.update(CODEX_HOME=state, CODEX_SQLITE_HOME=state, TMPDIR=opened)
+                    if os.path.exists("/etc/ssl/cert.pem"):
+                        env["SSL_CERT_FILE"] = "/etc/ssl/cert.pem"
+                    got = _ask_codex(wrap(command), env, opened, identity, expiry_reader)
+                finally:
+                    close()
+            else:
+                got = {"state": "unknown", "why": "Can't read it safely here: the Mac seal wouldn't hold"}
+    if (login_rev, config_rev) != (_file_revision(login), _file_revision(config)):
+        return CODEX_UNVERIFIED
+    if not got.pop("unverified", False) and scope and got["state"] in ("ok", "unknown"):
+        got["codex_scope"] = scope
+    return got
 
 
 def limits():
