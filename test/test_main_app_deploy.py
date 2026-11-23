@@ -5,8 +5,10 @@ import argparse
 import contextlib
 import io
 import json
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from collections import defaultdict
 from pathlib import Path
@@ -62,6 +64,15 @@ class Fixture:
     def change(self, sha):
         return self.changes[sha]
 
+    def planning(self):
+        return contextlib.nullcontext(lambda _: contextlib.nullcontext())
+
+    def landed_changes(self, floor, commits):
+        return [self.change(sha) for sha in commits]
+
+    def prefetch_workflow_runs(self, files):
+        pass
+
     def file(self, path, sha):
         if path == deploy.ROBOFLOW["index"]:
             return 'addfn_httpv2("light.v2.agent", willrequire("./agent.js", "app"));'
@@ -82,6 +93,9 @@ class Fixture:
 
     def checkout_sha(self, job):
         return self.job_shas[job]
+
+    def evidence(self, read, items):
+        return [read(item) for item in items]
 
     def jobs(self, run, attempt):
         return self.job_rows[run]
@@ -129,6 +143,7 @@ class Fixture:
                              "created": t, "updated": t, "attempt": 1}
         self.files[release.DEPLOY_PR].append(run_id)
         self.job_rows[run_id] = [{"name": "Hosting / Deploy hosting (staging)", "conclusion": "success"}]
+        return run_id
 
     def dispatch(self, file, ref, inputs, *, api_version):
         assert api_version == "2026-03-10" and ref == "master"
@@ -365,6 +380,11 @@ class ReleaseTests(unittest.TestCase):
 
         code, plan = cli("plan", environment="both")
         self.assertEqual(code, 0)
+        self.g.diagnostics = {"elapsed_ms": 100, "phases": {}}
+        code, measured = cli("plan", environment="both", diagnostics=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(measured.pop("diagnostics"), self.g.diagnostics)
+        self.assertEqual(measured, plan)
         code, sent = cli("dispatch", environment="both", head=plan["head"], plan_id=plan["plan_id"], resume=None)
         self.assertEqual(code, 0)
         self.assertEqual(sent["request_id"], plan["plan_id"])
@@ -387,19 +407,44 @@ class ReleaseTests(unittest.TestCase):
     def test_adapter_follows_first_parents_and_reads_all_commit_file_pages(self):
         api = release.ReleaseGitHub()
         parents = lambda sha, *ps: {"sha": sha, "parents": [{"sha": p} for p in ps]}
-        direct = {"number": 101, "merge_commit_sha": A, "merged_at": "known", "base": {"ref": "master"}}
-        stacked = {**direct, "number": 102, "base": {"ref": "integration"}}
-        other = {**direct, "number": 103, "merge_commit_sha": C}
         with mock.patch.object(api, "api", side_effect=[
             [parents(C, B, NEW), parents(NEW, FLOOR), parents(B, A)],
             parents(A, FLOOR),
             [{"files": [{"filename": "app/src/a.js"}]}, {"files": [{"filename": "app/src/b.js"}]}],
-            [[other], [stacked, direct]],
-        ]):
+        ]) as request:
             self.assertEqual(api.history(C, 3), (FLOOR, [A, B, C]))
-            observed = api.change(A)
-            self.assertEqual(observed["pr"], direct)
+            observed = api.changed_files(A, FLOOR)
             self.assertEqual([entry["filename"] for entry in observed["files"]], ["app/src/a.js", "app/src/b.js"])
+            self.assertEqual(request.call_args_list[1].args, (f"git/commits/{A}",))
+
+    def test_associated_pr_batch_verifies_exact_master_unique_and_complete(self):
+        api = release.ReleaseGitHub()
+        direct = {"number": 101, "mergeCommit": {"oid": A}, "mergedAt": "known",
+                  "baseRefName": "master", "baseRepository": {"nameWithOwner": release.REPO},
+                  "body": "# Github Actions Required to Deploy\nHosting", "url": "https://github.com/roboflow/roboflow/pull/101"}
+        stacked = {**direct, "number": 102, "baseRefName": "integration"}
+        fork = {**direct, "number": 103, "baseRepository": {"nameWithOwner": "fork/roboflow"}}
+        other = {**direct, "number": 104, "mergeCommit": {"oid": C}}
+        both = {**direct, "mergeCommit": {"oid": B}}
+        connections = [
+            {"pageInfo": {"hasNextPage": False}, "nodes": [stacked, fork, other, direct]},
+            {"pageInfo": {"hasNextPage": False}, "nodes": [both, {**both, "number": 105}]},
+        ]
+        repo = {f"c{i}": {"oid": sha, "associatedPullRequests": conn}
+                for i, (sha, conn) in enumerate(zip([A, B], connections))}
+        with api.planning() as phase, mock.patch.object(
+                api, "json", return_value={"data": {"repository": repo}}) as request:
+            with phase("PRs"):
+                observed = api.associated_prs([A, B])
+            self.assertEqual(observed, {A: {"number": 101, "body": direct["body"], "html_url": direct["url"]}, B: None})
+            self.assertIn(A, request.call_args.args[-1])
+            self.assertIn(B, request.call_args.args[-1])
+            connections[1]["pageInfo"]["hasNextPage"] = True
+            with self.assertRaisesRegex(release.PlanningError, "too many associated PRs"):
+                with phase("PR page boundary"):
+                    api.associated_prs([A, B])
+            with self.assertRaises(release.PlanningError):
+                api.reads.remaining()
 
     def test_head_moves_after_reservation_without_a_post(self):
         plan = self.plan("prod")
@@ -414,6 +459,142 @@ class ReleaseTests(unittest.TestCase):
         self.assertTrue(result["head_drift"])
         self.assertEqual(row(result, "prod", HOSTING)["state"], "not_sent")
         self.assertEqual(self.g.posts, [])
+
+    def test_completion_order_and_active_overlap_are_preserved_without_excess_jobs(self):
+        old = self.g.add_pr_run("completed")
+        self.g.runs[old].update(created="2026-11-21T00:00:00Z", updated="2026-11-21T01:10:00Z")
+        self.g.job_rows[old] = [{"name": "Hosting / publish", "conclusion": "success"}]
+        newer = self.g.add_pr_run("completed")
+        self.g.job_rows[newer] = [{"name": "Hosting / publish", "conclusion": "skipped"}]
+        baseline, observed, why = release.coverage(self.g, HOSTING, "staging", {A, FLOOR})
+        self.assertIsNone(baseline)
+        self.assertNotIn(observed["id"], (old, newer))
+        self.assertIn("completion order", why)
+        active = self.g.add_pr_run("in_progress")
+        with mock.patch.object(self.g, "jobs", wraps=self.g.jobs) as jobs:
+            baseline, observed, why = release.coverage(self.g, HOSTING, "staging", {A, FLOOR})
+            self.assertIsNone(baseline)
+            self.assertEqual(observed["id"], active)
+            self.assertIn("active", why)
+            jobs.assert_not_called()
+        self.g.runs[active]["title"] += " (dry run)"
+        self.g.files["deploy-hosting.yaml"].clear()
+        with mock.patch.object(self.g, "jobs", wraps=self.g.jobs) as jobs:
+            baseline, _, why = release.coverage(self.g, HOSTING, "staging", {A, FLOOR})
+            self.assertIsNone(baseline)
+            self.assertIn("No full-tier master baseline", why)
+            jobs.assert_not_called()
+
+    def test_concurrent_job_and_checkout_reads_are_shared_and_snapshot_is_refreshed(self):
+        api = release.ReleaseGitHub()
+        responses = {"jobs": [{"jobs": [{"name": "fixture"}]}]}
+        gate = Barrier(8)
+
+        def get(path, *args):
+            time.sleep(0.01)
+            return responses["jobs"] if path.split("?")[0].endswith("/jobs") else {"runs": []}
+
+        def read(_):
+            gate.wait(timeout=2)
+            return api.workflow_runs("deploy-pr.yaml"), api.jobs(900, 1), api.checkout_sha(9)
+
+        with (mock.patch.object(api, "api", side_effect=get) as request,
+              mock.patch.object(api, "read_checkout_sha", return_value=A) as log):
+            with api.planning() as phase, phase("coverage"):
+                results = release.parallel(read, range(8))
+            self.assertEqual(request.call_count, 2)
+            log.assert_called_once_with(9)
+            self.assertEqual(results, [({"runs": []}, [{"name": "fixture"}], A)] * 8)
+            responses["jobs"] = [{"jobs": [{"name": "next snapshot"}]}]
+            with api.planning() as phase, phase("coverage"):
+                self.assertEqual(api.jobs(900, 1), [{"name": "next snapshot"}])
+                api.jobs(900, 2)
+            self.assertEqual(request.call_count, 4)
+
+    def test_timeout_and_permissions_report_phase_before_any_reservation_or_post(self):
+        for error, message in [
+                (subprocess.TimeoutExpired("gh", 0.1), "did not respond in time"),
+                ((False, "", "HTTP 403 some private detail"), "read access"),
+                ((False, "", "HTTP 403 secondary rate limit"), "rate limited")]:
+            with self.subTest(message=message):
+                api = release.ReleaseGitHub()
+                expected = self.plan()
+                with (mock.patch.object(release, "gh", side_effect=[error]),
+                      mock.patch.object(api, "dispatch") as post,
+                      mock.patch.object(self.ledger, "reserve") as reserve):
+                    with self.assertRaisesRegex(release.PlanningError, f"master head.*{message}"):
+                        dispatch.start_or_resume(api, self.ledger, "both", C, expected["plan_id"])
+                    self.assertEqual(api.diagnostics["phases"]["master head"]["reads"]["github: commit metadata"]["errors"], 1)
+                    post.assert_not_called()
+                    reserve.assert_not_called()
+
+    def test_local_git_reads_exact_first_parent_trees_without_using_worktree_contents(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+
+            def git(*args):
+                return subprocess.check_output(["git", "-C", root, *args], text=True, stderr=subprocess.PIPE).strip()
+
+            git("init", "-b", "master")
+            git("config", "user.email", "fixture@example.invalid")
+            git("config", "user.name", "Fixture")
+            git("remote", "add", "origin", "git@github.com:roboflow/roboflow.git")
+            (root / "app" / "src").mkdir(parents=True)
+            page = root / "app" / "src" / "old.js"
+            page.write_text("const a = 1;\n")
+            git("add", ".")
+            git("commit", "-m", "Root")
+            initial = git("rev-parse", "HEAD")
+            git("switch", "-c", "fixture-side")
+            git("mv", "app/src/old.js", "app/src/new.js")
+            marker = root / "app" / "src" / "marker.js"
+            marker.write_text('const path = "/agent-examples";\n')
+            git("add", ".")
+            git("commit", "-m", "Change hosting")
+            git("switch", "master")
+            git("merge", "--no-ff", "--no-edit", "fixture-side")
+            head = git("rev-parse", "HEAD")
+            marker.write_text("modified only in worktree")
+            status_before = git("status", "--porcelain")
+            reads = release.PlanReads()
+            local = release.LocalReleaseGit(reads)
+            local.root = root
+            with reads.phase("exact Git objects"):
+                self.assertEqual(local.history(head, 1), (initial, [head]))
+                self.assertIsNone(local.history(NEW, 1))
+                self.assertEqual(local.file("app/src/marker.js", head), 'const path = "/agent-examples";')
+                change = local.change(head, initial)
+                self.assertCountEqual(change["files"], [
+                    {"filename": "app/src/marker.js"},
+                    {"filename": "app/src/new.js", "previous_filename": "app/src/old.js"},
+                ])
+                self.assertTrue(change["rollout"])
+                git("config", "remote.origin.promisor", "true")
+                self.assertIsNone(local.history(head, 1))
+                git("config", "--unset", "remote.origin.promisor")
+                git("remote", "set-url", "origin", "https://github.com/fork/roboflow.git")
+                self.assertIsNone(local.history(head, 1))
+            self.assertEqual(git("status", "--porcelain"), status_before)
+
+    def test_read_budget_produces_schema_one_error_without_plan_or_ledger(self):
+        api = release.ReleaseGitHub()
+        out = io.StringIO()
+        with (mock.patch.object(release, "READ_LIMIT", 1),
+              mock.patch.object(release.LocalReleaseGit, "history", return_value=None),
+              mock.patch.object(release, "gh", return_value=(True, C, "")) as request,
+              mock.patch.object(dispatch, "ReleaseGitHub", return_value=api),
+              mock.patch.object(dispatch, "ledger_path", return_value=self.path),
+              contextlib.redirect_stdout(out)):
+            code = dispatch.cmd_release(argparse.Namespace(operation="plan", environment="both", diagnostics=True))
+        result = json.loads(out.getvalue())
+        self.assertEqual(code, 1)
+        self.assertEqual(result["schema"], 1)
+        self.assertIn("first-parent history", result["error"])
+        self.assertIn("read limit", result["error"])
+        self.assertIn("master head", result["diagnostics"]["phases"])
+        self.assertNotIn("plan_id", result)
+        self.assertFalse(Path(self.path).exists())
+        request.assert_called_once()
 
     def test_interrupted_reservation_holds_target_across_selections(self):
         stage = self.plan("staging")

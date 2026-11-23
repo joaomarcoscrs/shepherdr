@@ -10,7 +10,7 @@ from pathlib import Path
 from . import deploy
 from .base import STORE, now
 from .main_app_release import (
-    ENVIRONMENTS, REF, REPO, SHA, ReleaseGitHub, digest, parallel, release_plan, run_link, run_view, verify_run,
+    ENVIRONMENTS, REF, REPO, SHA, ApprovedHeadMoved, ReleaseGitHub, digest, parallel, release_plan, run_link, run_view, verify_run,
 )
 
 
@@ -231,11 +231,12 @@ def start_or_resume(g, ledger, selection, head, plan_id, *, resume=False):
             return request_view(g, ledger, existing)
         selection = existing["selection"]
         head = existing["head"]
-    if g.head(REF) != head:
+    try:
+        current = release_plan(g, selection, expected_head=head)
+    except ApprovedHeadMoved:
         if existing:
             return request_view(g, ledger, existing)
-        raise deploy.GitHubError("Master moved since the plan was approved.")
-    current = release_plan(g, selection)
+        raise
     if current["head"] != head or (not existing and current["plan_id"] != plan_id):
         raise deploy.GitHubError("The plan changed. Request a new plan.")
     if existing and intent(existing) != intent(current):
@@ -296,7 +297,8 @@ def cmd_release(args):
             reason = "The local dispatch ledger is unavailable."
         else:
             reason = "GitHub returned an unreadable release response."
-        print(json.dumps({"schema": 1, "error": reason}))
-        return 1
+        result = {"schema": 1, "error": reason}
+    if getattr(args, "diagnostics", False) and g.diagnostics is not None:
+        result = {**result, "diagnostics": g.diagnostics}
     print(json.dumps(result))
-    return 0
+    return int("error" in result)

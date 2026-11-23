@@ -262,6 +262,7 @@ def main():
         c.add_argument("--json", action="store_true", help="output JSON (the default)")
         if operation in ("plan", "dispatch"):
             c.add_argument("--environment", choices=ENVIRONMENTS, required=operation == "plan")
+            c.add_argument("--diagnostics", action="store_true", help="include planning timings and read counts in JSON")
         if operation == "dispatch":
             c.add_argument("--head", help="the approved plan's exact master head")
             c.add_argument("--plan-id", help="the approved plan ID")
