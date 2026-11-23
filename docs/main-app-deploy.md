@@ -19,25 +19,29 @@ herdr-task main-app-deploy dispatch --resume "$plan_id" --json
 
 JSON is the default. On the click, read the plan and use its exact `head`, `plan_id` and selection
 for dispatch. Display unresolved changes or targets alongside any work that can proceed. A
-successful command returns `schema: 1`. Preflight refusals return `{"schema":1,"error":"..."}`
-and exit 1. Inspect the environment and target states even when the exit code is 0.
+successful command returns `schema: 1`. Preflight refusals return `schema: 1` and `error` and exit 1.
+If planning had already verified part of the scan, the error also includes a `partial` object with
+the available findings. Dispatch requires a completed plan ID. Inspect the environment and target
+states even when the exit code is 0.
 
 `plan` and `status` are read-only. The worker can poll status during the action the person chose.
 Use `dispatch --resume` to advance a waiting wave of that same action once its prerequisites
-complete. Each advance rechecks the original head, PR decisions, workflows and live coverage.
+complete. Each advance rechecks the original head, PR decisions, workflows and current run state and ordering.
 The same initial dispatch returns the existing receipt. An independent click can select the
 other environment while the first is active. No scheduler calls these commands.
 
 Planning and pre-dispatch revalidation have a 20-second read budget, a six-second timeout per
-GitHub CLI call, and a maximum of 120 GitHub CLI reads per pass. A slow, rate-limited, or unauthorized
-read stops that pass before a reservation or workflow dispatch. The JSON error names the stalled
-phase and how to retry. When Actions returns a missing job or expired log, that target's coverage
-remains unverified. The installed worker can display the existing `error` field as-is.
+GitHub CLI call, and a maximum of 120 GitHub CLI reads per pass. An unavailable read of master
+or the merged PR associations stops the pass before a reservation or workflow dispatch. If
+Actions evidence is unavailable for a target, the plan reports the gap on that target and
+applies prerequisite checks before offering any dispatch. The JSON error for a failed pass
+names the stalled phase and how to retry.
 
 For a read-only diagnosis, run `herdr-task main-app-deploy plan --environment both --diagnostics`.
 This adds an optional `diagnostics` object on success or failure. It includes the elapsed time in
 milliseconds, wall time per phase, and per-category read counts, failures, and cumulative read time.
-Concurrent reads can have more cumulative time than the phase's wall time. Counts refer to Git or
+Concurrent reads can have more cumulative time than the phase's wall time. Workflow listing
+reads can begin during the scan once changed paths establish a target. Counts refer to Git or
 GitHub CLI invocations, including paginated reads as one invocation. Diagnostics stay out of
 `plan_id` and the ledger. Existing clients can omit the flag or ignore the new field.
 
@@ -47,11 +51,13 @@ GitHub CLI invocations, including paginated reads as one invocation. Diagnostics
   walks up to 32 landings. Every landing in the range is inspected independently of the Herdr task
   list, including direct commits and possible rebase landings. The scan reports older history as
   unverified. The worker should present “no deploy needed” as a result for that scanned range.
-- When the primary `~/roboflow/roboflow` clone has the exact commit reported by GitHub, the
-  planner reads its first-parent objects and workflow definitions without fetching or changing
-  the checkout. Missing objects fall back to GitHub. PR bodies and associations are read in
-  batches through GitHub GraphQL on every pass, including dispatch. The same `gh` sign-in needs
-  access to the private repository, its pull requests, and Actions runs, jobs, and logs.
+- The primary `~/roboflow/roboflow` clone supplies first-parent objects and workflow definitions
+  for the exact SHA reported by GitHub. If the verified clone is behind, the planner tries a
+  three-second fetch of only `master` into a private, disposable bare repository, borrowing the
+  clone's objects for negotiation. The fetch leaves the clone and its refs untouched. The REST
+  fallback checks the commit, first parent and patch completeness. PR bodies and associations
+  are read in batches through GitHub GraphQL on every pass, including dispatch. The same `gh`
+  sign-in needs access to the private repository, its pull requests, and Actions runs, jobs, and logs.
 - Each `sources` entry gives the PR number or landing commit, changed paths and their ownership,
   identified targets and unresolved issues. Only a uniquely associated merged master PR supplies
   deploy instructions. The changed files cross-check the PR's targets, including direct Firebase
@@ -64,7 +70,13 @@ GitHub CLI invocations, including paginated reads as one invocation. Diagnostics
   requires the bundle preparation checkout. A candidate has to be on the scanned first-parent
   chain or at its boundary. The target's `pending` commits are the relevant landings after that
   baseline. The environment lists the oldest evidenced baseline among its targets for context.
-  This is Actions evidence, with no live cloud verification.
+  For several required jobs in a run, the planner tries its exact attempt's log archive
+  (up to 4 MiB and two seconds). Only a unique whole-job transcript matched to the attempt's
+  job metadata can supply its checkout SHA. A missing mapping falls back to the numeric job's
+  log endpoint (up to 2 MiB and 3.5 seconds). Verified checkout evidence is kept in a small
+  private cache keyed by run, attempt, SHA, target and environment. Each pass reads current run
+  listings and checks for overlap and prerequisite order before using a cached result.
+  [GitHub run attempt logs](https://docs.github.com/en/rest/actions/workflow-runs#download-workflow-run-attempt-logs)
 - A fresh target without a prior verified run, an expired log, an older run beyond the scan,
   a newer overlapping PR or regional deploy, and a partial or failed release can leave coverage
   unverified. Deploy PR is a staging overlap signal. The planner never invokes it or counts an
