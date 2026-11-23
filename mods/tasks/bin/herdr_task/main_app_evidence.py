@@ -147,4 +147,3 @@ class VerifiedCheckouts:
                            "(SELECT rowid FROM verified ORDER BY rowid DESC LIMIT -1 OFFSET ?)", (PROOF_LIMIT,))
         except (OSError, sqlite3.Error):
             pass
-
