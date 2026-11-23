@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+import zipfile
 from collections import defaultdict
 from pathlib import Path
 from threading import Barrier, Lock
@@ -17,7 +18,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "mods/tasks/bin"))
 
-from herdr_task import deploy, main_app_deploy as dispatch, main_app_release as release
+from herdr_task import deploy, main_app_deploy as dispatch, main_app_evidence as evidence, main_app_release as release
 
 FLOOR, A, B, C, NEW = (str(i) * 40 for i in range(1, 6))
 WORKFLOWS = Path(__file__).parent / "fixtures/roboflow-deploy"
@@ -41,6 +42,7 @@ class Fixture:
         self.posts = []
         self.outcomes = {}
         self.lock = Lock()
+        self.verified = evidence.VerifiedCheckouts(None)
         self.post_barrier = None
         self.add("hosting", "staging", A)
         self.add("hosting", "prod", FLOOR)
@@ -67,11 +69,8 @@ class Fixture:
     def planning(self):
         return contextlib.nullcontext(lambda _: contextlib.nullcontext())
 
-    def landed_changes(self, floor, commits):
+    def landed_changes(self, floor, commits, on_paths):
         return [self.change(sha) for sha in commits]
-
-    def prefetch_workflow_runs(self, files):
-        pass
 
     def file(self, path, sha):
         if path == deploy.ROBOFLOW["index"]:
@@ -93,6 +92,9 @@ class Fixture:
 
     def checkout_sha(self, job):
         return self.job_shas[job]
+
+    def checkouts(self, run, jobs, required):
+        return [self.checkout_sha(job["id"]) for job in required]
 
     def evidence(self, read, items):
         return [read(item) for item in items]
@@ -399,7 +401,8 @@ class ReleaseTests(unittest.TestCase):
         sample = (f"2026-11-21T10:42:00.01Z [command]/usr/bin/git log -1 --format=%H\n"
                   f"2026-11-21T10:42:00.02Z {A}\nOther text {B}")
         api = release.ReleaseGitHub()
-        with mock.patch.object(api, "call", side_effect=[sample, sample + f"\n[command]/usr/bin/git log -1 --format=%H\n{B}", B]):
+        with mock.patch.object(api, "log", side_effect=[
+                value.encode() for value in (sample, sample + f"\n[command]/usr/bin/git log -1 --format=%H\n{B}", B)]):
             self.assertEqual(api.checkout_sha(91), A)
             self.assertIsNone(api.checkout_sha(92))
             self.assertIsNone(api.checkout_sha(93))
@@ -410,12 +413,24 @@ class ReleaseTests(unittest.TestCase):
         with mock.patch.object(api, "api", side_effect=[
             [parents(C, B, NEW), parents(NEW, FLOOR), parents(B, A)],
             parents(A, FLOOR),
-            [{"files": [{"filename": "app/src/a.js"}]}, {"files": [{"filename": "app/src/b.js"}]}],
+            [{**parents(A, FLOOR), "files": [{"filename": name, "changes": 1, "patch": "+modified"}]}
+             for name in ("app/src/a.js", "app/src/b.js")],
         ]) as request:
             self.assertEqual(api.history(C, 3), (FLOOR, [A, B, C]))
             observed = api.changed_files(A, FLOOR)
+            self.assertTrue(observed["complete"])
             self.assertEqual([entry["filename"] for entry in observed["files"]], ["app/src/a.js", "app/src/b.js"])
             self.assertEqual(request.call_args_list[1].args, (f"git/commits/{A}",))
+
+    def test_rest_delta_cannot_clear_a_gap_with_a_missing_patch_or_wrong_parent(self):
+        api = release.ReleaseGitHub()
+        file = {"filename": "app/src/welcome.js", "changes": 2, "patch": "+one"}
+        page = {"sha": A, "parents": [{"sha": FLOOR}], "files": [file]}
+        with mock.patch.object(api, "api", return_value=[page]):
+            self.assertFalse(api.changed_files(A, FLOOR)["complete"])
+            file["patch"] = "-old\n+new"
+            self.assertTrue(api.changed_files(A, FLOOR)["complete"])
+            self.assertFalse(api.changed_files(A, B)["complete"])
 
     def test_associated_pr_batch_verifies_exact_master_unique_and_complete(self):
         api = release.ReleaseGitHub()
@@ -575,6 +590,160 @@ class ReleaseTests(unittest.TestCase):
                 git("remote", "set-url", "origin", "https://github.com/fork/roboflow.git")
                 self.assertIsNone(local.history(head, 1))
             self.assertEqual(git("status", "--porcelain"), status_before)
+
+    def test_missing_master_fetches_only_the_exact_ref_into_a_disposable_bare_cache(self):
+        root = self.path.parent.resolve()
+        source, checkout = root / "source", root / "checkout"
+        source.mkdir()
+
+        def git(path, *args):
+            return subprocess.check_output(["git", "-C", path, *args], text=True, stderr=subprocess.PIPE).strip()
+
+        git(source, "init", "-b", "master")
+        git(source, "config", "user.email", "fixture@example.invalid")
+        git(source, "config", "user.name", "Fixture")
+        git(source, "commit", "--allow-empty", "-m", "Root")
+        seed = git(source, "rev-parse", "HEAD")
+        git(root, "clone", "--no-hardlinks", source, checkout)
+        git(checkout, "remote", "set-url", "origin", "git@github.com:roboflow/roboflow.git")
+        (source / "page").write_text("new master file")
+        git(source, "add", ".")
+        git(source, "commit", "-m", "Change")
+        head = git(source, "rev-parse", "HEAD")
+        index = (checkout / ".git/index").stat().st_mtime_ns
+        reads = release.PlanReads()
+        local = release.LocalReleaseGit(reads)
+        local.root = checkout
+
+        def fetch(command, **kwargs):
+            self.assertNotEqual(kwargs["cwd"], checkout)
+            self.assertEqual(command[-2:], [f"https://github.com/{release.REPO}.git",
+                                            "+refs/heads/master:refs/heads/master"])
+            self.assertIn("--no-tags", command)
+            command = ["protocol.file.allow=always" if arg == "protocol.https.allow=always" else arg
+                       for arg in command]
+            command[-2] = str(source)
+            return evidence.bounded_output(command, **kwargs)
+
+        with contextlib.ExitStack() as scratch, reads.phase("history"), mock.patch.object(
+                release, "bounded_output", side_effect=fetch):
+            self.assertEqual(local.history(head, 1, scratch=scratch), (seed, [head]))
+            cache = local.cache
+            self.assertEqual(local.file("page", head), "new master file")
+            self.assertEqual(local.change(head, seed)["files"], [{"filename": "page"}])
+        self.assertFalse(cache.exists())
+        self.assertEqual(git(checkout, "rev-parse", "HEAD", "refs/remotes/origin/master"), f"{seed}\n{seed}")
+        self.assertEqual((checkout / ".git/index").stat().st_mtime_ns, index)
+        with self.assertRaises(subprocess.CalledProcessError):
+            git(checkout, "cat-file", "-t", head)
+
+    def test_attempt_archive_maps_unique_job_names_and_rejects_ambiguous_logs(self):
+        first = {"id": 1, "name": "Fast lane (functions:light-v2-agent) / Build once"}
+        second = {"id": 2, "name": "Deploy hosting (prod)"}
+        log = f"[command]/usr/bin/git log -1 --format=%H\n{A}\n"
+
+        def archive(entries):
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as zipped:
+                for name, text in entries:
+                    zipped.writestr(name, text)
+            return buf.getvalue()
+
+        name = "Fast lane (functionslight-v2-agent) _ Build once"
+        archive_entries = [(f"7_{name}.txt", log), ("0_Deploy hosting (prod).txt", log + log.replace(A, B))]
+        self.assertEqual(evidence.archive_checkouts(archive(archive_entries), [first, second], [first, second]),
+                         {1: A, 2: None})
+        collision = {"id": 3, "name": name}
+        self.assertNotIn(1, evidence.archive_checkouts(archive(archive_entries), [first, second, collision], [first]))
+        self.assertNotIn(1, evidence.archive_checkouts(archive(archive_entries + [(f"8_{name}.txt", log)]),
+                                                       [first, second], [first]))
+        with mock.patch.object(evidence, "JOB_LOG_BYTES", 1):
+            self.assertEqual(evidence.archive_checkouts(archive(archive_entries), [first, second], [first, second]), {})
+
+    def test_archive_and_job_endpoints_use_exact_attempt_and_numeric_job_id(self):
+        api = release.ReleaseGitHub()
+        run = {"id": 50, "attempt": 2}
+        jobs = [{"id": 51, "name": "One"}, {"id": 52, "name": "Two"}]
+        log = f"[command]git log -1 --format=%H\n{A}\n".encode()
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zipped:
+            zipped.writestr("1_One.txt", log)
+        with mock.patch.object(api, "log", side_effect=[buf.getvalue(), log]) as read:
+            self.assertEqual(api.checkouts(run, jobs, jobs), [A, A])
+            self.assertEqual([call.args[0] for call in read.call_args_list],
+                             ["actions/runs/50/attempts/2/logs", "actions/jobs/52/logs"])
+
+    def test_cache_skips_verified_jobs_but_rechecks_run_status_prs_and_master(self):
+        path = self.path.with_name("release-evidence.sqlite3")
+        self.g.verified = evidence.VerifiedCheckouts(path)
+        initial = self.plan()
+        self.g.verified = evidence.VerifiedCheckouts(path)
+        with mock.patch.object(self.g, "jobs", wraps=self.g.jobs) as jobs:
+            self.assertEqual(self.plan(), initial)
+            jobs.assert_not_called()
+            self.g.changes[C]["pr"]["body"] += "\n## Infrastructure impact\nNew rollout needs review."
+            self.assertNotEqual(self.plan()["plan_id"], initial["plan_id"])
+            run_id = row(initial, "prod", HOSTING)["baseline"]["id"]
+            self.g.runs[run_id]["attempt"] = 2
+            result = row(self.plan(), "prod", HOSTING)
+            self.assertEqual(result["state"], "unverified")
+            self.assertIn("rerun", result["reason"])
+            self.g.master = NEW
+            with self.assertRaisesRegex(deploy.GitHubError, "Master moved"):
+                self.start(initial)
+        self.assertFalse(self.path.exists())
+        self.assertEqual(self.g.posts, [])
+
+    def test_unproven_jobs_are_retried_and_never_dispatched(self):
+        self.g.verified = evidence.VerifiedCheckouts(self.path.with_name("release-evidence.sqlite3"))
+        real = self.g.checkouts
+
+        def denied(run, jobs, required):
+            if run["path"].endswith("deploy-hosting.yaml"):
+                raise deploy.GitHubError("HTTP 403")
+            return real(run, jobs, required)
+
+        with mock.patch.object(self.g, "checkouts", side_effect=denied):
+            plan = self.plan("prod")
+            self.assertEqual(row(plan, "prod", HOSTING)["state"], "unverified")
+            self.assertIn("HTTP 403", row(plan, "prod", HOSTING)["reason"])
+            self.assertEqual(row(plan, "prod", FUNCTION)["state"], "ready")
+            self.start(plan)
+        self.assertNotIn(("prod", HOSTING), self.g.posts)
+        self.assertEqual(row(self.plan("prod"), "prod", HOSTING)["state"], "ready")
+
+    def test_log_read_enforces_real_process_time_and_byte_limits(self):
+        api = release.ReleaseGitHub()
+        runner = self.path.parent / "fixture-gh"
+        runner.write_text(f"#!{sys.executable}\nimport sys, time\n"
+                          "if 'slow' in sys.argv[2]: time.sleep(10)\n"
+                          "else: sys.stdout.write('x' * 4096)\n")
+        runner.chmod(0o700)
+        with mock.patch.object(release, "GH", str(runner)):
+            start = time.monotonic()
+            with self.assertRaisesRegex(deploy.GitHubError, "did not respond in time"):
+                api.log("slow", 1024, "logs", seconds=0.25)
+            self.assertLess(time.monotonic() - start, 2)
+            with self.assertRaisesRegex(deploy.GitHubError, "size limit"):
+                api.log("large", 1024, "logs")
+
+    def test_cli_preserves_scoped_evidence_if_final_master_read_fails(self):
+        out = io.StringIO()
+        with (mock.patch.object(dispatch, "ReleaseGitHub", return_value=self.g),
+              mock.patch.object(dispatch, "ledger_path", return_value=self.path),
+              mock.patch.object(self.g, "head", side_effect=[C, deploy.GitHubError("GitHub timed out")]),
+              contextlib.redirect_stdout(out)):
+            code = dispatch.cmd_release(argparse.Namespace(operation="plan", environment="both", diagnostics=False))
+        result = json.loads(out.getvalue())
+        self.assertEqual(code, 1)
+        self.assertNotIn("plan_id", result)
+        self.assertEqual(result["partial"]["scan"]["through"], C)
+        self.assertEqual(len(result["partial"]["sources"]), 3)
+        hosted = row(result["partial"], "prod", HOSTING)
+        self.assertEqual(hosted["state"], "blocked")
+        self.assertEqual(hosted["baseline"]["sha"], FLOOR)
+        self.assertEqual(self.g.posts, [])
+        self.assertFalse(self.path.exists())
 
     def test_read_budget_produces_schema_one_error_without_plan_or_ledger(self):
         api = release.ReleaseGitHub()

@@ -266,8 +266,8 @@ def start_or_resume(g, ledger, selection, head, plan_id, *, resume=False):
 
 
 def cmd_release(args):
-    g = ReleaseGitHub()
     ledger = Ledger(Path(ledger_path()).absolute())
+    g = ReleaseGitHub(ledger.path.with_name(".main-app-deploy-evidence.sqlite3"))
     try:
         if args.operation == "plan":
             result = release_plan(g, args.environment)
@@ -298,6 +298,8 @@ def cmd_release(args):
         else:
             reason = "GitHub returned an unreadable release response."
         result = {"schema": 1, "error": reason}
+        if args.operation == "plan" and getattr(error, "partial", None):
+            result["partial"] = error.partial
     if getattr(args, "diagnostics", False) and g.diagnostics is not None:
         result = {**result, "diagnostics": g.diagnostics}
     print(json.dumps(result))
