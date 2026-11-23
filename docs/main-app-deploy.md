@@ -28,12 +28,30 @@ complete. Each advance rechecks the original head, PR decisions, workflows and l
 The same initial dispatch returns the existing receipt. An independent click can select the
 other environment while the first is active. No scheduler calls these commands.
 
+Planning and pre-dispatch revalidation have a 20-second read budget, a six-second timeout per
+GitHub CLI call, and a maximum of 120 GitHub CLI reads per pass. A slow, rate-limited, or unauthorized
+read stops that pass before a reservation or workflow dispatch. The JSON error names the stalled
+phase and how to retry. When Actions returns a missing job or expired log, that target's coverage
+remains unverified. The installed worker can display the existing `error` field as-is.
+
+For a read-only diagnosis, run `herdr-task main-app-deploy plan --environment both --diagnostics`.
+This adds an optional `diagnostics` object on success or failure. It includes the elapsed time in
+milliseconds, wall time per phase, and per-category read counts, failures, and cumulative read time.
+Concurrent reads can have more cumulative time than the phase's wall time. Counts refer to Git or
+GitHub CLI invocations, including paginated reads as one invocation. Diagnostics stay out of
+`plan_id` and the ledger. Existing clients can omit the flag or ignore the new field.
+
 ## Coverage and planning
 
 - `scan` reports the first-parent range of master analyzed, through the exact head. Initial discovery
   walks up to 32 landings. Every landing in the range is inspected independently of the Herdr task
   list, including direct commits and possible rebase landings. The scan reports older history as
   unverified. The worker should present “no deploy needed” as a result for that scanned range.
+- When the primary `~/roboflow/roboflow` clone has the exact commit reported by GitHub, the
+  planner reads its first-parent objects and workflow definitions without fetching or changing
+  the checkout. Missing objects fall back to GitHub. PR bodies and associations are read in
+  batches through GitHub GraphQL on every pass, including dispatch. The same `gh` sign-in needs
+  access to the private repository, its pull requests, and Actions runs, jobs, and logs.
 - Each `sources` entry gives the PR number or landing commit, changed paths and their ownership,
   identified targets and unresolved issues. Only a uniquely associated merged master PR supplies
   deploy instructions. The changed files cross-check the PR's targets, including direct Firebase

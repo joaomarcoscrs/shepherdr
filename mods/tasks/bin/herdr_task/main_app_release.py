@@ -2,11 +2,16 @@
 
 import hashlib
 import json
+import os
 import posixpath
 import re
-from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache
-from subprocess import TimeoutExpired
+import subprocess
+from collections import defaultdict
+from concurrent.futures import Future, ThreadPoolExecutor, wait
+from contextlib import contextmanager, nullcontext
+from pathlib import Path
+from threading import BoundedSemaphore, Lock
+from time import monotonic
 
 from . import deploy
 from .github import gh
@@ -15,7 +20,14 @@ REPO = deploy.ROBOFLOW["repo"]
 REF = deploy.ROBOFLOW["branch"]
 ENVIRONMENTS = {"staging": ("staging",), "prod": ("prod",), "both": ("staging", "prod")}
 SCAN_LIMIT = 32
+PLAN_SECONDS = 20
+READ_SECONDS = 6
+READ_LIMIT = 120
+READ_WORKERS = 8
 SHA = re.compile(r"[0-9a-f]{40}")
+ORIGIN = re.compile(r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)roboflow/roboflow(?:\.git)?",
+                    re.I)
+ROLLOUT = re.compile(r"^[+-].*(loginlessExampleDrafts|/query/solutions/loginless-example/|/agent-examples)", re.M)
 TTL = "deploy-ttl.yaml"
 INDEXES = "deploy-indexes.yaml"
 RULES = "deploy-rules.yaml"
@@ -56,68 +68,348 @@ def digest(value):
 
 
 def parallel(fn, seq):
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    with ThreadPoolExecutor(max_workers=READ_WORKERS) as pool:
         return list(pool.map(fn, seq))
+
+
+class PlanningError(deploy.GitHubError):
+    """A transport or completeness failure that invalidates the entire plan."""
+
+
+class ApprovedHeadMoved(deploy.GitHubError):
+    """Master already differed from the approved head when revalidation began."""
+
+
+class PlanReads:
+    def __init__(self):
+        self.start = monotonic()
+        self.label = "master head"
+        self.phases = {}
+        self.calls = 0
+        self.failure = None
+        self.lock = Lock()
+        self.slot = BoundedSemaphore(READ_WORKERS)
+
+    @contextmanager
+    def phase(self, label):
+        self.label = label
+        start = monotonic()
+        counts = defaultdict(lambda: {"calls": 0, "errors": 0, "elapsed_ms": 0})
+        self.phases[label] = {"reads": counts}
+        try:
+            yield
+            self.remaining()
+        finally:
+            self.phases[label]["elapsed_ms"] = round(1000 * (monotonic() - start))
+
+    def remaining(self):
+        if self.failure:
+            raise PlanningError(self.failure)
+        left = PLAN_SECONDS - (monotonic() - self.start)
+        if left <= 0:
+            self.fail("Time limit reached. Check GitHub connectivity and try again.")
+        return left
+
+    def fail(self, reason):
+        with self.lock:
+            if not self.failure:
+                self.failure = f"Deploy planning stopped during {self.label}. {reason}"
+        raise PlanningError(self.failure)
+
+    @contextmanager
+    def read(self, kind, category):
+        timeout = min(READ_SECONDS, self.remaining())
+        start = monotonic()
+        with self.lock:
+            self.calls += kind == "github"
+            over = self.calls > READ_LIMIT
+            stats = self.phases[self.label]["reads"][f"{kind}: {category}"]
+            if not over:
+                stats["calls"] += 1
+        if over:
+            self.fail("GitHub read limit reached. Inspect recent Actions runs and retry once overlap has settled.")
+        try:
+            yield timeout
+        except Exception:
+            with self.lock:
+                stats["errors"] += 1
+            raise
+        finally:
+            with self.lock:
+                stats["elapsed_ms"] += round(1000 * (monotonic() - start))
+
+    def result(self):
+        return {"elapsed_ms": round(1000 * (monotonic() - self.start)), "phases": self.phases}
+
+
+def read_category(args):
+    path = args[1].split("?", 1)[0]
+    if path == "graphql":
+        return "associated PR batches"
+    if "/contents/" in path:
+        return "files at master"
+    if path.endswith("/jobs"):
+        return "run jobs"
+    if path.endswith("/logs"):
+        return "checkout logs"
+    if "/actions/workflows/" in path:
+        return "workflow runs"
+    return "commit metadata"
+
+
+class LocalReleaseGit:
+    """Use only immutable objects from the same primary checkout as Comando."""
+
+    def __init__(self, reads):
+        self.root = Path.home() / REPO
+        self.reads = reads
+        # Ignore ambient repository overrides, replacement refs, grafts and promisor fetches.
+        self.env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        self.env.update(GIT_NO_REPLACE_OBJECTS="1", GIT_NO_LAZY_FETCH="1", GIT_GRAFT_FILE=os.devnull,
+                        GIT_OPTIONAL_LOCKS="0")
+
+    def git(self, category, *args):
+        try:
+            with self.reads.read("git", category) as timeout:
+                return subprocess.check_output(["git", "-C", self.root, *args], env=self.env, timeout=timeout,
+                                               stderr=subprocess.DEVNULL).decode("utf-8")
+        except (subprocess.SubprocessError, OSError, UnicodeError):
+            return None
+
+    def history(self, head, limit):
+        if not self.root.is_dir():
+            return None
+        config = self.git("checkout identity", "config", "--get-regexp",
+                          r"^(remote\.origin\.url|extensions\.partialclone|remote\..*\.promisor)$")
+        root = self.git("checkout identity", "rev-parse", "--path-format=absolute", "--show-toplevel",
+                        "--absolute-git-dir", "--git-common-dir", "--is-shallow-repository")
+        origin = (config or "").strip().removeprefix("remote.origin.url ")
+        if not ORIGIN.fullmatch(origin) or root != (
+                f"{self.root}\n{self.root / '.git'}\n{self.root / '.git'}\nfalse\n"):
+            return None
+        chain = self.git("first parents", "rev-list", "--first-parent", f"--max-count={limit + 1}", head)
+        shas = chain.splitlines() if chain else []
+        if not shas or shas[0] != head or any(not SHA.fullmatch(sha) for sha in shas):
+            return None
+        return (shas[-1], list(reversed(shas[:-1]))) if len(shas) > limit else (None, list(reversed(shas)))
+
+    def file(self, path, sha):
+        result = self.git("files at master", "show", f"{sha}:{path}")
+        return result.strip() if result is not None else None
+
+    def change(self, sha, parent):
+        # Use GitHub for the root diff, a missing tree or the special firebase.json patch.
+        if not parent:
+            return None
+        args = ("--no-ext-diff", "--no-textconv", "--no-color", "--no-relative", "--ignore-submodules=none",
+                "--submodule=short", "--find-renames", "-l0", parent, sha, "--")
+        names = self.git("first-parent paths", "diff", "--name-status", "-z", *args)
+        if names is None:
+            return None
+        names = iter(names.removesuffix("\0").split("\0")) if names else iter(())
+        files = []
+        for status in names:
+            source = next(names, None)
+            if not source:
+                return None
+            if status.startswith(("R", "C")):
+                dest = next(names, None)
+                if not dest:
+                    return None
+                files.append({"filename": dest, "previous_filename": source})
+            else:
+                files.append({"filename": source})
+        if any("app/firebase.json" in row.values() for row in files):
+            return None
+        patch = self.git("first-parent rollout diff", "diff", "--patch", "--unified=0", *args) if files else ""
+        if patch is None:
+            return None
+        # Skip patch headers, including a file name containing a rollout marker.
+        hunks = re.split(r"^diff --git ", patch, flags=re.M)
+        rollout = any(ROLLOUT.search(diff[diff.index("\n@@ "):]) for diff in hunks if "\n@@ " in diff)
+        return {"sha": sha, "files": files, "complete": True, "rollout": rollout}
 
 
 class ReleaseGitHub(deploy.GitHub):
     def __init__(self):
         super().__init__(REPO)
+        self.reads = None
+        self.diagnostics = None
+        self.local = None
+        self.evidence_pool = None
+        self.pending = {}
+        self.lock = Lock()
+
+    @contextmanager
+    def planning(self):
+        self.reads = PlanReads()
+        self.local = None
+        self.pending.clear()
+        try:
+            with ThreadPoolExecutor(max_workers=READ_WORKERS) as self.evidence_pool:
+                yield self.reads.phase
+        finally:
+            self.diagnostics = self.reads.result()
+            self.reads = None
+            self.local = None
+            self.evidence_pool = None
+            # Run listings, attempts and results are refreshed in each plan and subsequent status.
+            self.pending.clear()
+
+    def once(self, key, read):
+        # lru_cache lets concurrent misses through. One caller owns each read for this pass.
+        with self.lock:
+            future = self.pending.get(key)
+            owner = future is None
+            if owner:
+                future = self.pending[key] = Future()
+        if owner:
+            try:
+                future.set_result(read())
+            except BaseException as error:
+                future.set_exception(error)
+        return future.result()
 
     def call(self, *args):
-        try:
-            ok, out, error = gh(*args, "--hostname", "github.com", cwd="/", timeout=30)
-        except TimeoutExpired:
-            raise deploy.GitHubError("GitHub request timed out") from None
-        if not ok:
-            # Preserve a status code for diagnosis without returning arbitrary response or log text.
-            status = re.search(r"\bHTTP [1-5][0-9]{2}\b", error)
-            raise deploy.GitHubError(status.group() if status else "GitHub request failed")
+        reads = self.reads
+        category = read_category(args) if reads else None
+        request = reads.read("github", category) if reads else nullcontext(30)
+        with (reads.slot if reads else nullcontext()), request as timeout:
+            try:
+                ok, out, error = gh(*args, "--hostname", "github.com", cwd="/", timeout=timeout)
+            except subprocess.TimeoutExpired:
+                if reads:
+                    reads.fail("GitHub did not respond in time. Check connectivity and try again.")
+                raise deploy.GitHubError("GitHub request timed out") from None
+            if not ok:
+                # Report safe diagnostics, without returning response bodies, logs or credentials.
+                status = re.search(r"\bHTTP [1-5][0-9]{2}\b", error)
+                message = status.group() if status else "GitHub request failed"
+                optional = category in {"workflow runs", "run jobs", "checkout logs"} or (
+                    category == "files at master" and reads and reads.label == "workflow definitions")
+                if reads and (message != "HTTP 404" or not optional):
+                    if re.search(r"rate.limit", error, re.I) or message == "HTTP 429":
+                        reads.fail("GitHub rate limited the reads. Retry after the limit resets.")
+                    if message in {"HTTP 401", "HTTP 403", "HTTP 404"} or "gh auth login" in error or "FORBIDDEN" in error:
+                        reads.fail(f"{message}. Check gh sign-in and repository, pull request and Actions read access.")
+                    reads.fail(f"{message}. Check gh connectivity and access, then try again.")
+                raise deploy.GitHubError(message)
         return out
 
     def api(self, path, *args):
         return self.json("api", f"repos/{REPO}/{path}", *args)
 
+    def head(self, branch):
+        sha = self.call("api", f"repos/{REPO}/git/ref/heads/{branch}", "--jq", ".object.sha")
+        if not SHA.fullmatch(sha):
+            raise deploy.GitHubError(f"{branch}'s head unreadable")
+        return sha
+
     def history(self, head, limit):
+        if self.reads:
+            local = LocalReleaseGit(self.reads)
+            chain = local.history(head, limit)
+            if chain:
+                self.local = local
+                return chain
         # REST lists the graph, so follow only explicit first-parent edges, fetching parents
         # omitted from the page (for example after a merge with a large side branch).
-        page = self.api(f"commits?sha={head}&per_page=100")
+        page = self.api(f"commits?sha={head}&per_page=100", "--jq", "[.[] | {sha, parents: [.parents[] | {sha}]}]")
         commits = {row["sha"]: row for row in page}
         landed = []
         while head and len(landed) < limit:
-            row = commits.get(head) or self.api(f"commits/{head}")
+            row = commits.get(head) or self.api(f"git/commits/{head}")
             parents = row["parents"]
             parent = parents[0]["sha"] if parents else None
             landed.append(head)
             head = parent
         return head, list(reversed(landed))
 
-    def change(self, sha):
+    def changed_files(self, sha, parent):
+        local = self.local.change(sha, parent) if self.local else None
+        if local is not None:
+            return local
         # GET a merge commit's diff against its first parent. GitHub caps returned files at 3000.
         pages = self.api(f"commits/{sha}?per_page=100", "--paginate", "--slurp")
         files = [row for page in pages for row in page["files"]]
-        pulls = self.api(f"commits/{sha}/pulls?per_page=100", "--paginate", "--slurp")
-        exact = [pr for page in pulls for pr in page if pr["merge_commit_sha"] == sha
-                 and pr.get("merged_at") and pr["base"]["ref"] == REF]
-        pr = exact[0] if len(exact) == 1 else None
-        return {"sha": sha, "files": files, "pr": pr, "complete": bool(pages) and len(files) < 3000}
+        return {"sha": sha, "files": files, "complete": bool(pages) and len(files) < 3000}
 
-    @lru_cache(maxsize=64)
+    def associated_prs(self, shas):
+        fields = ("oid associatedPullRequests(first: 20) { pageInfo { hasNextPage } "
+                  "nodes { number body url mergedAt mergeCommit { oid } baseRefName baseRepository { nameWithOwner } } }")
+        aliases = [f'c{i}: object(oid: "{sha}") {{ ... on Commit {{ {fields} }} }}' for i, sha in enumerate(shas)]
+        query = 'query { repository(owner: "roboflow", name: "roboflow") { ' + " ".join(aliases) + " } }"
+        response = self.json("api", "graphql", "-f", "query=" + query)
+        if not isinstance(response, dict) or response.get("errors") or not (response.get("data") or {}).get("repository"):
+            self.reads.fail("GitHub did not return PR associations. Check repository and pull request read access.")
+        repo = response["data"]["repository"]
+        result = {}
+        for i, sha in enumerate(shas):
+            commit = repo[f"c{i}"]
+            if not commit or commit["oid"] != sha:
+                self.reads.fail("GitHub did not return the requested master commits. Try again.")
+            connection = commit["associatedPullRequests"]
+            if connection["pageInfo"]["hasNextPage"]:
+                self.reads.fail("A master commit has too many associated PRs to verify. Inspect the commit in GitHub.")
+            exact = [pr for pr in connection["nodes"] if (pr.get("mergeCommit") or {}).get("oid") == sha
+                     and pr.get("mergedAt") and pr["baseRefName"] == REF
+                     and (pr.get("baseRepository") or {}).get("nameWithOwner", "").lower() == REPO]
+            result[sha] = {"number": exact[0]["number"], "body": exact[0]["body"],
+                           "html_url": exact[0]["url"]} if len(exact) == 1 else None
+        return result
+
+    def landed_changes(self, floor, commits):
+        batches = [commits[i:i + 8] for i in range(0, len(commits), 8)]
+        parents = dict(zip(commits, [floor, *commits]))
+        # Share a bounded pool between the PR batches and commit diffs.
+        with ThreadPoolExecutor(max_workers=READ_WORKERS) as pool:
+            prs = [pool.submit(self.associated_prs, batch) for batch in batches]
+            files = [pool.submit(self.changed_files, sha, parents[sha]) for sha in commits]
+            joined = {sha: pr for batch in prs for sha, pr in batch.result().items()}
+            return [{**item, "pr": joined[item["sha"]]} for item in (job.result() for job in files)]
+
+    def file(self, path, ref):
+        local = self.local.file(path, ref) if self.local else None
+        return local if local is not None else super().file(path, ref)
+
     def workflow_runs(self, file):
         # Across branches and events: staging PR deployments and side workflows can overlap.
-        return self.api(f"actions/workflows/{file}/runs?per_page=100", "--jq",
-                        f'{{total: .total_count, runs: [.workflow_runs[] | {RUN_FIELDS}]}}')
+        return self.once(("runs", file), lambda: self.api(f"actions/workflows/{file}/runs?per_page=100", "--jq",
+                                                         f'{{total: .total_count, runs: [.workflow_runs[] | {RUN_FIELDS}]}}'))
+
+    def prefetch_workflow_runs(self, files):
+        def fetch(file):
+            try:
+                self.workflow_runs(file)
+            except PlanningError:
+                raise
+            except deploy.GitHubError:
+                # The cached error is reported for each affected target in the coverage phase.
+                pass
+
+        parallel(fetch, files)
 
     def exact_run(self, run_id):
         return self.api(f"actions/runs/{int(run_id)}", "--jq", RUN_FIELDS)
 
-    @lru_cache(maxsize=256)
     def jobs(self, run_id, attempt):
-        pages = self.api(f"actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100", "--paginate", "--slurp")
-        return [job for page in pages for job in page["jobs"]]
+        def read():
+            pages = self.api(f"actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100", "--paginate", "--slurp")
+            return [job for page in pages for job in page["jobs"]]
 
-    @lru_cache(maxsize=256)
+        return self.once(("jobs", run_id, attempt), read)
+
     def checkout_sha(self, job_id):
+        return self.once(("checkout", job_id), lambda: self.read_checkout_sha(job_id))
+
+    def evidence(self, read, items):
+        if not self.evidence_pool:
+            return [read(item) for item in items]
+        jobs = [self.evidence_pool.submit(read, item) for item in items]
+        wait(jobs)
+        return [job.result() for job in jobs]
+
+    def read_checkout_sha(self, job_id):
         log = self.call("api", f"repos/{REPO}/actions/jobs/{job_id}/logs")
         # actions/checkout emits this as the last command of the checkout step. Multiple distinct
         # checkouts in one job require separate provenance and aren't accepted here.
@@ -253,8 +545,7 @@ def parse_source(change, functions, entries, template):
         for after in group:
             deps.update((before, after) for prior in groups[:i] for before in prior if before != after)
     manual = {key for key in declared | known if key.startswith("manual:")}
-    rollout = any(re.search(r"^[+-].*(loginlessExampleDrafts|/query/solutions/loginless-example/|/agent-examples)",
-                            patch, re.M) for patch in patches)
+    rollout = change.get("rollout") or any(ROLLOUT.search(patch) for patch in patches)
     if rollout:
         deps.update({("function:light-v2-agent", scope("manual", TTL)), (scope("manual", TTL), "hosting")})
     if not groups:
@@ -416,19 +707,23 @@ def verify_run(g, target, env, run):
         publish_steps = PUBLISH_STEPS[family]
         if family == "rapid":
             publish_steps = (publish_steps[0 if part == "hosting" else 1],)
-        evidence = []
+        job_ids = []
         for name in expected:
             job = names.get(name)
             if not job or job["conclusion"] != "success":
-                return evidence, f"Missing successful job: {name}."
+                return [], f"Missing successful job: {name}."
             if name in publish_jobs and not set(publish_steps) <= {
                     step["name"] for step in job["steps"] if step["conclusion"] == "success"}:
-                return evidence, f"The publishing steps in {name} could not be verified."
-            checkout = g.checkout_sha(job["id"])
-            evidence.append({"job": name, "id": job["id"], "checkout_sha": checkout})
+                return [], f"The publishing steps in {name} could not be verified."
+            job_ids.append(job["id"])
+        checkouts = g.evidence(g.checkout_sha, job_ids)
+        evidence = [{"job": name, "id": job, "checkout_sha": checkout}
+                    for name, job, checkout in zip(expected, job_ids, checkouts)]
         if not evidence or any(item["checkout_sha"] != sha for item in evidence):
             return evidence, "Deployment checkout SHA is missing or differs from the event SHA."
         return evidence, None
+    except PlanningError:
+        raise
     except (deploy.GitHubError, KeyError):
         return [], "Deployment job evidence is unavailable."
 
@@ -441,10 +736,6 @@ def run_view(run, evidence=None):
 
 
 def pr_run_may_overlap(g, run, target):
-    if (run.get("title") or "").endswith(" (dry run)"):
-        return False
-    if run["status"] != "completed":
-        return True
     key = target.split(":")[0]
     label = {"function": "Functions", "api": "API"}.get(key, key.title())
     jobs = g.jobs(run["id"], run.get("attempt") or 1)
@@ -465,20 +756,24 @@ def coverage(g, target, env, commits):
             if not title_covers(target, env, file, run.get("title"), full=False):
                 continue
             found.append((run, file))
+    def order(run):
+        return deploy.ms(run.get("created")), run["id"]
+
+    pr_runs = []
     if env == "staging" and DEPLOY_PR in files:
-        newest = max((deploy.ms(run.get("created")) for run, _ in found), default=0)
-        for run in g.workflow_runs(DEPLOY_PR)["runs"]:
-            if (run["status"] != "completed" or deploy.ms(run.get("updated")) >= newest) and pr_run_may_overlap(g, run, target):
-                found.append((run, DEPLOY_PR))
-    found.sort(key=lambda item: (deploy.ms(item[0].get("created")), item[0]["id"]), reverse=True)
-    for run, _ in found:
-        if run["status"] != "completed":
-            return None, run_view(run), "An overlapping workflow is still active."
+        pr_runs = [run for run in g.workflow_runs(DEPLOY_PR)["runs"]
+                   if not (run.get("title") or "").endswith(" (dry run)")]
+    active = [run for run, _ in found if run["status"] != "completed"]
+    active.extend(run for run in pr_runs if run["status"] != "completed")
+    if active:
+        return None, run_view(max(active, key=order)), "An overlapping workflow is still active."
     if not found:
-        return None, None, "No overlapping deployment was found in the available workflow history."
+        return None, None, "No full-tier master baseline was found in the available workflow history."
+    found.sort(key=lambda item: order(item[0]), reverse=True)
     run, file = found[0]
     observed = run_view(run)
-    if any(deploy.ms(other.get("updated")) > deploy.ms(run.get("created")) for other, _ in found[1:]):
+    created = order(run)[0]
+    if any(deploy.ms(other.get("updated")) > created for other, _ in found[1:]):
         return None, observed, "Overlapping workflow completion order could not be verified."
     if run["conclusion"] != "success":
         return None, observed, "The latest overlapping workflow did not pass."
@@ -487,6 +782,20 @@ def coverage(g, target, env, commits):
         return None, observed, "The latest overlapping run cannot establish full coverage on master in this scan."
     if run.get("attempt", 1) != 1:
         return None, observed, "A rerun does not establish the order of its past deployments."
+    # Completed PR deploys can disqualify a possible baseline, never establish one. Once a
+    # conflicting run is proven, older PR jobs cannot restore coverage.
+    candidates = [pr for pr in sorted(pr_runs, key=order, reverse=True)
+                  if deploy.ms(pr.get("updated")) > created
+                  or (deploy.ms(pr.get("updated")) == created and order(pr) > order(run))]
+    for start in range(0, len(candidates), 4):
+        batch = candidates[start:start + 4]
+        overlaps = g.evidence(lambda pr: pr_run_may_overlap(g, pr, target), batch)
+        for pr, overlap in zip(batch, overlaps):
+            if not overlap:
+                continue
+            if order(pr) > order(run):
+                return None, run_view(pr), "The latest overlapping run cannot establish full coverage on master in this scan."
+            return None, observed, "Overlapping workflow completion order could not be verified."
     evidence, problem = verify_run(g, target, env, run)
     observed["jobs"] = evidence
     return (observed, observed, None) if not problem else (None, observed, problem)
@@ -495,20 +804,36 @@ def coverage(g, target, env, commits):
 def read_workflow(g, file, head):
     try:
         return g.file(f".github/workflows/{file}", head)
+    except PlanningError:
+        raise
     except deploy.GitHubError:
         return ""
 
 
-def release_plan(g, selection, *, limit=SCAN_LIMIT):
-    head = g.head(REF)
-    floor, commits = g.history(head, limit)
-    if not commits or commits[-1] != head:
-        raise deploy.GitHubError("Master history is incomplete")
-    index = g.file(deploy.ROBOFLOW["index"], head)
-    functions = deploy.functions_at(index)
-    entries = registrations(index)
-    template = deploy.template_lines(g.file(deploy.ROBOFLOW["template"], head))
-    sources = [parse_source(change, functions, entries, template) for change in parallel(g.change, commits)]
+def release_plan(g, selection, *, limit=SCAN_LIMIT, expected_head=None):
+    with g.planning() as phase:
+        return build_plan(g, selection, limit, expected_head, phase)
+
+
+def build_plan(g, selection, limit, expected_head, phase):
+    with phase("master head"):
+        head = g.head(REF)
+        if expected_head is not None and head != expected_head:
+            raise ApprovedHeadMoved("Master moved since the plan was approved.")
+    with phase("first-parent history"):
+        floor, commits = g.history(head, limit)
+        chain = [*([floor] if floor else []), *commits]
+        if (not commits or commits[-1] != head or len(chain) != len(set(chain))
+                or any(not SHA.fullmatch(sha) for sha in chain)):
+            raise deploy.GitHubError("Master history is incomplete. Check GitHub and try again.")
+    with phase("merged changes and deploy instructions"):
+        index_path, template_path = (deploy.ROBOFLOW[name] for name in ("index", "template"))
+        index, template_text = parallel(lambda path: g.file(path, head), (index_path, template_path))
+        functions = deploy.functions_at(index)
+        entries = registrations(index)
+        template = deploy.template_lines(template_text)
+        changes = g.landed_changes(floor, commits)
+        sources = [parse_source(change, functions, entries, template) for change in changes]
     targets = {target for source in sources for target in source["targets"]}
     edges = {tuple(edge) for source in sources for edge in source["manual_edges"]}
     # Preserve ordering internal to the 'both' deploy_target when sending parts separately.
@@ -520,7 +845,14 @@ def release_plan(g, selection, *, limit=SCAN_LIMIT):
         targets.update({scope("manual", TTL), "function:light-v2-agent"})
     targets = sorted(targets)
     files = {target: related_files(target)[0] for target in targets}
-    workflows = dict(parallel(lambda file: (file, read_workflow(g, file, head)), sorted(set(files.values()))))
+    with phase("workflow definitions"):
+        workflows = dict(parallel(lambda file: (file, read_workflow(g, file, head)), sorted(set(files.values()))))
+    with phase("workflow runs"):
+        run_files = {file for target in targets
+                     if not target.startswith("manual:") or files[target] in MANUAL_TITLES
+                     for file in related_files(target)
+                     if file != DEPLOY_PR or "staging" in ENVIRONMENTS[selection]}
+        g.prefetch_workflow_runs(sorted(run_files))
     order = {sha: i for i, sha in enumerate([floor, *commits])}
     gaps = [source["commit"] for source in sources if source["issues"]]
 
@@ -530,6 +862,8 @@ def release_plan(g, selection, *, limit=SCAN_LIMIT):
         unit, problem = unit_for(target, env, workflows[files[target]])
         try:
             baseline, observed, why = coverage(g, target, env, order)
+        except PlanningError:
+            raise
         except deploy.GitHubError as error:
             baseline, observed, why = None, None, str(error)
         related = [source["commit"] for source in sources if target in source["targets"]]
@@ -552,7 +886,8 @@ def release_plan(g, selection, *, limit=SCAN_LIMIT):
                 "depends_on": sorted(before for before, after in edges if after == target and before in targets),
                 **unit}
 
-    rows = parallel(one, [(env, target) for target in targets for env in ENVIRONMENTS[selection]])
+    with phase("deployment coverage"):
+        rows = parallel(one, [(env, target) for target in targets for env in ENVIRONMENTS[selection]])
     environments = {}
     for env in ENVIRONMENTS[selection]:
         by_target = {row["target"]: row for row in rows if row["environment"] == env}
@@ -583,10 +918,11 @@ def release_plan(g, selection, *, limit=SCAN_LIMIT):
             state = "no_deploy_needed"
         environments[env] = {"state": state, "baseline": min(baselines, key=order.get) if baselines else None,
                              "unresolved_changes": gaps, "targets": list(by_target.values())}
-    if g.head(REF) != head:
-        raise deploy.GitHubError("Master moved while planning. Request a new plan.")
-    plan = {"schema": 1, "repository": REPO, "ref": REF, "head": head, "selection": selection,
-            "scan": {"after": floor, "through": head, "limit": limit, "older_history_unverified": floor is not None},
-            "sources": sources, "environments": environments}
-    plan["plan_id"] = digest(plan)
-    return plan
+    with phase("master head recheck"):
+        if g.head(REF) != head:
+            raise deploy.GitHubError("Master moved while planning. Request a new plan.")
+        plan = {"schema": 1, "repository": REPO, "ref": REF, "head": head, "selection": selection,
+                "scan": {"after": floor, "through": head, "limit": limit, "older_history_unverified": floor is not None},
+                "sources": sources, "environments": environments}
+        plan["plan_id"] = digest(plan)
+        return plan
