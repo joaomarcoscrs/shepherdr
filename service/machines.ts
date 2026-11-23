@@ -71,7 +71,7 @@ export class Machines {
           const d = JSON.parse(line);
           out.health = d.health;
           delete out.error;
-          if (d.limits) { out.limits = Object.fromEntries(Object.entries(d.limits).map(([k, v]) => [k, nextRead(was.limits?.[k], v)])); out.limitsAt = Date.now(); }
+          if (d.limits) { out.limits = Object.fromEntries(Object.entries(d.limits).map(([k, v]) => [k, nextRead(was.limits?.[k], v, k)])); out.limitsAt = Date.now(); }
         } else {
           // as the window's (lib/machines.js): why it couldn't, its header's red dot; the last numbers stay
           out.error = String(r?.stderr || "No answer").trim().split("\n").pop()!.slice(0, 120) || "No answer";
